@@ -10,8 +10,10 @@ import (
 
 type groupCapacityAccountRepoStub struct {
 	AccountRepository
-	rows      []GroupAccountCapacityRow
-	requested []int64
+	rows            []GroupAccountCapacityRow
+	publicRows      []PublicCapacityAccountRow
+	requested       []int64
+	publicRequested []int64
 }
 
 func (s *groupCapacityAccountRepoStub) ListSchedulableCapacityByGroupIDs(_ context.Context, groupIDs []int64) ([]GroupAccountCapacityRow, error) {
@@ -19,15 +21,26 @@ func (s *groupCapacityAccountRepoStub) ListSchedulableCapacityByGroupIDs(_ conte
 	return append([]GroupAccountCapacityRow(nil), s.rows...), nil
 }
 
+func (s *groupCapacityAccountRepoStub) ListPublicCapacityPoolAccountsByGroupIDs(_ context.Context, groupIDs []int64) ([]PublicCapacityAccountRow, error) {
+	s.publicRequested = append([]int64(nil), groupIDs...)
+	return append([]PublicCapacityAccountRow(nil), s.publicRows...), nil
+}
+
 type groupCapacityGroupRepoStub struct {
 	GroupRepository
 	groupIDs  []int64
+	groups    []Group
 	listCalls int
 }
 
 func (s *groupCapacityGroupRepoStub) ListActiveIDs(context.Context) ([]int64, error) {
 	s.listCalls++
 	return append([]int64(nil), s.groupIDs...), nil
+}
+
+func (s *groupCapacityGroupRepoStub) ListActive(context.Context) ([]Group, error) {
+	s.listCalls++
+	return append([]Group(nil), s.groups...), nil
 }
 
 type groupCapacityConcurrencyCacheStub struct {
@@ -176,4 +189,130 @@ func TestGetAllGroupCapacityBatchKeepsEmptyGroupRows(t *testing.T) {
 		{GroupID: 10},
 		{GroupID: 20, ConcurrencyMax: 4},
 	}, results)
+}
+
+func TestGetPublicCapacityPoolFiltersPublicStandardGroupsAndBucketsStatuses(t *testing.T) {
+	now := time.Now().UTC()
+	later := now.Add(time.Hour)
+	past := now.Add(-time.Hour)
+
+	accountRepo := &groupCapacityAccountRepoStub{
+		publicRows: []PublicCapacityAccountRow{
+			{
+				GroupID:     10,
+				AccountID:   1,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeOAuth,
+				Status:      StatusActive,
+				Schedulable: true,
+				Concurrency: 3,
+				Extra: map[string]any{
+					"codex_5h_used_percent": 25,
+					"codex_7d_used_percent": 50,
+				},
+			},
+			{
+				GroupID:          10,
+				AccountID:        2,
+				Platform:         PlatformOpenAI,
+				Type:             AccountTypeOAuth,
+				Status:           StatusActive,
+				Schedulable:      true,
+				Concurrency:      2,
+				RateLimitResetAt: &later,
+			},
+			{
+				GroupID:                10,
+				AccountID:              3,
+				Platform:               PlatformOpenAI,
+				Type:                   AccountTypeOAuth,
+				Status:                 StatusActive,
+				Schedulable:            true,
+				Concurrency:            2,
+				TempUnschedulableUntil: &later,
+			},
+			{
+				GroupID:     10,
+				AccountID:   4,
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeOAuth,
+				Status:      StatusError,
+				Schedulable: true,
+				Concurrency: 2,
+			},
+			{
+				GroupID:            10,
+				AccountID:          5,
+				Platform:           PlatformOpenAI,
+				Type:               AccountTypeOAuth,
+				Status:             StatusActive,
+				Schedulable:        true,
+				Concurrency:        2,
+				ExpiresAt:          &past,
+				AutoPauseOnExpired: true,
+			},
+			{
+				GroupID:     40,
+				AccountID:   6,
+				Platform:    PlatformAnthropic,
+				Type:        AccountTypeOAuth,
+				Status:      StatusActive,
+				Schedulable: true,
+				Concurrency: 4,
+				Extra: map[string]any{
+					"max_sessions":                 2,
+					"session_idle_timeout_minutes": 9,
+					"base_rpm":                     10,
+				},
+			},
+		},
+	}
+	groupRepo := &groupCapacityGroupRepoStub{
+		groups: []Group{
+			{ID: 10, Name: "Public Standard", Platform: PlatformOpenAI, Status: StatusActive, SubscriptionType: SubscriptionTypeStandard},
+			{ID: 20, Name: "Exclusive", Platform: PlatformOpenAI, Status: StatusActive, SubscriptionType: SubscriptionTypeStandard, IsExclusive: true},
+			{ID: 30, Name: "Subscription", Platform: PlatformOpenAI, Status: StatusActive, SubscriptionType: SubscriptionTypeSubscription},
+			{ID: 40, Name: "Legacy Standard", Platform: PlatformAnthropic, Status: StatusActive},
+		},
+	}
+	concurrencyCache := &groupCapacityConcurrencyCacheStub{counts: map[int64]int{1: 1, 6: 2}}
+	sessionCache := &groupCapacitySessionCacheStub{counts: map[int64]int{6: 1}}
+	rpmCache := &groupCapacityRPMCacheStub{counts: map[int64]int{6: 4}}
+	svc := NewGroupCapacityService(accountRepo, groupRepo, NewConcurrencyService(concurrencyCache), sessionCache, rpmCache)
+
+	pool, err := svc.GetPublicCapacityPool(context.Background())
+	require.NoError(t, err)
+
+	require.Equal(t, []int64{10, 40}, accountRepo.publicRequested)
+	require.Equal(t, 2, pool.Summary.GroupTotal)
+	require.Equal(t, 6, pool.Summary.AccountTotal)
+	require.Equal(t, 2, pool.Summary.AvailableAccounts)
+	require.Equal(t, 1, pool.Summary.RateLimitedAccounts)
+	require.Equal(t, 1, pool.Summary.QuotaLimitedAccounts)
+	require.Equal(t, 1, pool.Summary.ErrorAccounts)
+	require.Equal(t, 1, pool.Summary.DisabledAccounts)
+
+	require.Len(t, pool.Groups, 2)
+	first := pool.Groups[0]
+	require.Equal(t, int64(10), first.GroupID)
+	require.Equal(t, "degraded", first.Status)
+	require.Equal(t, PublicCapacityStatusCounts{
+		Normal:       1,
+		RateLimited:  1,
+		QuotaLimited: 1,
+		Error:        1,
+		Disabled:     1,
+	}, first.StatusCounts)
+	require.Equal(t, 1, first.Window5h.TrackedAccounts)
+	require.InDelta(t, 25, first.Window5h.UsedPercent, 0.001)
+	require.InDelta(t, 0.75, first.Window5h.RemainingCapacity, 0.001)
+
+	second := pool.Groups[1]
+	require.Equal(t, int64(40), second.GroupID)
+	require.Equal(t, "normal", second.Status)
+	require.Equal(t, 4, second.Capacity.Concurrency.Max)
+	require.Equal(t, 2, second.Capacity.Concurrency.Used)
+	require.Equal(t, 2, second.Capacity.Concurrency.Available)
+	require.Equal(t, []int64{6}, sessionCache.requested)
+	require.Equal(t, []int64{6}, rpmCache.requested)
 }

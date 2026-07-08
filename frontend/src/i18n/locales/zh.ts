@@ -1112,6 +1112,46 @@ export default {
     empty: {
       title: '暂无可显示的渠道',
       description: '管理员尚未配置可监控的渠道。'
+    },
+    capacityPool: {
+      title: '平台共享容量池',
+      subtitle: '只展示公开余额分组中的平台公共账号。',
+      updatedAt: '更新于 {time}',
+      groupPanelTitle: '分组容量判定',
+      groupPanelSubtitle: '共享容量池按分组独立判定，避免全局汇总掩盖单个分组不可调度。',
+      empty: '暂无公开容量分组',
+      accountMeta: '{platform} · 共 {total}，活跃 {active}',
+      schedulable: '可调度',
+      concurrencyAvailable: '并发可用',
+      accountStatus: '账号状态',
+      totalShort: '总',
+      window5h: '5h 窗口',
+      window7d: '7d 窗口',
+      sessions: '会话',
+      rpm: 'RPM',
+      windowSnapshot: '可调度快照 {available}/{tracked}',
+      windowRemaining: '可调度剩余 {value}',
+      availableShort: '可用 {value}',
+      stats: {
+        totalAccounts: '账号总数',
+        availableAccounts: '可调度账号',
+        rateLimited: '限流中',
+        quotaLimited: '限额保护',
+        errorAccounts: '异常账号'
+      },
+      groupStatus: {
+        normal: '正常',
+        degraded: '服务降级',
+        resource_tight: '资源紧张',
+        unavailable: '不可用'
+      },
+      accountState: {
+        normal: '正常',
+        rateLimited: '限流',
+        quotaLimited: '限额保护',
+        error: '错误',
+        disabled: '禁用'
+      }
     }
   },
 

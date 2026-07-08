@@ -1108,6 +1108,46 @@ export default {
     empty: {
       title: 'No channels available',
       description: 'No monitored channels have been configured yet.'
+    },
+    capacityPool: {
+      title: 'Platform Shared Capacity Pool',
+      subtitle: 'Public platform accounts in open balance groups.',
+      updatedAt: 'Updated {time}',
+      groupPanelTitle: 'Group Capacity Decision',
+      groupPanelSubtitle: 'Capacity is evaluated per public group to avoid one global issue masking a single group.',
+      empty: 'No public capacity groups available',
+      accountMeta: '{platform} · total {total}, active {active}',
+      schedulable: 'Schedulable',
+      concurrencyAvailable: 'Concurrency available',
+      accountStatus: 'Account status',
+      totalShort: 'Total',
+      window5h: '5h window',
+      window7d: '7d window',
+      sessions: 'Sessions',
+      rpm: 'RPM',
+      windowSnapshot: 'Schedulable snapshot {available}/{tracked}',
+      windowRemaining: 'Remaining {value}',
+      availableShort: 'Available {value}',
+      stats: {
+        totalAccounts: 'Total accounts',
+        availableAccounts: 'Schedulable accounts',
+        rateLimited: 'Rate limited',
+        quotaLimited: 'Quota protected',
+        errorAccounts: 'Unavailable accounts'
+      },
+      groupStatus: {
+        normal: 'Normal',
+        degraded: 'Degraded',
+        resource_tight: 'Resource tight',
+        unavailable: 'Unavailable'
+      },
+      accountState: {
+        normal: 'Normal',
+        rateLimited: 'Rate limited',
+        quotaLimited: 'Quota protected',
+        error: 'Error',
+        disabled: 'Disabled'
+      }
     }
   },
 

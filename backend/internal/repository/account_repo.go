@@ -1158,6 +1158,111 @@ func (r *accountRepository) ListSchedulableCapacityByGroupIDs(ctx context.Contex
 	return out, nil
 }
 
+func (r *accountRepository) ListPublicCapacityPoolAccountsByGroupIDs(ctx context.Context, groupIDs []int64) ([]service.PublicCapacityAccountRow, error) {
+	groupIDs = uniquePositiveInt64s(groupIDs)
+	if len(groupIDs) == 0 {
+		return []service.PublicCapacityAccountRow{}, nil
+	}
+	if r.sql == nil {
+		rows := make([]service.PublicCapacityAccountRow, 0)
+		for _, groupID := range groupIDs {
+			accounts, err := r.ListByGroup(ctx, groupID)
+			if err != nil {
+				return nil, err
+			}
+			for i := range accounts {
+				acc := &accounts[i]
+				rows = append(rows, service.PublicCapacityAccountRow{
+					GroupID:                groupID,
+					AccountID:              acc.ID,
+					Platform:               acc.Platform,
+					Type:                   acc.Type,
+					Status:                 acc.Status,
+					Schedulable:            acc.Schedulable,
+					Concurrency:            acc.Concurrency,
+					Extra:                  copyJSONMap(acc.Extra),
+					ExpiresAt:              acc.ExpiresAt,
+					AutoPauseOnExpired:     acc.AutoPauseOnExpired,
+					RateLimitResetAt:       acc.RateLimitResetAt,
+					OverloadUntil:          acc.OverloadUntil,
+					TempUnschedulableUntil: acc.TempUnschedulableUntil,
+					SessionWindowStart:     acc.SessionWindowStart,
+					SessionWindowEnd:       acc.SessionWindowEnd,
+					SessionWindowStatus:    acc.SessionWindowStatus,
+				})
+			}
+		}
+		return rows, nil
+	}
+
+	rows, err := r.sql.QueryContext(ctx, `
+		SELECT
+			ag.group_id,
+			a.id AS account_id,
+			a.platform,
+			a.type,
+			a.status,
+			a.schedulable,
+			a.concurrency,
+			COALESCE(a.extra, '{}'::jsonb)::text AS extra,
+			a.expires_at,
+			a.auto_pause_on_expired,
+			a.rate_limit_reset_at,
+			a.overload_until,
+			a.temp_unschedulable_until,
+			a.session_window_start,
+			a.session_window_end,
+			COALESCE(a.session_window_status, '') AS session_window_status
+		FROM account_groups ag
+		JOIN accounts a ON a.id = ag.account_id
+		WHERE ag.group_id = ANY($1)
+			AND a.deleted_at IS NULL
+		ORDER BY ag.group_id ASC, ag.priority ASC, a.priority ASC, a.id ASC
+	`, pq.Array(groupIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make([]service.PublicCapacityAccountRow, 0)
+	for rows.Next() {
+		var row service.PublicCapacityAccountRow
+		var extraRaw string
+		if err := rows.Scan(
+			&row.GroupID,
+			&row.AccountID,
+			&row.Platform,
+			&row.Type,
+			&row.Status,
+			&row.Schedulable,
+			&row.Concurrency,
+			&extraRaw,
+			&row.ExpiresAt,
+			&row.AutoPauseOnExpired,
+			&row.RateLimitResetAt,
+			&row.OverloadUntil,
+			&row.TempUnschedulableUntil,
+			&row.SessionWindowStart,
+			&row.SessionWindowEnd,
+			&row.SessionWindowStatus,
+		); err != nil {
+			return nil, err
+		}
+		if extraRaw != "" && extraRaw != "null" {
+			var extra map[string]any
+			if err := json.Unmarshal([]byte(extraRaw), &extra); err != nil {
+				return nil, err
+			}
+			row.Extra = extra
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (r *accountRepository) ListSchedulableByPlatform(ctx context.Context, platform string) ([]service.Account, error) {
 	now := time.Now()
 	accounts, err := r.client.Account.Query().
