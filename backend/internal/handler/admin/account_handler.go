@@ -172,6 +172,7 @@ type CheckMixedChannelRequest struct {
 type AccountWithConcurrency struct {
 	*dto.Account
 	CurrentConcurrency int                          `json:"current_concurrency"`
+	KiroBalance        *KiroRSBalanceInfo           `json:"kiro_balance,omitempty"`
 	SchedulerScore     *AccountSchedulerScore       `json:"scheduler_score,omitempty"`
 	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
 	// 以下字段仅对 Anthropic OAuth/SetupToken 账号有效，且仅在启用相应功能时返回
@@ -204,6 +205,7 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 	if account == nil {
 		return item
 	}
+	item.KiroBalance = getKiroRSBalanceForAccount(ctx, account)
 
 	if h.concurrencyService != nil {
 		if counts, err := h.concurrencyService.GetAccountConcurrencyBatch(ctx, []int64{account.ID}); err == nil {
@@ -607,6 +609,11 @@ func (h *AccountHandler) List(c *gin.Context) {
 		_ = g.Wait()
 	}
 
+	var kiroBalances map[int64]*KiroRSBalanceInfo
+	if !lite {
+		kiroBalances = getKiroRSBalancesForAccounts(c.Request.Context(), accounts)
+	}
+
 	// Build response with concurrency info
 	result := make([]AccountWithConcurrency, len(accounts))
 	for i := range accounts {
@@ -616,6 +623,9 @@ func (h *AccountHandler) List(c *gin.Context) {
 			CurrentConcurrency: concurrencyCounts[acc.ID],
 			SchedulerScore:     schedulerScores[acc.ID],
 			SchedulerScores:    schedulerGroupScores[acc.ID],
+		}
+		if kiroBalances != nil {
+			item.KiroBalance = kiroBalances[acc.ID]
 		}
 
 		// 添加窗口费用（仅当启用时）

@@ -1271,13 +1271,32 @@ func (r *accountRepository) ListSchedulableByGroupIDAndPlatforms(ctx context.Con
 
 func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetAt time.Time) error {
 	now := time.Now()
-	_, err := r.client.Account.Update().
-		Where(dbaccount.IDEQ(id)).
-		SetRateLimitedAt(now).
-		SetRateLimitResetAt(resetAt).
-		Save(ctx)
+	reason := `{"status_code":429,"matched_keyword":"rate_limit","source":"rate_limit_reset_at"}`
+	result, err := r.sql.ExecContext(ctx, `
+		UPDATE accounts
+		SET rate_limited_at = $1,
+			rate_limit_reset_at = $2,
+			temp_unschedulable_until = CASE
+				WHEN temp_unschedulable_until IS NULL OR temp_unschedulable_until < $2 THEN $2
+				ELSE temp_unschedulable_until
+			END,
+			temp_unschedulable_reason = CASE
+				WHEN temp_unschedulable_until IS NULL OR temp_unschedulable_until < $2 THEN $3
+				ELSE temp_unschedulable_reason
+			END,
+			updated_at = NOW()
+		WHERE id = $4
+			AND deleted_at IS NULL
+	`, now, resetAt, reason, id)
 	if err != nil {
 		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return service.ErrAccountNotFound
 	}
 	if err := enqueueSchedulerOutbox(ctx, r.sql, service.SchedulerOutboxEventAccountChanged, &id, nil, nil); err != nil {
 		logger.LegacyPrintf("repository.account", "[SchedulerOutbox] enqueue rate limit failed: account=%d err=%v", id, err)

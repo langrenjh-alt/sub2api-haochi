@@ -967,6 +967,7 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 			}
 		}
 	}
+	isImageTest := isImageGenerationModel(testModelID)
 
 	// Set SSE headers
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -984,11 +985,11 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 
 	switch account.Type {
 	case AccountTypeAPIKey:
-		req, err = s.buildGeminiAPIKeyRequest(ctx, account, testModelID, payload)
+		req, err = s.buildGeminiAPIKeyRequest(ctx, account, testModelID, payload, !isImageTest)
 	case AccountTypeOAuth:
-		req, err = s.buildGeminiOAuthRequest(ctx, account, testModelID, payload)
+		req, err = s.buildGeminiOAuthRequest(ctx, account, testModelID, payload, !isImageTest)
 	case AccountTypeServiceAccount:
-		req, err = s.buildGeminiServiceAccountRequest(ctx, account, testModelID, payload)
+		req, err = s.buildGeminiServiceAccountRequest(ctx, account, testModelID, payload, !isImageTest)
 	default:
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
 	}
@@ -1018,6 +1019,9 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 	}
 
 	// Process SSE stream
+	if isImageTest {
+		return s.processGeminiGenerateContentResponse(c, resp.Body)
+	}
 	return s.processGeminiStream(c, resp.Body)
 }
 
@@ -1074,7 +1078,7 @@ func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, ac
 }
 
 // buildGeminiAPIKeyRequest builds request for Gemini API Key accounts
-func (s *AccountTestService) buildGeminiAPIKeyRequest(ctx context.Context, account *Account, modelID string, payload []byte) (*http.Request, error) {
+func (s *AccountTestService) buildGeminiAPIKeyRequest(ctx context.Context, account *Account, modelID string, payload []byte, stream bool) (*http.Request, error) {
 	apiKey := account.GetCredential("api_key")
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, fmt.Errorf("no API key available")
@@ -1089,9 +1093,14 @@ func (s *AccountTestService) buildGeminiAPIKeyRequest(ctx context.Context, accou
 		return nil, err
 	}
 
-	// Use streamGenerateContent for real-time feedback
-	fullURL := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse",
-		strings.TrimRight(normalizedBaseURL, "/"), modelID)
+	action := "generateContent"
+	query := ""
+	if stream {
+		action = "streamGenerateContent"
+		query = "?alt=sse"
+	}
+	fullURL := fmt.Sprintf("%s/v1beta/models/%s:%s%s",
+		strings.TrimRight(normalizedBaseURL, "/"), modelID, action, query)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewReader(payload))
 	if err != nil {
@@ -1105,7 +1114,7 @@ func (s *AccountTestService) buildGeminiAPIKeyRequest(ctx context.Context, accou
 }
 
 // buildGeminiOAuthRequest builds request for Gemini OAuth accounts
-func (s *AccountTestService) buildGeminiOAuthRequest(ctx context.Context, account *Account, modelID string, payload []byte) (*http.Request, error) {
+func (s *AccountTestService) buildGeminiOAuthRequest(ctx context.Context, account *Account, modelID string, payload []byte, stream bool) (*http.Request, error) {
 	if s.geminiTokenProvider == nil {
 		return nil, fmt.Errorf("gemini token provider not configured")
 	}
@@ -1127,7 +1136,13 @@ func (s *AccountTestService) buildGeminiOAuthRequest(ctx context.Context, accoun
 		if err != nil {
 			return nil, err
 		}
-		fullURL := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", strings.TrimRight(normalizedBaseURL, "/"), modelID)
+		action := "generateContent"
+		query := ""
+		if stream {
+			action = "streamGenerateContent"
+			query = "?alt=sse"
+		}
+		fullURL := fmt.Sprintf("%s/v1beta/models/%s:%s%s", strings.TrimRight(normalizedBaseURL, "/"), modelID, action, query)
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(payload))
 		if err != nil {
@@ -1142,7 +1157,7 @@ func (s *AccountTestService) buildGeminiOAuthRequest(ctx context.Context, accoun
 	return s.buildCodeAssistRequest(ctx, accessToken, projectID, modelID, payload)
 }
 
-func (s *AccountTestService) buildGeminiServiceAccountRequest(ctx context.Context, account *Account, modelID string, payload []byte) (*http.Request, error) {
+func (s *AccountTestService) buildGeminiServiceAccountRequest(ctx context.Context, account *Account, modelID string, payload []byte, stream bool) (*http.Request, error) {
 	if s.geminiTokenProvider == nil {
 		return nil, fmt.Errorf("gemini token provider not configured")
 	}
@@ -1150,7 +1165,11 @@ func (s *AccountTestService) buildGeminiServiceAccountRequest(ctx context.Contex
 	if err != nil {
 		return nil, fmt.Errorf("failed to get service account access token: %w", err)
 	}
-	fullURL, err := buildVertexGeminiURL(account.VertexProjectID(), account.VertexLocation(modelID), modelID, "streamGenerateContent", true)
+	action := "generateContent"
+	if stream {
+		action = "streamGenerateContent"
+	}
+	fullURL, err := buildVertexGeminiURL(account.VertexProjectID(), account.VertexLocation(modelID), modelID, action, stream)
 	if err != nil {
 		return nil, err
 	}
@@ -1327,6 +1346,80 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 			return s.sendErrorAndEnd(c, errorMsg)
 		}
 	}
+}
+
+// processGeminiGenerateContentResponse processes a non-streaming Gemini response.
+// Some image upstreams fail reCAPTCHA on streamGenerateContent but succeed on generateContent.
+func (s *AccountTestService) processGeminiGenerateContentResponse(c *gin.Context, body io.Reader) error {
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to read response: %s", err.Error()))
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(bodyBytes, &data); err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Failed to parse response: %s", err.Error()))
+	}
+
+	// Support Gemini CLI wrapper format: {"response": {"candidates": [...]}}.
+	if resp, ok := data["response"].(map[string]any); ok && resp != nil {
+		data = resp
+	}
+
+	if errData, ok := data["error"].(map[string]any); ok {
+		errorMsg := "Unknown error"
+		if msg, ok := errData["message"].(string); ok {
+			errorMsg = msg
+		}
+		return s.sendErrorAndEnd(c, errorMsg)
+	}
+
+	emitted := false
+	if candidates, ok := data["candidates"].([]any); ok {
+		for _, candidateAny := range candidates {
+			candidate, ok := candidateAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			content, ok := candidate["content"].(map[string]any)
+			if !ok {
+				continue
+			}
+			parts, ok := content["parts"].([]any)
+			if !ok {
+				continue
+			}
+			for _, partAny := range parts {
+				part, ok := partAny.(map[string]any)
+				if !ok {
+					continue
+				}
+				if text, ok := part["text"].(string); ok && text != "" {
+					s.sendEvent(c, TestEvent{Type: "content", Text: text})
+					emitted = true
+				}
+				if inlineData, ok := part["inlineData"].(map[string]any); ok {
+					mimeType, _ := inlineData["mimeType"].(string)
+					data, _ := inlineData["data"].(string)
+					if strings.HasPrefix(strings.ToLower(mimeType), "image/") && data != "" {
+						s.sendEvent(c, TestEvent{
+							Type:     "image",
+							ImageURL: fmt.Sprintf("data:%s;base64,%s", mimeType, data),
+							MimeType: mimeType,
+						})
+						emitted = true
+					}
+				}
+			}
+		}
+	}
+
+	if !emitted {
+		return s.sendErrorAndEnd(c, "No content or image returned from Gemini generateContent response")
+	}
+
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
 }
 
 // createOpenAITestPayload creates a test payload for OpenAI Responses API

@@ -835,6 +835,17 @@ export interface TempUnschedulableStatus {
   state?: TempUnschedulableState
 }
 
+export interface KiroBalanceInfo {
+  subscription_title?: string
+  current_usage?: number
+  usage_limit?: number
+  remaining?: number
+  usage_percentage?: number
+  credential_id?: string
+  updated_at?: string
+  error?: string
+}
+
 export interface Account {
   id: number
   name: string
@@ -943,6 +954,7 @@ export interface Account {
   current_window_cost?: number | null // 当前窗口费用
   active_sessions?: number | null // 当前活跃会话数
   current_rpm?: number | null // 当前分钟 RPM 计数
+  kiro_balance?: KiroBalanceInfo | null // Kiro-rs 账号额度信息
 
   // 影子账号关系（spark 维度影子）
   parent_account_id?: number | null

@@ -28,6 +28,14 @@
       </svg>
     </CapacityBadge>
 
+    <!-- Kiro-rs 额度 -->
+    <CapacityBadge v-if="showKiroBalance" :color-class="kiroBalanceClass" :tooltip="kiroBalanceTooltip" :current="kiroBalanceCurrent" :max="kiroBalanceMax" suffix="Kiro">
+      <svg class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 3.75L4.5 7.5v9L12 20.25l7.5-3.75v-9L12 3.75z" />
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 12l7.5-4.5M12 12v8.25M12 12L4.5 7.5" />
+      </svg>
+    </CapacityBadge>
+
     <!-- API Key 账号配额限制 -->
     <QuotaBadge v-if="showDailyQuota" :used="account.quota_daily_used ?? 0" :limit="account.quota_daily_limit!" label="D" />
     <QuotaBadge v-if="showWeeklyQuota" :used="account.quota_weekly_used ?? 0" :limit="account.quota_weekly_limit!" label="W" />
@@ -169,9 +177,58 @@ const rpmTooltip = computed(() => {
   }
 })
 
+// ====== Kiro-rs 额度 ======
+const showKiroBalance = computed(() => props.account.kiro_balance != null)
+const kiroBalance = computed(() => props.account.kiro_balance)
+
+const kiroBalanceCurrent = computed(() => {
+  const balance = kiroBalance.value
+  if (!balance) return '-'
+  if (balance.error) return 'ERR'
+  return formatKiroBalanceNumber(balance.remaining ?? 0)
+})
+
+const kiroBalanceMax = computed(() => {
+  const balance = kiroBalance.value
+  if (!balance || balance.error) return '-'
+  return formatKiroBalanceNumber(balance.usage_limit ?? 0)
+})
+
+const kiroBalanceClass = computed(() => {
+  const balance = kiroBalance.value
+  if (!balance) return ''
+  if (balance.error) return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+  const limit = balance.usage_limit ?? 0
+  const remaining = balance.remaining ?? 0
+  if (limit <= 0) return 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+  const remainingRatio = remaining / limit
+  if (remainingRatio <= 0.05) return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+  if (remainingRatio <= 0.2) return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+  return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
+})
+
+const kiroBalanceTooltip = computed(() => {
+  const balance = kiroBalance.value
+  if (!balance) return ''
+  if (balance.error) return `Kiro-rs 额度获取失败：${balance.error}`
+  const title = balance.subscription_title ? `${balance.subscription_title}，` : ''
+  const used = formatKiroBalanceNumber(balance.current_usage ?? 0)
+  const limit = formatKiroBalanceNumber(balance.usage_limit ?? 0)
+  const remaining = formatKiroBalanceNumber(balance.remaining ?? 0)
+  const percent = (balance.usage_percentage ?? 0).toFixed(3)
+  return `Kiro-rs ${title}已用 ${used}/${limit}，剩余 ${remaining}，使用率 ${percent}%`
+})
+
 // 格式化费用显示
 const formatCost = (value: number | null | undefined) => {
   if (value === null || value === undefined) return '0'
+  return value.toFixed(2)
+}
+
+const formatKiroBalanceNumber = (value: number | null | undefined) => {
+  if (value === null || value === undefined) return '0'
+  if (value >= 1000) return value.toFixed(0)
+  if (value >= 100) return value.toFixed(1)
   return value.toFixed(2)
 }
 

@@ -29,12 +29,10 @@ func (r *runtimeBlockRecorder) ClearAccountSchedulingBlock(accountID int64) {
 	r.clearedIDs = append(r.clearedIDs, accountID)
 }
 
-func TestRateLimitService_HandleUpstreamError_OpenAI403FirstHitTempUnschedulable(t *testing.T) {
+func TestRateLimitService_HandleUpstreamError_OpenAI403FirstHitRetriesWithoutTempUnschedulable(t *testing.T) {
 	repo := &rateLimitAccountRepoStub{}
-	counter := &openAI403CounterCacheStub{counts: []int64{1}}
 	blocker := &runtimeBlockRecorder{}
 	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
-	service.SetOpenAI403CounterCache(counter)
 	service.SetAccountRuntimeBlocker(blocker)
 	account := &Account{
 		ID:       301,
@@ -52,16 +50,14 @@ func TestRateLimitService_HandleUpstreamError_OpenAI403FirstHitTempUnschedulable
 
 	require.True(t, shouldDisable)
 	require.Equal(t, 0, repo.setErrorCalls)
-	require.Equal(t, 1, repo.tempCalls)
-	require.Contains(t, repo.lastTempReason, "temporary edge rejection")
-	require.Contains(t, repo.lastTempReason, "(1/3)")
-	require.Len(t, blocker.accounts, 1)
-	require.Equal(t, account.ID, blocker.accounts[0].ID)
-	require.Equal(t, "openai_403_temp", blocker.reasons[0])
-	require.True(t, blocker.until[0].After(time.Now()))
+	require.Equal(t, 0, repo.tempCalls)
+	require.Empty(t, repo.lastTempReason)
+	require.Empty(t, blocker.accounts)
+	require.Empty(t, blocker.reasons)
+	require.Empty(t, blocker.until)
 }
 
-func TestRateLimitService_HandleUpstreamError_OpenAI403ThresholdDisables(t *testing.T) {
+func TestRateLimitService_HandleUpstreamError_OpenAI403ThresholdDoesNotDisable(t *testing.T) {
 	repo := &rateLimitAccountRepoStub{}
 	counter := &openAI403CounterCacheStub{counts: []int64{3}}
 	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
@@ -81,8 +77,7 @@ func TestRateLimitService_HandleUpstreamError_OpenAI403ThresholdDisables(t *test
 	)
 
 	require.True(t, shouldDisable)
-	require.Equal(t, 1, repo.setErrorCalls)
+	require.Equal(t, 0, repo.setErrorCalls)
 	require.Equal(t, 0, repo.tempCalls)
-	require.Contains(t, repo.lastErrorMsg, "workspace forbidden by policy")
-	require.Contains(t, repo.lastErrorMsg, "consecutive_403=3/3")
+	require.Empty(t, repo.lastErrorMsg)
 }

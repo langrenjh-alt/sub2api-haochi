@@ -862,7 +862,7 @@ const load = async () => {
   hasPendingListSync.value = false
   resetAutoRefreshCache()
   pendingTodayStatsRefresh.value = false
-  if (isFirstLoad.value) {
+  if (isFirstLoad.value && !isColumnVisible('capacity')) {
     requestParams.lite = '1'
   }
   await baseLoad()

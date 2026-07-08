@@ -701,6 +701,28 @@ func (s *AccountRepoSuite) TestSetRateLimited() {
 	s.Require().NotNil(got.RateLimitedAt)
 	s.Require().NotNil(got.RateLimitResetAt)
 	s.Require().WithinDuration(resetAt, *got.RateLimitResetAt, time.Second)
+	s.Require().NotNil(got.TempUnschedulableUntil)
+	s.Require().WithinDuration(resetAt, *got.TempUnschedulableUntil, time.Second)
+	s.Require().Contains(got.TempUnschedulableReason, `"status_code":429`)
+	s.Require().False(got.IsSchedulable())
+}
+
+func (s *AccountRepoSuite) TestSetRateLimitedDoesNotShortenExistingTempUnschedulable() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "acc-rl-longer-temp"})
+	longerUntil := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	shorterResetAt := time.Now().Add(30 * time.Minute).UTC().Truncate(time.Second)
+	reason := "existing longer block"
+
+	s.Require().NoError(s.repo.SetTempUnschedulable(s.ctx, account.ID, longerUntil, reason))
+	s.Require().NoError(s.repo.SetRateLimited(s.ctx, account.ID, shorterResetAt))
+
+	got, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().NotNil(got.RateLimitResetAt)
+	s.Require().WithinDuration(shorterResetAt, *got.RateLimitResetAt, time.Second)
+	s.Require().NotNil(got.TempUnschedulableUntil)
+	s.Require().WithinDuration(longerUntil, *got.TempUnschedulableUntil, time.Second)
+	s.Require().Equal(reason, got.TempUnschedulableReason)
 }
 
 func (s *AccountRepoSuite) TestClearRateLimit() {

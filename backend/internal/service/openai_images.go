@@ -573,8 +573,15 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 		return nil, err
 	}
 	upstreamModel := account.GetMappedModel(requestModel)
-	if err := validateOpenAIImagesModel(upstreamModel); err != nil {
-		return nil, err
+	// Allow account-level aliases for upstream image models. Some OpenAI-compatible
+	// providers expose non-"gpt-image-*" model IDs for the same images endpoint.
+	// We still require the inbound/public model to be a valid image model.
+	if upstreamModel == requestModel {
+		if err := validateOpenAIImagesModel(upstreamModel); err != nil {
+			return nil, err
+		}
+	} else if strings.TrimSpace(upstreamModel) == "" {
+		return nil, fmt.Errorf("mapped upstream image model is empty")
 	}
 	logger.LegacyPrintf(
 		"service.openai_gateway",
