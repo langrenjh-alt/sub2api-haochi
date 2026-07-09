@@ -21,10 +21,13 @@ func testConfig() *config.Config {
 
 // mockAccountRepoForPlatform 单平台测试用的 mock
 type mockAccountRepoForPlatform struct {
-	accounts         []Account
-	accountsByID     map[int64]*Account
-	listPlatformFunc func(ctx context.Context, platform string) ([]Account, error)
-	getByIDCalls     int
+	accounts                    []Account
+	accountsByID                map[int64]*Account
+	listPlatformFunc            func(ctx context.Context, platform string) ([]Account, error)
+	getByIDCalls                int
+	setTempUnschedulableCalls   int
+	lastTempUnschedulableID     int64
+	lastTempUnschedulableReason string
 }
 
 func (m *mockAccountRepoForPlatform) GetByID(ctx context.Context, id int64) (*Account, error) {
@@ -166,6 +169,9 @@ func (m *mockAccountRepoForPlatform) SetOverloaded(ctx context.Context, id int64
 	return nil
 }
 func (m *mockAccountRepoForPlatform) SetTempUnschedulable(ctx context.Context, id int64, until time.Time, reason string) error {
+	m.setTempUnschedulableCalls++
+	m.lastTempUnschedulableID = id
+	m.lastTempUnschedulableReason = reason
 	return nil
 }
 func (m *mockAccountRepoForPlatform) ClearTempUnschedulable(ctx context.Context, id int64) error {

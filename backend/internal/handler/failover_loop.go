@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// TempUnscheduler 用于 HandleFailoverError 中同账号重试耗尽后的临时封禁。
+// TempUnscheduler 用于 HandleFailoverError 中同账号重试耗尽后的错误冷却策略。
 // GatewayService 隐式实现此接口。
 type TempUnscheduler interface {
 	TempUnscheduleRetryableError(ctx context.Context, accountID int64, failoverErr *service.UpstreamFailoverError)
@@ -91,7 +91,7 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverContinue
 	}
 
-	// 同账号重试用尽，执行临时封禁
+	// 同账号重试用尽，按错误类型执行冷却策略。
 	if failoverErr.RetryableOnSameAccount {
 		gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
 	}
