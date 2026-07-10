@@ -550,8 +550,10 @@ func applyPublicCapacityAccount(group *PublicCapacityGroupSummary, acc *Account,
 		group.Capacity.RPM.Used += positiveInt(runtime.rpm)
 	}
 
-	applyPublicCapacityWindow(&group.Window5h, acc, "codex_5h_used_percent", runtime.windowCost)
-	applyPublicCapacityWindow(&group.Window7d, acc, "codex_7d_used_percent", 0)
+	if status == publicCapacityStatusNormal {
+		applyPublicCapacityWindow(&group.Window5h, acc, "codex_5h_used_percent", runtime.windowCost)
+		applyPublicCapacityWindow(&group.Window7d, acc, "codex_7d_used_percent", 0)
+	}
 }
 
 func applyPublicCapacityWindow(window *PublicCapacityWindowSummary, acc *Account, key string, currentWindowCost float64) {
