@@ -1,13 +1,13 @@
-# Local Changes Against Official sub2api v0.1.149
+# Local Changes Against Official sub2api v0.1.150
 
-This repository is based on official `Wei-Shaw/sub2api` release `v0.1.149`.
+This repository is based on official `Wei-Shaw/sub2api` release `v0.1.150`.
 
-- Base commit: `dd1a116f` (`v0.1.149`)
-- Working branch: `merge-user-changes-v0.1.149`
+- Base commit: `0dec1ad2` (`v0.1.150`)
+- Working branch: `merge-user-changes-v0.1.150`
 - Original local change bundle: `E:\号池sub2api\改动`
 - Original local commits: `f1a65550`, `66701c1c`, `46781d3a`
-- Last upstream merge: 2026-07-10 (`v0.1.146` -> `v0.1.149`)
-- Fork build version: `backend/cmd/server/VERSION` is pinned to `0.1.149` because the merge commit is not an exact release tag.
+- Last upstream merge: 2026-07-10 (`v0.1.149` -> `v0.1.150`)
+- Fork build version: `backend/cmd/server/VERSION` is pinned to `0.1.150` because the merge commit is not an exact release tag.
 - Purpose: preserve local behavior when upgrading to a newer official release.
 
 ## Kiro and Compatibility File List
@@ -222,7 +222,7 @@ Behavior:
 
 - `502 Bad Gateway` retryable failures return from `TempUnscheduleRetryableError` without writing account state.
 - `400` Google project configuration failures keep their existing temporary cooldown.
-- The Antigravity `tempUnscheduleEmptyResponse` helper remains removed (in `antigravity_gateway_retry.go` as of `v0.1.149`).
+- The Antigravity `tempUnscheduleEmptyResponse` helper remains removed (in `antigravity_gateway_retry.go` as of `v0.1.150`).
 
 Affected files:
 
@@ -234,7 +234,7 @@ Affected files:
 
 Upgrade notes:
 
-- Official `v0.1.149` split Antigravity code across multiple files; preserve this behavior in the new retry file rather than restoring the old monolithic service file.
+- Official `v0.1.149` split Antigravity code across multiple files; this structure remains in `v0.1.150`, so preserve the behavior in the new retry file rather than restoring the old monolithic service file.
 - Keep `RetryableOnSameAccount` enabled so the bounded in-request retry/failover loop still runs.
 
 ## Verification Commands Used
@@ -260,7 +260,7 @@ pnpm run build
 
 Known warnings:
 
-- `git diff --check` passes after the `v0.1.149` merge.
+- `git diff --check` passes after the `v0.1.150` merge.
 - `pnpm install` may warn that some dependency build scripts are ignored depending on local pnpm settings.
 - `pnpm run build` may emit existing Vite chunk-size/dynamic-import warnings.
 - Integration tests still require PostgreSQL and Redis and are not part of the local no-service verification above.
