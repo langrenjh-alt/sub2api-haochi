@@ -1,13 +1,13 @@
-# Local Changes Against Official sub2api v0.1.150
+# Local Changes Against Official sub2api v0.1.151
 
-This repository is based on official `Wei-Shaw/sub2api` release `v0.1.150`.
+This repository is based on official `Wei-Shaw/sub2api` release `v0.1.151`.
 
-- Base commit: `0dec1ad2` (`v0.1.150`)
-- Working branch: `merge-user-changes-v0.1.150`
+- Base commit: `deff3123` (`v0.1.151`)
+- Working branch: `merge-user-changes-v0.1.151`
 - Original local change bundle: `E:\号池sub2api\改动`
 - Original local commits: `f1a65550`, `66701c1c`, `46781d3a`
-- Last upstream merge: 2026-07-10 (`v0.1.149` -> `v0.1.150`)
-- Fork build version: `backend/cmd/server/VERSION` is pinned to `0.1.150` because the merge commit is not an exact release tag.
+- Last upstream merge: 2026-07-10 (`v0.1.150` -> `v0.1.151`)
+- Fork build version: `backend/cmd/server/VERSION` is pinned to `0.1.151` because the upstream `v0.1.151` tag still contains `0.1.150` and the merge commit is not an exact release tag.
 - Purpose: preserve local behavior when upgrading to a newer official release.
 
 ## Kiro and Compatibility File List
