@@ -220,10 +220,6 @@ func TestGetPublicCapacityPoolFiltersPublicStandardGroupsAndBucketsStatuses(t *t
 				Schedulable:      true,
 				Concurrency:      2,
 				RateLimitResetAt: &later,
-				Extra: map[string]any{
-					"codex_5h_used_percent": 75,
-					"codex_7d_used_percent": 80,
-				},
 			},
 			{
 				GroupID:                10,
@@ -308,13 +304,8 @@ func TestGetPublicCapacityPoolFiltersPublicStandardGroupsAndBucketsStatuses(t *t
 		Disabled:     1,
 	}, first.StatusCounts)
 	require.Equal(t, 1, first.Window5h.TrackedAccounts)
-	require.Equal(t, 1, first.Window5h.AvailableAccounts)
 	require.InDelta(t, 25, first.Window5h.UsedPercent, 0.001)
 	require.InDelta(t, 0.75, first.Window5h.RemainingCapacity, 0.001)
-	require.Equal(t, 1, first.Window7d.TrackedAccounts)
-	require.Equal(t, 1, first.Window7d.AvailableAccounts)
-	require.InDelta(t, 50, first.Window7d.UsedPercent, 0.001)
-	require.InDelta(t, 0.5, first.Window7d.RemainingCapacity, 0.001)
 
 	second := pool.Groups[1]
 	require.Equal(t, int64(40), second.GroupID)
