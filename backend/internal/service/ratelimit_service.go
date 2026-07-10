@@ -197,9 +197,12 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		}
 	}
 
-	// 先尝试临时不可调度规则（401除外）
-	// 如果匹配成功，直接返回，不执行后续禁用逻辑
-	if statusCode != 401 {
+	// 先尝试临时不可调度规则（401除外）。OpenAI 的确定性凭证失效 403
+	// 必须继续进入永久错误分支，不能被宽泛的自定义 403 冷却规则截获。
+	permanentOpenAICredential403 := statusCode == http.StatusForbidden &&
+		account.Platform == PlatformOpenAI &&
+		isOpenAIPermanentCredential403(responseBody)
+	if statusCode != 401 && !permanentOpenAICredential403 {
 		if s.tryTempUnschedulable(ctx, account, statusCode, responseBody) {
 			return true
 		}
@@ -805,6 +808,24 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 }
 
 func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte) (shouldDisable bool) {
+	if isOpenAIPermanentCredential403(responseBody) {
+		authAccount := account
+		if resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account); err == nil && resolved != nil {
+			authAccount = resolved
+		} else if err != nil {
+			slog.Warn("openai_403_resolve_credential_owner_failed", "account_id", account.ID, "error", err)
+		}
+
+		msg := buildForbiddenErrorMessage(
+			"Workspace membership invalid (403):",
+			upstreamMsg,
+			responseBody,
+			"personal access token owner is not an active workspace member",
+		)
+		s.handleAuthError(ctx, authAccount, msg)
+		return true
+	}
+
 	msg := buildForbiddenErrorMessage(
 		"Access forbidden (403):",
 		upstreamMsg,
@@ -818,6 +839,16 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 		"error", msg,
 	)
 	return true
+}
+
+func isOpenAIPermanentCredential403(responseBody []byte) bool {
+	const credentialErrorCode = "biscuit_baker_service_auth_credential_error_status"
+	if strings.EqualFold(strings.TrimSpace(extractUpstreamErrorCode(responseBody)), credentialErrorCode) {
+		return true
+	}
+
+	message := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(responseBody)))
+	return strings.Contains(message, "personal access token owner is not an active member of the selected workspace")
 }
 
 // handleAntigravity403 处理 Antigravity 平台的 403 错误

@@ -149,7 +149,7 @@ Upgrade notes:
 
 ### 5. OpenAI 403 Retry Behavior
 
-OpenAI 403 is customized to never disable or temporarily unschedule the account.
+OpenAI 403 is customized to keep retrying without disabling the account unless the response identifies a permanent credential-owner failure.
 
 Behavior before local change:
 
@@ -161,23 +161,28 @@ Local behavior:
 
 - No `OpenAI 403 temporary cooldown (...)` reason is written.
 - No temporary unschedulable state is set for OpenAI 403.
-- No account error/disabled state is set for OpenAI 403, even after repeated 403 responses.
+- Generic OpenAI 403 responses do not set account error/disabled state, even after repeated failures.
+- `biscuit_baker_service_auth_credential_error_status` is treated as permanent: the credential owner is marked as error when the personal access token owner is no longer an active member of the selected workspace.
+- The permanent credential error takes precedence over user-configured temporary-unschedulable rules.
 - The function still returns the failover/retry signal, so existing upstream retry/failover logic can continue trying another attempt/account.
 - Log event is now `openai_403_retry_without_account_disable`.
 
 Affected files:
 
+- `backend/internal/service/account_test_service.go`
+- `backend/internal/service/account_test_service_openai_403_test.go`
 - `backend/internal/service/ratelimit_service.go`
 - `backend/internal/service/ratelimit_service_403_test.go`
 
 Important note:
 
 - This is not an infinite loop inside a single HTTP request. Existing gateway retry/failover limits still bound each request.
-- The "infinite retry" behavior here means OpenAI 403 will not create persistent account cooldown/disable state, so future requests can keep retrying normally.
+- The "infinite retry" behavior applies to generic OpenAI 403 responses; deterministic credential-owner failures are disabled immediately.
 
 Upgrade notes:
 
-- In `handleOpenAI403`, keep building the 403 message for logging, but do not:
+- In `handleOpenAI403`, preserve the permanent credential-owner exception before the generic retry path.
+- For generic OpenAI 403 responses, keep building the 403 message for logging, but do not:
   - increment/check the OpenAI 403 counter
   - call `SetTempUnschedulable`
   - call `handleAuthError`
@@ -287,10 +292,11 @@ When a newer official version is released:
    - channel capacity card and `channelStatus.capacityPool` locale keys
 5. Run the verification commands above.
 6. Manually test the admin account list with the capacity column visible.
-7. Manually test an OpenAI 403 response and confirm:
+7. Manually test a generic OpenAI 403 response and confirm:
    - no `OpenAI 403 temporary cooldown` reason appears
    - account is not marked temporarily unschedulable
    - account is not disabled after repeated OpenAI 403 responses
+8. Test `biscuit_baker_service_auth_credential_error_status` and confirm the credential owner is marked as error immediately.
 
 ## Recommended Git Preservation
 
