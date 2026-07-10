@@ -1,13 +1,16 @@
-# Local Changes Against Official sub2api v0.1.146
+# Local Changes Against Official sub2api v0.1.149
 
-This repository is based on official `Wei-Shaw/sub2api` release `v0.1.146`.
+This repository is based on official `Wei-Shaw/sub2api` release `v0.1.149`.
 
-- Base commit: `d7a6a45` (`v0.1.146`)
-- Working branch: `merge-user-changes-v0.1.146`
+- Base commit: `dd1a116f` (`v0.1.149`)
+- Working branch: `merge-user-changes-v0.1.149`
 - Original local change bundle: `E:\号池sub2api\改动`
+- Original local commits: `f1a65550`, `66701c1c`, `46781d3a`
+- Last upstream merge: 2026-07-10 (`v0.1.146` -> `v0.1.149`)
+- Fork build version: `backend/cmd/server/VERSION` is pinned to `0.1.149` because the merge commit is not an exact release tag.
 - Purpose: preserve local behavior when upgrading to a newer official release.
 
-## Changed File List
+## Kiro and Compatibility File List
 
 Modified files:
 
@@ -21,6 +24,7 @@ Modified files:
 - `backend/internal/service/openai_images.go`
 - `backend/internal/service/ratelimit_service.go`
 - `backend/internal/service/ratelimit_service_403_test.go`
+- `backend/internal/service/ratelimit_service_openai_test.go`
 - `frontend/src/components/account/AccountCapacityCell.vue`
 - `frontend/src/types/index.ts`
 - `frontend/src/views/admin/AccountsView.vue`
@@ -180,16 +184,68 @@ Upgrade notes:
   - append `consecutive_403=...`
 - Keep returning `true` from `handleOpenAI403` so callers still enter failover/retry handling.
 
+### 6. Public Capacity Pool on Channel Status
+
+Adds a user-facing shared capacity view for public standard groups.
+
+Behavior:
+
+- Exposes `GET /api/v1/channel-monitors/capacity-pool` when channel monitoring is enabled.
+- Aggregates schedulable account state, concurrency, session/RPM limits, and 5h/7d windows per public group.
+- Keeps each group independent so one unhealthy group does not hide the capacity of another.
+- Displays the result on the user channel status page with English and Chinese translations.
+
+Affected files include:
+
+- `backend/internal/service/group_capacity_service.go`
+- `backend/internal/repository/account_repo.go`
+- `backend/internal/handler/channel_monitor_user_handler.go`
+- `backend/internal/server/routes/user.go`
+- `backend/cmd/server/wire_gen.go`
+- `frontend/src/api/channelMonitor.ts`
+- `frontend/src/components/user/monitor/ChannelCapacityPoolCard.vue`
+- `frontend/src/i18n/locales/en/dashboard.ts`
+- `frontend/src/i18n/locales/zh/dashboard.ts`
+- `frontend/src/views/user/ChannelStatusView.vue`
+
+Upgrade notes:
+
+- Preserve `NewGroupCapacityService` in Wire output.
+- If upstream reorganizes locale files, migrate `channelStatus.capacityPool` into the new dashboard locale module.
+- Preserve both repository paths: SQL-backed batch loading and the repository fallback used by tests.
+
+### 7. Empty Stream Retry Without Persistent Cooldown
+
+Empty stream or empty response failures remain retryable, but must not temporarily unschedule the account after same-account retries are exhausted.
+
+Behavior:
+
+- `502 Bad Gateway` retryable failures return from `TempUnscheduleRetryableError` without writing account state.
+- `400` Google project configuration failures keep their existing temporary cooldown.
+- The Antigravity `tempUnscheduleEmptyResponse` helper remains removed (in `antigravity_gateway_retry.go` as of `v0.1.149`).
+
+Affected files:
+
+- `backend/internal/handler/failover_loop.go`
+- `backend/internal/service/antigravity_gateway_retry.go`
+- `backend/internal/service/gateway_service.go`
+- `backend/internal/service/gateway_temp_unschedule_test.go`
+- `backend/internal/service/gateway_multiplatform_test.go`
+
+Upgrade notes:
+
+- Official `v0.1.149` split Antigravity code across multiple files; preserve this behavior in the new retry file rather than restoring the old monolithic service file.
+- Keep `RetryableOnSameAccount` enabled so the bounded in-request retry/failover loop still runs.
+
 ## Verification Commands Used
 
 Backend:
 
 ```powershell
 cd E:\号池sub2api\sub2api\backend
-go test ./internal/handler/admin ./internal/handler/dto ./internal/service ./internal/repository
-go test -tags=integration ./internal/repository -run "TestAccountRepoSuite/TestSetRateLimited"
-go test -tags=unit ./internal/service -run "TestRateLimitService_HandleUpstreamError_OpenAI403"
-go test ./internal/service
+go test ./internal/handler/admin ./internal/handler/dto ./internal/handler ./internal/service ./internal/repository ./internal/server ./cmd/server
+go test -tags=unit ./...
+go test -tags=unit ./internal/service -run 403 -count=1
 ```
 
 Frontend:
@@ -198,14 +254,16 @@ Frontend:
 cd E:\号池sub2api\sub2api\frontend
 pnpm install --frozen-lockfile
 pnpm run typecheck
+pnpm test:run
 pnpm run build
 ```
 
 Known warnings:
 
-- `git diff --check` reports only CRLF replacement warnings for frontend files.
+- `git diff --check` passes after the `v0.1.149` merge.
 - `pnpm install` may warn that some dependency build scripts are ignored depending on local pnpm settings.
 - `pnpm run build` may emit existing Vite chunk-size/dynamic-import warnings.
+- Integration tests still require PostgreSQL and Redis and are not part of the local no-service verification above.
 
 ## Suggested Upgrade Workflow
 
@@ -219,11 +277,14 @@ When a newer official version is released:
    - OpenAI 403 behavior
    - account test/image compatibility
    - `SetRateLimited` scheduling behavior
+   - public group capacity aggregation and route wiring
+   - empty-response retry without a persistent cooldown
 4. Then apply frontend changes:
    - `KiroBalanceInfo`
    - `Account.kiro_balance`
    - `AccountCapacityCell.vue` Kiro badge
    - `AccountsView.vue` first-load `lite` condition
+   - channel capacity card and `channelStatus.capacityPool` locale keys
 5. Run the verification commands above.
 6. Manually test the admin account list with the capacity column visible.
 7. Manually test an OpenAI 403 response and confirm:
