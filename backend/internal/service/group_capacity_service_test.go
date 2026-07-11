@@ -275,7 +275,14 @@ func TestGetPublicCapacityPoolFiltersPublicStandardGroupsAndBucketsStatuses(t *t
 			{ID: 40, Name: "Legacy Standard", Platform: PlatformAnthropic, Status: StatusActive},
 		},
 	}
-	concurrencyCache := &groupCapacityConcurrencyCacheStub{counts: map[int64]int{1: 1, 6: 2}}
+	concurrencyCache := &groupCapacityConcurrencyCacheStub{counts: map[int64]int{
+		1: 1,
+		2: 1,
+		3: 1,
+		4: 1,
+		5: 1,
+		6: 2,
+	}}
 	sessionCache := &groupCapacitySessionCacheStub{counts: map[int64]int{6: 1}}
 	rpmCache := &groupCapacityRPMCacheStub{counts: map[int64]int{6: 4}}
 	svc := NewGroupCapacityService(accountRepo, groupRepo, NewConcurrencyService(concurrencyCache), sessionCache, rpmCache)
@@ -291,6 +298,9 @@ func TestGetPublicCapacityPoolFiltersPublicStandardGroupsAndBucketsStatuses(t *t
 	require.Equal(t, 1, pool.Summary.QuotaLimitedAccounts)
 	require.Equal(t, 1, pool.Summary.ErrorAccounts)
 	require.Equal(t, 1, pool.Summary.DisabledAccounts)
+	require.Equal(t, 15, pool.Summary.Capacity.Concurrency.Max)
+	require.Equal(t, 7, pool.Summary.Capacity.Concurrency.Used)
+	require.Equal(t, 4, pool.Summary.Capacity.Concurrency.Available)
 
 	require.Len(t, pool.Groups, 2)
 	first := pool.Groups[0]
@@ -303,6 +313,9 @@ func TestGetPublicCapacityPoolFiltersPublicStandardGroupsAndBucketsStatuses(t *t
 		Error:        1,
 		Disabled:     1,
 	}, first.StatusCounts)
+	require.Equal(t, 11, first.Capacity.Concurrency.Max)
+	require.Equal(t, 5, first.Capacity.Concurrency.Used)
+	require.Equal(t, 2, first.Capacity.Concurrency.Available)
 	require.Equal(t, 1, first.Window5h.TrackedAccounts)
 	require.InDelta(t, 25, first.Window5h.UsedPercent, 0.001)
 	require.InDelta(t, 0.75, first.Window5h.RemainingCapacity, 0.001)

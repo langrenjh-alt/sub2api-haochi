@@ -520,6 +520,9 @@ func applyPublicCapacityAccount(group *PublicCapacityGroupSummary, acc *Account,
 	}
 	if status == publicCapacityStatusNormal {
 		group.AvailableAccounts++
+		group.Capacity.Concurrency.Available += nonNegative(
+			positiveInt(acc.Concurrency) - positiveInt(runtime.concurrency),
+		)
 	}
 
 	switch status {
@@ -599,7 +602,6 @@ func publicCapacityUsagePercentWithPresence(acc *Account, key string, currentWin
 func (s *GroupCapacityService) finalizePublicCapacityPool(pool *PublicCapacityPool) {
 	for i := range pool.Groups {
 		group := &pool.Groups[i]
-		group.Capacity.Concurrency.Available = nonNegative(group.Capacity.Concurrency.Max - group.Capacity.Concurrency.Used)
 		group.Capacity.Sessions.Available = nonNegative(group.Capacity.Sessions.Max - group.Capacity.Sessions.Used)
 		group.Capacity.RPM.Available = nonNegative(group.Capacity.RPM.Max - group.Capacity.RPM.Used)
 		finalizePublicCapacityWindow(&group.Window5h)
@@ -620,6 +622,7 @@ func (s *GroupCapacityService) finalizePublicCapacityPool(pool *PublicCapacityPo
 		pool.Summary.DisabledAccounts += group.StatusCounts.Disabled
 		pool.Summary.Capacity.Concurrency.Used += group.Capacity.Concurrency.Used
 		pool.Summary.Capacity.Concurrency.Max += group.Capacity.Concurrency.Max
+		pool.Summary.Capacity.Concurrency.Available += group.Capacity.Concurrency.Available
 		pool.Summary.Capacity.Sessions.Used += group.Capacity.Sessions.Used
 		pool.Summary.Capacity.Sessions.Max += group.Capacity.Sessions.Max
 		pool.Summary.Capacity.RPM.Used += group.Capacity.RPM.Used
@@ -636,7 +639,6 @@ func (s *GroupCapacityService) finalizePublicCapacityPool(pool *PublicCapacityPo
 			pool.Summary.GroupHealthCounts.Unavailable++
 		}
 	}
-	pool.Summary.Capacity.Concurrency.Available = nonNegative(pool.Summary.Capacity.Concurrency.Max - pool.Summary.Capacity.Concurrency.Used)
 	pool.Summary.Capacity.Sessions.Available = nonNegative(pool.Summary.Capacity.Sessions.Max - pool.Summary.Capacity.Sessions.Used)
 	pool.Summary.Capacity.RPM.Available = nonNegative(pool.Summary.Capacity.RPM.Max - pool.Summary.Capacity.RPM.Used)
 }
