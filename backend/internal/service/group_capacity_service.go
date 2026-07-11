@@ -520,6 +520,8 @@ func applyPublicCapacityAccount(group *PublicCapacityGroupSummary, acc *Account,
 	}
 	if status == publicCapacityStatusNormal {
 		group.AvailableAccounts++
+		group.Capacity.Concurrency.Max += positiveInt(acc.Concurrency)
+		group.Capacity.Concurrency.Used += positiveInt(runtime.concurrency)
 		group.Capacity.Concurrency.Available += nonNegative(
 			positiveInt(acc.Concurrency) - positiveInt(runtime.concurrency),
 		)
@@ -537,9 +539,6 @@ func applyPublicCapacityAccount(group *PublicCapacityGroupSummary, acc *Account,
 	case publicCapacityStatusDisabled:
 		group.StatusCounts.Disabled++
 	}
-
-	group.Capacity.Concurrency.Max += positiveInt(acc.Concurrency)
-	group.Capacity.Concurrency.Used += positiveInt(runtime.concurrency)
 
 	maxSessions := acc.GetMaxSessions()
 	if maxSessions > 0 {

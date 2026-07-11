@@ -298,8 +298,8 @@ func TestGetPublicCapacityPoolFiltersPublicStandardGroupsAndBucketsStatuses(t *t
 	require.Equal(t, 1, pool.Summary.QuotaLimitedAccounts)
 	require.Equal(t, 1, pool.Summary.ErrorAccounts)
 	require.Equal(t, 1, pool.Summary.DisabledAccounts)
-	require.Equal(t, 15, pool.Summary.Capacity.Concurrency.Max)
-	require.Equal(t, 7, pool.Summary.Capacity.Concurrency.Used)
+	require.Equal(t, 7, pool.Summary.Capacity.Concurrency.Max)
+	require.Equal(t, 3, pool.Summary.Capacity.Concurrency.Used)
 	require.Equal(t, 4, pool.Summary.Capacity.Concurrency.Available)
 
 	require.Len(t, pool.Groups, 2)
@@ -313,8 +313,8 @@ func TestGetPublicCapacityPoolFiltersPublicStandardGroupsAndBucketsStatuses(t *t
 		Error:        1,
 		Disabled:     1,
 	}, first.StatusCounts)
-	require.Equal(t, 11, first.Capacity.Concurrency.Max)
-	require.Equal(t, 5, first.Capacity.Concurrency.Used)
+	require.Equal(t, 3, first.Capacity.Concurrency.Max)
+	require.Equal(t, 1, first.Capacity.Concurrency.Used)
 	require.Equal(t, 2, first.Capacity.Concurrency.Available)
 	require.Equal(t, 1, first.Window5h.TrackedAccounts)
 	require.InDelta(t, 25, first.Window5h.UsedPercent, 0.001)
