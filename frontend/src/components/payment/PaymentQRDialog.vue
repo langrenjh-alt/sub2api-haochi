@@ -116,6 +116,8 @@ const creditedAmountSymbol = currencySymbol('USD')
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let countdownTimer: ReturnType<typeof setInterval> | null = null
+let pollGeneration = 0
+let activePoll: Promise<void> | null = null
 let verifyAttempts = 0
 let lastVerifyAt = 0
 
@@ -195,20 +197,36 @@ async function renderQR() {
   }
 }
 
-async function pollStatus() {
-  if (!props.orderId) return
-  let order = await paymentStore.pollOrderStatus(props.orderId)
-  if (!order) return
-  order = await tryRecoverPendingOrder(order)
-  if (order.status === 'COMPLETED' || order.status === 'PAID') {
-    cleanup()
-    paidOrder.value = order
-    success.value = true
-    emit('success')
-  } else if (order.status === 'EXPIRED' || order.status === 'CANCELLED' || order.status === 'FAILED') {
-    cleanup()
-    expired.value = true
-  }
+function pollStatus(): Promise<void> {
+  if (!props.show || !props.orderId || !pollTimer) return Promise.resolve()
+  if (activePoll) return activePoll
+  const generation = pollGeneration
+  const isCurrent = () => props.show && Boolean(pollTimer) && generation === pollGeneration
+
+  const request = (async () => {
+    try {
+      let order = await paymentStore.pollOrderStatus(props.orderId)
+      if (!order || !isCurrent()) return
+      order = await tryRecoverPendingOrder(order)
+      if (!isCurrent()) return
+      if (order.status === 'COMPLETED' || order.status === 'PAID') {
+        paidOrder.value = order
+        success.value = true
+        cleanup()
+        emit('success')
+      } else if (order.status === 'EXPIRED' || order.status === 'CANCELLED' || order.status === 'FAILED') {
+        expired.value = true
+        cleanup()
+      }
+    } catch {
+      // Polling is best-effort and continues on the next interval.
+    }
+  })()
+  const tracked = request.finally(() => {
+    if (activePoll === tracked) activePoll = null
+  })
+  activePoll = tracked
+  return tracked
 }
 
 async function tryRecoverPendingOrder(order: PaymentOrder): Promise<PaymentOrder> {
@@ -272,11 +290,14 @@ function handleDone() {
 }
 
 function cleanup() {
+  pollGeneration += 1
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null }
+  activePoll = null
 }
 
 function init() {
+  cleanup()
   // Reset state
   success.value = false
   paidOrder.value = null

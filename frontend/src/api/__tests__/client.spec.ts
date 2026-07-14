@@ -292,6 +292,132 @@ describe('API Client', () => {
         writable: true,
       })
     })
+
+    it('rejects a stale 401 without touching the newer session', async () => {
+      localStorage.setItem('auth_token', 'session-a-access')
+      localStorage.setItem('refresh_token', 'session-a-refresh')
+      let rejectRequest!: () => void
+      const adapter = vi.fn().mockImplementation((config) => new Promise((_resolve, reject) => {
+        rejectRequest = () => reject({
+          response: { status: 401, data: { code: 'TOKEN_EXPIRED', message: 'expired' } },
+          config,
+          code: 'ERR_BAD_REQUEST',
+        })
+      }))
+      apiClient.defaults.adapter = adapter
+
+      const request = apiClient.get('/test')
+      await vi.waitFor(() => expect(adapter).toHaveBeenCalledTimes(1))
+      localStorage.setItem('auth_token', 'session-b-access')
+      localStorage.setItem('refresh_token', 'session-b-refresh')
+      rejectRequest()
+
+      await expect(request).rejects.toMatchObject({ code: 'AUTH_SESSION_CHANGED' })
+      expect(localStorage.getItem('auth_token')).toBe('session-b-access')
+      expect(localStorage.getItem('refresh_token')).toBe('session-b-refresh')
+    })
+
+    it('discards an old refresh success after the session changes', async () => {
+      localStorage.setItem('auth_token', 'session-a-access')
+      localStorage.setItem('refresh_token', 'session-a-refresh')
+      let resolveRefresh!: (value: unknown) => void
+      const refresh = new Promise((resolve) => {
+        resolveRefresh = resolve
+      })
+      const refreshSpy = vi.spyOn(axios, 'post').mockReturnValue(refresh as any)
+      const adapter = vi.fn().mockImplementation((config) => Promise.reject({
+        response: { status: 401, data: { code: 'TOKEN_EXPIRED', message: 'expired' } },
+        config,
+        code: 'ERR_BAD_REQUEST',
+      }))
+      apiClient.defaults.adapter = adapter
+
+      const request = apiClient.get('/test')
+      await vi.waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1))
+      localStorage.setItem('auth_token', 'session-b-access')
+      localStorage.setItem('refresh_token', 'session-b-refresh')
+      resolveRefresh({
+        data: {
+          code: 0,
+          data: { access_token: 'stale-access', refresh_token: 'stale-refresh', expires_in: 3600 },
+        },
+      })
+
+      await expect(request).rejects.toMatchObject({ code: 'AUTH_SESSION_CHANGED' })
+      expect(localStorage.getItem('auth_token')).toBe('session-b-access')
+      expect(localStorage.getItem('refresh_token')).toBe('session-b-refresh')
+    })
+
+    it('discards an old refresh failure without clearing the newer session', async () => {
+      localStorage.setItem('auth_token', 'session-a-access')
+      localStorage.setItem('refresh_token', 'session-a-refresh')
+      let rejectRefresh!: (reason: unknown) => void
+      const refresh = new Promise((_resolve, reject) => {
+        rejectRefresh = reject
+      })
+      const refreshSpy = vi.spyOn(axios, 'post').mockReturnValue(refresh as any)
+      const adapter = vi.fn().mockImplementation((config) => Promise.reject({
+        response: { status: 401, data: { code: 'TOKEN_EXPIRED', message: 'expired' } },
+        config,
+        code: 'ERR_BAD_REQUEST',
+      }))
+      apiClient.defaults.adapter = adapter
+
+      const request = apiClient.get('/test')
+      await vi.waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1))
+      localStorage.setItem('auth_token', 'session-b-access')
+      localStorage.setItem('refresh_token', 'session-b-refresh')
+      rejectRefresh(new Error('refresh failed'))
+
+      await expect(request).rejects.toMatchObject({ code: 'AUTH_SESSION_CHANGED' })
+      expect(localStorage.getItem('auth_token')).toBe('session-b-access')
+      expect(localStorage.getItem('refresh_token')).toBe('session-b-refresh')
+    })
+
+    it('shares one refresh request across concurrent 401 responses in the same session', async () => {
+      localStorage.setItem('auth_token', 'expired-access')
+      localStorage.setItem('refresh_token', 'current-refresh')
+      let resolveRefresh!: (value: unknown) => void
+      const refresh = new Promise((resolve) => {
+        resolveRefresh = resolve
+      })
+      const refreshSpy = vi.spyOn(axios, 'post').mockReturnValue(refresh as any)
+      const adapter = vi.fn().mockImplementation((config: any) => {
+        if (config._retry) {
+          return Promise.resolve({
+            status: 200,
+            data: { code: 0, data: { ok: true } },
+            headers: {},
+            config,
+            statusText: 'OK',
+          })
+        }
+        return Promise.reject({
+          response: { status: 401, data: { code: 'TOKEN_EXPIRED', message: 'expired' } },
+          config,
+          code: 'ERR_BAD_REQUEST',
+        })
+      })
+      apiClient.defaults.adapter = adapter
+
+      const first = apiClient.get('/first')
+      const second = apiClient.get('/second')
+      await vi.waitFor(() => {
+        expect(adapter).toHaveBeenCalledTimes(2)
+        expect(refreshSpy).toHaveBeenCalledTimes(1)
+      })
+      resolveRefresh({
+        data: {
+          code: 0,
+          data: { access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 },
+        },
+      })
+
+      await expect(Promise.all([first, second])).resolves.toHaveLength(2)
+      expect(refreshSpy).toHaveBeenCalledTimes(1)
+      expect(localStorage.getItem('auth_token')).toBe('new-access')
+      expect(localStorage.getItem('refresh_token')).toBe('new-refresh')
+    })
   })
 
   // --- 网络错误 ---

@@ -102,4 +102,41 @@ describe('PaymentQRDialog currency display', () => {
     expect(wrapper.text()).toContain('$100.00')
     expect(wrapper.text()).toContain('¥108.00')
   })
+
+  it('does not overlap a slow poll or emit success after unmount', async () => {
+    let resolvePoll!: (order: typeof paidOrder) => void
+    pollOrderStatus.mockReturnValue(new Promise<typeof paidOrder>(resolve => {
+      resolvePoll = resolve
+    }))
+    const wrapper = mount(PaymentQRDialog, {
+      props: {
+        show: false,
+        orderId: 42,
+        qrCode: '',
+        expiresAt: '2099-01-01T10:30:00Z',
+        paymentType: 'alipay',
+      },
+      global: {
+        stubs: {
+          BaseDialog: {
+            props: ['show'],
+            template: '<div v-if="show"><slot /><slot name="footer" /></div>',
+          },
+          Icon: true,
+        },
+      },
+    })
+
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    vi.advanceTimersByTime(9000)
+    await Promise.resolve()
+    expect(pollOrderStatus).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
+    resolvePoll(paidOrder)
+    await flushPromises()
+
+    expect(wrapper.emitted('success')).toBeUndefined()
+  })
 })

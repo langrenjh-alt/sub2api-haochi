@@ -132,8 +132,10 @@ const showPaymentElement = ref(false)
 let stripeInstance: Stripe | null = null
 let elementsInstance: StripeElements | null = null
 let redirectTimer: ReturnType<typeof setTimeout> | null = null
+let viewMounted = false
 
 onMounted(async () => {
+  viewMounted = true
   const orderId = Number(route.query.order_id)
   const clientSecret = String(route.query.client_secret || '')
   const method = String(route.query.method || '')
@@ -281,19 +283,50 @@ async function handleGenericPay() {
 }
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollGeneration = 0
+let activePoll: Promise<void> | null = null
+
+function stopPolling() {
+  pollGeneration += 1
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+  activePoll = null
+}
+
+function pollStatus(orderId: number, generation: number): Promise<void> {
+  if (!viewMounted || !pollTimer || generation !== pollGeneration) return Promise.resolve()
+  if (activePoll) return activePoll
+
+  const request = (async () => {
+    try {
+      const nextOrder = await paymentStore.pollOrderStatus(orderId)
+      if (!viewMounted || !pollTimer || generation !== pollGeneration || !nextOrder) return
+      if (nextOrder.status === 'COMPLETED' || nextOrder.status === 'PAID') {
+        stopPolling()
+        stripeSuccess.value = true
+        wechatQrUrl.value = ''
+        scheduleClose()
+      }
+    } catch {
+      // Polling is best-effort and continues on the next interval.
+    }
+  })()
+  const tracked = request.finally(() => {
+    if (activePoll === tracked) activePoll = null
+  })
+  activePoll = tracked
+  return tracked
+}
 
 function startPolling() {
+  stopPolling()
   const orderId = Number(route.query.order_id)
-  if (!orderId) return
-  pollTimer = setInterval(async () => {
-    const o = await paymentStore.pollOrderStatus(orderId)
-    if (!o) return
-    if (o.status === 'COMPLETED' || o.status === 'PAID') {
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-      stripeSuccess.value = true
-      wechatQrUrl.value = ''
-      scheduleClose()
-    }
+  if (!viewMounted || !orderId) return
+  const generation = pollGeneration
+  pollTimer = setInterval(() => {
+    void pollStatus(orderId, generation)
   }, 3000)
 }
 
@@ -308,7 +341,8 @@ function scheduleClose() {
 }
 
 onUnmounted(() => {
+  viewMounted = false
   if (redirectTimer) clearTimeout(redirectTimer)
-  if (pollTimer) clearInterval(pollTimer)
+  stopPolling()
 })
 </script>

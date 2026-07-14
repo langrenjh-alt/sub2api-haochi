@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, shallowMount } from '@vue/test-utils'
 
 const routeState = vi.hoisted(() => ({
@@ -118,6 +118,10 @@ describe('StripePaymentView', () => {
     window.localStorage.clear()
   })
 
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('本地恢复快照缺失时使用订单接口返回的 Stripe 币种展示金额', async () => {
     getOrder.mockResolvedValue({
       data: orderFactory({ currency: 'HKD', pay_amount: 103 }),
@@ -130,5 +134,38 @@ describe('StripePaymentView', () => {
     expect(getOrder).toHaveBeenCalledWith(42)
     expect(loadStripe).toHaveBeenCalledWith('pk_test')
     expect(wrapper.text()).toContain(formatPaymentAmount(103, 'HKD', 'zh-CN'))
+  })
+
+  it('does not overlap slow WeChat status polls or handle a result after unmount', async () => {
+    vi.useFakeTimers()
+    routeState.query.method = 'wechat_pay'
+    getOrder.mockResolvedValue({ data: orderFactory({ payment_type: 'wechat_pay' }) })
+    stripeInstance.confirmWechatPayPayment.mockResolvedValue({
+      paymentIntent: {
+        status: 'requires_action',
+        next_action: {
+          wechat_pay_display_qr_code: { image_data_url: 'data:image/png;base64,qr' },
+        },
+      },
+    })
+    let resolvePoll!: (order: PaymentOrder) => void
+    paymentStore.pollOrderStatus.mockReturnValue(new Promise<PaymentOrder>(resolve => {
+      resolvePoll = resolve
+    }))
+
+    const wrapper = mountView()
+    await flushPromises()
+    await flushPromises()
+
+    vi.advanceTimersByTime(9000)
+    await Promise.resolve()
+    expect(paymentStore.pollOrderStatus).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
+    resolvePoll(orderFactory({ status: 'COMPLETED' }))
+    await flushPromises()
+    vi.advanceTimersByTime(2000)
+
+    expect(routerPush).not.toHaveBeenCalled()
   })
 })

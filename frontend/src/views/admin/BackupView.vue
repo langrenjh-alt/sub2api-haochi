@@ -322,6 +322,12 @@ const manualExpireDays = ref(14)
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null)
 const restoringPollingTimer = ref<ReturnType<typeof setInterval> | null>(null)
 const MAX_POLL_COUNT = 900
+let viewMounted = false
+let backupPollGeneration = 0
+let restorePollGeneration = 0
+let activeBackupPoll: Promise<void> | null = null
+let activeRestorePoll: Promise<void> | null = null
+let loadBackupsRequestSeq = 0
 
 function updateRecordInList(updated: BackupRecord) {
   const idx = backups.value.findIndex(r => r.id === updated.id)
@@ -332,74 +338,110 @@ function updateRecordInList(updated: BackupRecord) {
 
 function startPolling(backupId: string) {
   stopPolling()
+  if (!viewMounted || document.hidden) return
   let count = 0
-  pollingTimer.value = setInterval(async () => {
-    if (count++ >= MAX_POLL_COUNT) {
+  const generation = backupPollGeneration
+  const pollOnce = (): Promise<void> => {
+    if (!viewMounted || !pollingTimer.value || generation !== backupPollGeneration) return Promise.resolve()
+    if (activeBackupPoll) return activeBackupPoll
+    if (count >= MAX_POLL_COUNT) {
       stopPolling()
       creatingBackup.value = false
       appStore.showWarning(t('admin.backup.operations.backupRunning'))
-      return
+      return Promise.resolve()
     }
-    try {
-      const record = await adminAPI.backup.getBackup(backupId)
-      updateRecordInList(record)
-      if (record.status === 'completed' || record.status === 'failed') {
-        stopPolling()
-        creatingBackup.value = false
-        if (record.status === 'completed') {
-          appStore.showSuccess(t('admin.backup.operations.backupCreated'))
-        } else {
-          appStore.showError(record.error_message || t('admin.backup.operations.backupFailed'))
+    count += 1
+    const request = (async () => {
+      try {
+        const record = await adminAPI.backup.getBackup(backupId)
+        if (!viewMounted || !pollingTimer.value || generation !== backupPollGeneration) return
+        updateRecordInList(record)
+        if (record.status === 'completed' || record.status === 'failed') {
+          stopPolling()
+          creatingBackup.value = false
+          if (record.status === 'completed') {
+            appStore.showSuccess(t('admin.backup.operations.backupCreated'))
+          } else {
+            appStore.showError(record.error_message || t('admin.backup.operations.backupFailed'))
+          }
+          await loadBackups()
         }
-        await loadBackups()
+      } catch {
+        // Polling failures are retried on the next interval.
       }
-    } catch {
-      // 轮询失败时不中断
-    }
+    })()
+    const tracked = request.finally(() => {
+      if (activeBackupPoll === tracked) activeBackupPoll = null
+    })
+    activeBackupPoll = tracked
+    return tracked
+  }
+  pollingTimer.value = setInterval(() => {
+    void pollOnce()
   }, 2000)
 }
 
 function stopPolling() {
+  backupPollGeneration += 1
   if (pollingTimer.value) {
     clearInterval(pollingTimer.value)
     pollingTimer.value = null
   }
+  activeBackupPoll = null
 }
 
 function startRestorePolling(backupId: string) {
   stopRestorePolling()
+  if (!viewMounted || document.hidden) return
   let count = 0
-  restoringPollingTimer.value = setInterval(async () => {
-    if (count++ >= MAX_POLL_COUNT) {
+  const generation = restorePollGeneration
+  const pollOnce = (): Promise<void> => {
+    if (!viewMounted || !restoringPollingTimer.value || generation !== restorePollGeneration) return Promise.resolve()
+    if (activeRestorePoll) return activeRestorePoll
+    if (count >= MAX_POLL_COUNT) {
       stopRestorePolling()
       restoringId.value = ''
       appStore.showWarning(t('admin.backup.operations.restoreRunning'))
-      return
+      return Promise.resolve()
     }
-    try {
-      const record = await adminAPI.backup.getBackup(backupId)
-      updateRecordInList(record)
-      if (record.restore_status === 'completed' || record.restore_status === 'failed') {
-        stopRestorePolling()
-        restoringId.value = ''
-        if (record.restore_status === 'completed') {
-          appStore.showSuccess(t('admin.backup.actions.restoreSuccess'))
-        } else {
-          appStore.showError(record.restore_error || t('admin.backup.operations.restoreFailed'))
+    count += 1
+    const request = (async () => {
+      try {
+        const record = await adminAPI.backup.getBackup(backupId)
+        if (!viewMounted || !restoringPollingTimer.value || generation !== restorePollGeneration) return
+        updateRecordInList(record)
+        if (record.restore_status === 'completed' || record.restore_status === 'failed') {
+          stopRestorePolling()
+          restoringId.value = ''
+          if (record.restore_status === 'completed') {
+            appStore.showSuccess(t('admin.backup.actions.restoreSuccess'))
+          } else {
+            appStore.showError(record.restore_error || t('admin.backup.operations.restoreFailed'))
+          }
+          await loadBackups()
         }
-        await loadBackups()
+      } catch {
+        // Polling failures are retried on the next interval.
       }
-    } catch {
-      // 轮询失败时不中断
-    }
+    })()
+    const tracked = request.finally(() => {
+      if (activeRestorePoll === tracked) activeRestorePoll = null
+    })
+    activeRestorePoll = tracked
+    return tracked
+  }
+  restoringPollingTimer.value = setInterval(() => {
+    void pollOnce()
   }, 2000)
 }
 
 function stopRestorePolling() {
+  restorePollGeneration += 1
   if (restoringPollingTimer.value) {
     clearInterval(restoringPollingTimer.value)
     restoringPollingTimer.value = null
   }
+  activeRestorePoll = null
 }
 
 function handleVisibilityChange() {
@@ -408,15 +450,16 @@ function handleVisibilityChange() {
     stopRestorePolling()
   } else {
     // 标签页恢复时刷新列表，检查是否仍有活跃操作
-    loadBackups().then(() => {
+    void loadBackups().then((loaded) => {
+      if (!loaded || !viewMounted || document.hidden) return
       const running = backups.value.find(r => r.status === 'running')
+      creatingBackup.value = Boolean(running)
       if (running) {
-        creatingBackup.value = true
         startPolling(running.id)
       }
       const restoring = backups.value.find(r => r.restore_status === 'running')
+      restoringId.value = restoring?.id || ''
       if (restoring) {
-        restoringId.value = restoring.id
         startRestorePolling(restoring.id)
       }
     })
@@ -508,15 +551,22 @@ async function saveSchedule() {
   }
 }
 
-async function loadBackups() {
+async function loadBackups(): Promise<boolean> {
+  if (!viewMounted) return false
+  const requestID = ++loadBackupsRequestSeq
   loadingBackups.value = true
   try {
     const result = await adminAPI.backup.listBackups()
+    if (!viewMounted || requestID !== loadBackupsRequestSeq) return false
     backups.value = result.items || []
+    return true
   } catch (error) {
-    appStore.showError((error as { message?: string })?.message || t('errors.networkError'))
+    if (viewMounted && requestID === loadBackupsRequestSeq) {
+      appStore.showError((error as { message?: string })?.message || t('errors.networkError'))
+    }
+    return false
   } finally {
-    loadingBackups.value = false
+    if (viewMounted && requestID === loadBackupsRequestSeq) loadingBackups.value = false
   }
 }
 
@@ -604,8 +654,10 @@ function formatDate(value?: string): string {
 }
 
 onMounted(async () => {
+  viewMounted = true
   document.addEventListener('visibilitychange', handleVisibilityChange)
   await Promise.all([loadS3Config(), loadSchedule(), loadBackups()])
+  if (!viewMounted) return
 
   // 如果有正在 running 的备份，恢复轮询
   const runningBackup = backups.value.find(r => r.status === 'running')
@@ -621,6 +673,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  viewMounted = false
+  loadBackupsRequestSeq += 1
   stopPolling()
   stopRestorePolling()
   document.removeEventListener('visibilitychange', handleVisibilityChange)
