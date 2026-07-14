@@ -55,9 +55,9 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			reason: "non_text_message_content",
 		},
 		{
-			name:   "function tools fall back",
-			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`,
-			reason: "unsupported_tools",
+			name: "function tools bridge",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`,
+			want: true,
 		},
 		{
 			name:   "automatic tool choice falls back",
@@ -65,9 +65,9 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			reason: "unsupported_tool_choice",
 		},
 		{
-			name:   "reasoning effort falls back because conversion adds summary",
-			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
-			reason: "unsupported_reasoning_effort",
+			name: "reasoning effort bridges without summary",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
+			want: true,
 		},
 		{
 			name:   "both token limits fall back",
@@ -80,9 +80,9 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			reason: "empty_message_content",
 		},
 		{
-			name:   "tool history falls back",
+			name:   "empty tool history falls back",
 			body:   `{"model":"grok","messages":[{"role":"assistant","content":"","tool_calls":[]}]}`,
-			reason: "unsafe_message_field_tool_calls",
+			reason: "empty_message_content",
 		},
 		{
 			name:   "unknown field falls back",
@@ -100,6 +100,77 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got, reason := grokChatResponsesBridgeEligibility([]byte(tt.body))
 			require.Equal(t, tt.want, got)
+			require.Equal(t, tt.reason, reason)
+		})
+	}
+}
+
+func TestGrokChatResponsesBridgeEligibilityForStandardTools(t *testing.T) {
+	t.Parallel()
+
+	firstTurn := []byte(`{
+		"model":"grok",
+		"max_tokens":32768,
+		"temperature":0,
+		"messages":[
+			{"role":"system","content":"You are OpenCode."},
+			{"role":"user","content":"Read fixture.txt"}
+		],
+		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
+		"tool_choice":"auto"
+	}`)
+	historyTurn := []byte(`{
+		"model":"grok",
+		"max_tokens":32768,
+		"reasoning_effort":"high",
+		"messages":[
+			{"role":"system","content":"You are OpenCode."},
+			{"role":"user","content":[{"type":"text","text":"Read fixture.txt"}]},
+			{"role":"assistant","reasoning_content":"I should inspect the fixture.","content":"","tool_calls":[{"id":"call_read_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"fixture.txt\"}"}}]},
+			{"role":"tool","tool_call_id":"call_read_1","content":"fixture value"},
+			{"role":"user","content":"Summarize it"}
+		],
+		"parallel_tool_calls":true,
+		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},"strict":false}}],
+		"tool_choice":"required"
+	}`)
+
+	for _, body := range [][]byte{firstTurn, historyTurn} {
+		eligible, reason := grokChatResponsesBridgeEligibility(body)
+		require.True(t, eligible, reason)
+		require.Empty(t, reason)
+	}
+}
+
+func TestGrokChatResponsesBridgeRejectsMalformedStandardToolHistory(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		body   string
+		reason string
+	}{
+		{
+			name:   "unsupported tool type",
+			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"custom","function":{"name":"exec"}}]}`,
+			reason: "unsupported_tool_type",
+		},
+		{
+			name:   "missing tool call id",
+			body:   `{"model":"grok","messages":[{"role":"assistant","content":"","tool_calls":[{"type":"function","function":{"name":"exec","arguments":"{}"}}]}],"tools":[{"type":"function","function":{"name":"exec","parameters":{"type":"object"}}}]}`,
+			reason: "invalid_tool_call_id",
+		},
+		{
+			name:   "image remains on raw endpoint",
+			body:   `{"model":"grok","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,QQ=="}}]}],"tools":[]}`,
+			reason: "non_text_message_content",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			eligible, reason := grokChatResponsesBridgeEligibility([]byte(tt.body))
+			require.False(t, eligible)
 			require.Equal(t, tt.reason, reason)
 		})
 	}
@@ -193,6 +264,114 @@ func TestForwardGrokChatViaResponsesStreamingPropagatesCachedUsage(t *testing.T)
 	require.Contains(t, recorder.Body.String(), `"content":"cached ok"`)
 	require.Contains(t, recorder.Body.String(), `"cached_tokens":4096`)
 	require.Contains(t, recorder.Body.String(), "data: [DONE]")
+}
+
+func TestForwardGrokOpenCodeToolChatViaResponsesKeepsCachePrefix(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	firstTurn := []byte(`{
+		"model":"grok",
+		"messages":[
+			{"role":"system","content":"Keep this OpenCode fixture prefix stable."},
+			{"role":"user","content":"Read fixture.txt"}
+		],
+		"stream":false,
+		"max_tokens":32768,
+		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a fixture","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
+		"tool_choice":"auto"
+	}`)
+	secondTurn := []byte(`{
+		"model":"grok",
+		"messages":[
+			{"role":"system","content":"Keep this OpenCode fixture prefix stable."},
+			{"role":"user","content":"Read fixture.txt"},
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_read_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"fixture.txt\"}"}}]},
+			{"role":"tool","tool_call_id":"call_read_1","content":"fixture value"},
+			{"role":"user","content":"Summarize it"}
+		],
+		"stream":false,
+		"max_tokens":32768,
+		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a fixture","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
+		"tool_choice":"auto"
+	}`)
+
+	account := grokChatBridgeTestAccount(78)
+	repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+		accountsByID: map[int64]*Account{account.ID: account},
+	}}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		grokChatBridgeCompletedResponse("resp_opencode_tool_1", 0),
+		grokChatBridgeCompletedResponse("resp_opencode_tool_2", 12288),
+	}}
+	svc := &OpenAIGatewayService{
+		httpUpstream:      upstream,
+		grokTokenProvider: NewGrokTokenProvider(repo, nil),
+		accountRepo:       repo,
+	}
+	newContext := func(body []byte, apiKeyID int64) (*gin.Context, *httptest.ResponseRecorder) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Request.Header.Set("User-Agent", "opencode/1.17.18 ai-sdk/provider-utils/4.0.23")
+		c.Request.Header.Set("X-Session-Id", "ses_opencode_cache_fixture")
+		c.Set("api_key", &APIKey{ID: apiKeyID})
+		return c, recorder
+	}
+
+	firstContext, firstRecorder := newContext(firstTurn, 7801)
+	firstResult, err := svc.ForwardAsChatCompletions(context.Background(), firstContext, account, firstTurn, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, firstResult)
+	require.Zero(t, firstResult.Usage.CacheReadInputTokens)
+	require.Equal(t, grokChatResponsesEndpoint, firstResult.UpstreamEndpoint)
+	require.Equal(t, http.StatusOK, firstRecorder.Code)
+
+	secondContext, secondRecorder := newContext(secondTurn, 7801)
+	secondResult, err := svc.ForwardAsChatCompletions(context.Background(), secondContext, account, secondTurn, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, secondResult)
+	require.Equal(t, 12288, secondResult.Usage.CacheReadInputTokens)
+	require.Equal(t, grokChatResponsesEndpoint, secondResult.UpstreamEndpoint)
+	require.Equal(t, http.StatusOK, secondRecorder.Code)
+
+	require.Len(t, upstream.requests, 2)
+	require.Len(t, upstream.bodies, 2)
+	for _, request := range upstream.requests {
+		require.Equal(t, xai.DefaultCLIBaseURL+"/responses", request.URL.String())
+	}
+
+	firstBody, secondBody := upstream.bodies[0], upstream.bodies[1]
+	firstIdentity := gjson.GetBytes(firstBody, "prompt_cache_key").String()
+	secondIdentity := gjson.GetBytes(secondBody, "prompt_cache_key").String()
+	require.NotEmpty(t, firstIdentity)
+	require.Equal(t, firstIdentity, secondIdentity)
+	require.Equal(t, firstIdentity, upstream.requests[0].Header.Get(grokConversationIDHeader))
+	require.Equal(t, secondIdentity, upstream.requests[1].Header.Get(grokConversationIDHeader))
+
+	for _, body := range [][]byte{firstBody, secondBody} {
+		tools := gjson.GetBytes(body, "tools").Array()
+		require.Len(t, tools, 3)
+		require.Equal(t, "function", tools[0].Get("type").String())
+		require.Equal(t, "read_file", tools[0].Get("name").String())
+		require.Equal(t, "web_search", tools[1].Get("type").String())
+		require.Equal(t, "x_search", tools[2].Get("type").String())
+		require.Equal(t, "auto", gjson.GetBytes(body, "tool_choice").String())
+	}
+
+	firstInput := gjson.GetBytes(firstBody, "input").Array()
+	secondInput := gjson.GetBytes(secondBody, "input").Array()
+	require.Len(t, firstInput, 2)
+	require.Len(t, secondInput, 5)
+	require.JSONEq(t, firstInput[0].Raw, secondInput[0].Raw)
+	require.JSONEq(t, firstInput[1].Raw, secondInput[1].Raw)
+	require.Equal(t, "function_call", secondInput[2].Get("type").String())
+	require.Equal(t, "call_read_1", secondInput[2].Get("call_id").String())
+	require.Equal(t, "read_file", secondInput[2].Get("name").String())
+	require.JSONEq(t, `{"path":"fixture.txt"}`, secondInput[2].Get("arguments").String())
+	require.Equal(t, "function_call_output", secondInput[3].Get("type").String())
+	require.Equal(t, "call_read_1", secondInput[3].Get("call_id").String())
+	require.Equal(t, "fixture value", secondInput[3].Get("output").String())
 }
 
 func TestForwardGrokChatRuntimeGateFallsBackToRaw(t *testing.T) {

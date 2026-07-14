@@ -71,6 +71,16 @@ func explicitGrokCacheSeed(c *gin.Context, body []byte, explicitKey string) stri
 			seed = strings.TrimSpace(c.GetHeader("conversation_id"))
 		}
 		if seed == "" {
+			// OpenAI-compatible agent clients commonly send the stable session in
+			// hyphenated headers rather than the underscore-style Codex headers.
+			for _, header := range []string{"x-opencode-session", "X-Session-Id", "x-session-affinity"} {
+				seed = strings.TrimSpace(c.GetHeader(header))
+				if seed != "" {
+					break
+				}
+			}
+		}
+		if seed == "" {
 			seed = strings.TrimSpace(c.GetHeader(grokConversationIDHeader))
 		}
 	}

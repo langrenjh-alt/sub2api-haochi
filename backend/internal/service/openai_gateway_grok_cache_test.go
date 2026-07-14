@@ -123,6 +123,29 @@ func TestResolveGrokCacheIdentityUsesAndIsolatesNativeConversationHeader(t *test
 	require.NotContains(t, first, "raw-native-conversation")
 }
 
+func TestResolveGrokCacheIdentityUsesOpenCodeSessionHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	firstContext := newGrokCacheTestContext(302)
+	firstContext.Request.Header.Set("User-Agent", "opencode/1.17.18 ai-sdk/provider-utils/4.0.23")
+	firstContext.Request.Header.Set("X-Session-Id", "ses_opencode_fixture")
+	secondContext := newGrokCacheTestContext(302)
+	secondContext.Request.Header.Set("User-Agent", "opencode/1.17.18 ai-sdk/provider-utils/4.0.23")
+	secondContext.Request.Header.Set("x-session-affinity", "ses_opencode_fixture")
+
+	first := resolveGrokCacheIdentity(firstContext, []byte(`{"model":"grok","messages":[{"role":"system","content":"first prefix"},{"role":"user","content":"one"}],"tools":[{"type":"function","function":{"name":"one"}}]}`), "", "grok-4.5")
+	second := resolveGrokCacheIdentity(secondContext, []byte(`{"model":"grok","messages":[{"role":"system","content":"changed prefix"},{"role":"user","content":"two"}],"tools":[{"type":"function","function":{"name":"two"}}]}`), "", "grok-4.5")
+
+	require.NotEmpty(t, first)
+	require.Equal(t, first, second)
+	require.NotEqual(t, "ses_opencode_fixture", first)
+	require.NotContains(t, first, "ses_opencode_fixture")
+
+	otherSession := newGrokCacheTestContext(302)
+	otherSession.Request.Header.Set("User-Agent", "opencode/1.17.18 ai-sdk/provider-utils/4.0.23")
+	otherSession.Request.Header.Set("X-Session-Id", "ses_other")
+	require.NotEqual(t, first, resolveGrokCacheIdentity(otherSession, []byte(`{"model":"grok","input":"one"}`), "", "grok-4.5"))
+}
+
 func TestResolveGrokCacheIdentityExplicitHeaderPriority(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"grok","prompt_cache_key":"body-key","input":"hi"}`)
