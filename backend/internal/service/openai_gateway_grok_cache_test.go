@@ -197,38 +197,198 @@ func TestApplyGrokCacheIdentityWritesResponsesBodyAndHeader(t *testing.T) {
 	require.False(t, gjson.GetBytes(unscopedBody, "tool_choice").Exists())
 }
 
-func TestApplyGrokCacheIdentityPreservesExplicitClientToolFields(t *testing.T) {
+func TestApplyGrokCacheIdentityAppendsNativeToolsToSupportedClientTools(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
 	}{
 		{
-			name: "tools only",
+			name: "function without tool choice",
 			body: `{"model":"grok","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`,
 		},
 		{
-			name: "empty tools array",
-			body: `{"model":"grok","tools":[]}`,
+			name: "function with auto tool choice",
+			body: `{"model":"grok","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":"auto"}`,
 		},
 		{
-			name: "null tools",
-			body: `{"model":"grok","tools":null}`,
+			name: "function with required tool choice",
+			body: `{"model":"grok","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":"required"}`,
 		},
 		{
-			name: "tool choice only",
-			body: `{"model":"grok","tool_choice":{"type":"function","name":"lookup"}}`,
+			name: "function with none tool choice",
+			body: `{"model":"grok","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":"none"}`,
 		},
 		{
-			name: "null tool choice",
-			body: `{"model":"grok","tool_choice":null}`,
+			name: "function with object tool choice",
+			body: `{"model":"grok","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":{"type":"function","name":"lookup"}}`,
 		},
 		{
-			name: "both fields",
-			body: `{"model":"grok","tools":[{"type":"web_search"}],"tool_choice":"auto"}`,
+			name: "code execution tool",
+			body: `{"model":"grok","tools":[{"type":"code_execution"}]}`,
 		},
+		{
+			name: "code interpreter tool",
+			body: `{"model":"grok","tools":[{"type":"code_interpreter"}]}`,
+		},
+		{
+			name: "collections search tool",
+			body: `{"model":"grok","tools":[{"type":"collections_search"}]}`,
+		},
+		{
+			name: "file search tool",
+			body: `{"model":"grok","tools":[{"type":"file_search"}]}`,
+		},
+		{
+			name: "mcp tool",
+			body: `{"model":"grok","tools":[{"type":"mcp","server_label":"fixture"}]}`,
+		},
+		{
+			name: "shell tool",
+			body: `{"model":"grok","tools":[{"type":"shell"}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beforeTool := gjson.Get(tt.body, "tools.0")
+			beforeChoice := gjson.Get(tt.body, "tool_choice")
+			body, err := applyGrokResponsesCacheIdentity([]byte(tt.body), []byte(tt.body), "isolated-id", true)
+
+			require.NoError(t, err)
+			require.Equal(t, "isolated-id", gjson.GetBytes(body, "prompt_cache_key").String())
+			tools := gjson.GetBytes(body, "tools").Array()
+			require.Len(t, tools, 3)
+			require.JSONEq(t, beforeTool.Raw, tools[0].Raw)
+			require.Equal(t, 1, countGrokCacheTestTools(tools, "web_search"))
+			require.Equal(t, 1, countGrokCacheTestTools(tools, "x_search"))
+			require.Equal(t, beforeChoice.Exists(), gjson.GetBytes(body, "tool_choice").Exists())
+			require.Equal(t, beforeChoice.Raw, gjson.GetBytes(body, "tool_choice").Raw)
+		})
+	}
+}
+
+func TestApplyGrokCacheIdentityDoesNotDuplicateNativeTools(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		toolCount int
+	}{
+		{
+			name:      "web search already present",
+			body:      `{"model":"grok","tools":[{"type":"function","name":"lookup"},{"type":"web_search"}],"tool_choice":"auto"}`,
+			toolCount: 3,
+		},
+		{
+			name:      "x search already present",
+			body:      `{"model":"grok","tools":[{"type":"function","name":"lookup"},{"type":"x_search"}],"tool_choice":"required"}`,
+			toolCount: 3,
+		},
+		{
+			name:      "both native tools already present",
+			body:      `{"model":"grok","tools":[{"type":"function","name":"lookup"},{"type":"web_search"},{"type":"x_search"}],"tool_choice":{"type":"function","name":"lookup"}}`,
+			toolCount: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beforeChoice := gjson.Get(tt.body, "tool_choice")
+			body, err := applyGrokResponsesCacheIdentity([]byte(tt.body), []byte(tt.body), "isolated-id", true)
+
+			require.NoError(t, err)
+			tools := gjson.GetBytes(body, "tools").Array()
+			require.Len(t, tools, tt.toolCount)
+			require.Equal(t, "function", tools[0].Get("type").String())
+			require.Equal(t, 1, countGrokCacheTestTools(tools, "web_search"))
+			require.Equal(t, 1, countGrokCacheTestTools(tools, "x_search"))
+			require.Equal(t, beforeChoice.Raw, gjson.GetBytes(body, "tool_choice").Raw)
+		})
+	}
+}
+
+func TestApplyGrokCacheIdentityNativeToolMergeIsIdempotent(t *testing.T) {
+	source := []byte(`{"model":"grok","input":"hello","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":"auto"}`)
+
+	first, err := applyGrokResponsesCacheIdentity(source, source, "isolated-id", true)
+	require.NoError(t, err)
+	second, err := applyGrokResponsesCacheIdentity(first, first, "isolated-id", true)
+	require.NoError(t, err)
+
+	require.Equal(t, string(first), string(second))
+	require.JSONEq(t, string(first), string(second))
+	firstTools := gjson.GetBytes(first, "tools").Array()
+	secondTools := gjson.GetBytes(second, "tools").Array()
+	require.Len(t, firstTools, 3)
+	require.Len(t, secondTools, 3)
+	for i := range firstTools {
+		require.Equal(t, firstTools[i].Raw, secondTools[i].Raw)
+	}
+	require.Equal(t, "function", secondTools[0].Get("type").String())
+	require.Equal(t, "web_search", secondTools[1].Get("type").String())
+	require.Equal(t, "x_search", secondTools[2].Get("type").String())
+	require.Equal(t, gjson.GetBytes(first, "tool_choice").Raw, gjson.GetBytes(second, "tool_choice").Raw)
+}
+
+func TestApplyGrokCacheIdentityPreservesClientNativeToolDuplicates(t *testing.T) {
+	source := []byte(`{"model":"grok","tools":[{"type":"function","name":"lookup"},{"type":"web_search","allowed_domains":["docs.example"]},{"type":"web_search","allowed_domains":["status.example"]}],"tool_choice":"auto"}`)
+	originalTools := gjson.GetBytes(source, "tools").Array()
+
+	body, err := applyGrokResponsesCacheIdentity(source, source, "isolated-id", true)
+
+	require.NoError(t, err)
+	tools := gjson.GetBytes(body, "tools").Array()
+	require.Len(t, tools, 4)
+	for i := range originalTools {
+		require.Equal(t, originalTools[i].Raw, tools[i].Raw)
+	}
+	require.Equal(t, 2, countGrokCacheTestTools(tools, "web_search"))
+	require.Equal(t, 1, countGrokCacheTestTools(tools, "x_search"))
+	require.Equal(t, "x_search", tools[3].Get("type").String())
+	require.Equal(t, gjson.GetBytes(source, "tool_choice").Raw, gjson.GetBytes(body, "tool_choice").Raw)
+}
+
+func TestApplyGrokCacheIdentityTreatsEmptyToolFieldsAsToolFree(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty tools without choice", body: `{"model":"grok","tools":[]}`},
+		{name: "null tools without choice", body: `{"model":"grok","tools":null}`},
+		{name: "empty tools with null choice", body: `{"model":"grok","tools":[],"tool_choice":null}`},
+		{name: "null tools with null choice", body: `{"model":"grok","tools":null,"tool_choice":null}`},
+		{name: "empty tools with none choice", body: `{"model":"grok","tools":[],"tool_choice":"none"}`},
+		{name: "null tools with none choice", body: `{"model":"grok","tools":null,"tool_choice":"none"}`},
+		{name: "missing tools with null choice", body: `{"model":"grok","tool_choice":null}`},
+		{name: "missing tools with none choice", body: `{"model":"grok","tool_choice":"none"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := applyGrokResponsesCacheIdentity([]byte(tt.body), []byte(tt.body), "isolated-id", true)
+
+			require.NoError(t, err)
+			require.Equal(t, "isolated-id", gjson.GetBytes(body, "prompt_cache_key").String())
+			tools := gjson.GetBytes(body, "tools").Array()
+			require.Len(t, tools, 2)
+			require.Equal(t, "web_search", tools[0].Get("type").String())
+			require.Equal(t, "x_search", tools[1].Get("type").String())
+			require.Equal(t, grokFreeCacheDisabledToolChoice, gjson.GetBytes(body, "tool_choice").String())
+		})
+	}
+}
+
+func TestApplyGrokCacheIdentityPreservesUnsupportedToolIntent(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
 		{
 			name: "unsupported tool",
 			body: `{"model":"grok","tools":[{"type":"namespace","name":"client_tools"}]}`,
+		},
+		{
+			name: "tool choice without tools",
+			body: `{"model":"grok","tool_choice":{"type":"function","name":"lookup"}}`,
 		},
 	}
 
@@ -237,6 +397,7 @@ func TestApplyGrokCacheIdentityPreservesExplicitClientToolFields(t *testing.T) {
 			beforeTools := gjson.Get(tt.body, "tools")
 			beforeChoice := gjson.Get(tt.body, "tool_choice")
 			body, err := applyGrokResponsesCacheIdentity([]byte(tt.body), []byte(tt.body), "isolated-id", true)
+
 			require.NoError(t, err)
 			require.Equal(t, "isolated-id", gjson.GetBytes(body, "prompt_cache_key").String())
 			require.Equal(t, beforeTools.Exists(), gjson.GetBytes(body, "tools").Exists())
@@ -245,6 +406,16 @@ func TestApplyGrokCacheIdentityPreservesExplicitClientToolFields(t *testing.T) {
 			require.Equal(t, beforeChoice.Raw, gjson.GetBytes(body, "tool_choice").Raw)
 		})
 	}
+}
+
+func countGrokCacheTestTools(tools []gjson.Result, toolType string) int {
+	count := 0
+	for _, tool := range tools {
+		if tool.Get("type").String() == toolType {
+			count++
+		}
+	}
+	return count
 }
 
 func TestApplyGrokCacheIdentityUsesPreSanitizationToolIntent(t *testing.T) {

@@ -13,6 +13,8 @@ import (
 const (
 	grokConversationIDHeader        = "X-Grok-Conv-Id"
 	grokFreeCacheNativeToolsJSON    = `[{"type":"web_search"},{"type":"x_search"}]`
+	grokFreeCacheWebSearchToolJSON  = `{"type":"web_search"}`
+	grokFreeCacheXSearchToolJSON    = `{"type":"x_search"}`
 	grokFreeCacheDisabledToolChoice = "none"
 )
 
@@ -98,10 +100,11 @@ func isGrokRequestContext(c *gin.Context) bool {
 // the tenant-isolated value to prevent collisions on shared OAuth accounts.
 //
 // Free OAuth requests without native search tools are routed by xAI to the
-// non-cacheable build-free model. For otherwise tool-free requests, add the
-// native tools with tool_choice=none: this selects the cache-capable tier
-// without allowing an actual search. Any explicit client tools or tool_choice
-// disable this augmentation so client function-calling semantics stay intact.
+// non-cacheable build-free model. Add any missing native search tools to
+// supported client tool sets so agent requests can reach the cache-capable
+// tier. Existing client tools and tool_choice are preserved; consequently an
+// auto/required choice may select a native search tool. Tool-free requests keep
+// tool_choice=none so the routing augmentation cannot trigger a search.
 func applyGrokResponsesCacheIdentity(body, intentSourceBody []byte, identity string, injectFreeTierTools bool) ([]byte, error) {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
@@ -117,17 +120,93 @@ func applyGrokResponsesCacheIdentity(body, intentSourceBody []byte, identity str
 	if !injectFreeTierTools {
 		return out, nil
 	}
-	// Inspect the pre-sanitization source. patchGrokResponsesBody may remove an
-	// unsupported client tool and its tool_choice; that must not turn an
-	// explicit client tool intent into an eligible native-tool request.
-	if gjson.GetBytes(intentSourceBody, "tools").Exists() || gjson.GetBytes(intentSourceBody, "tool_choice").Exists() {
-		return out, nil
+	return applyGrokFreeCacheNativeTools(out, intentSourceBody)
+}
+
+func applyGrokFreeCacheNativeTools(body, intentSourceBody []byte) ([]byte, error) {
+	tools := gjson.GetBytes(body, "tools")
+	if tools.Exists() && tools.IsArray() {
+		items := tools.Array()
+		if len(items) > 0 {
+			hasSupportedTool := false
+			hasWebSearch := false
+			hasXSearch := false
+			for _, tool := range items {
+				toolType := strings.TrimSpace(tool.Get("type").String())
+				if _, ok := grokResponsesSupportedToolTypes[toolType]; ok {
+					hasSupportedTool = true
+				}
+				switch toolType {
+				case "web_search":
+					hasWebSearch = true
+				case "x_search":
+					hasXSearch = true
+				}
+			}
+			// apply normally receives a sanitized body. Keep this guard for
+			// malformed or future unsupported-only tool arrays so they do not
+			// silently turn into a search-only request.
+			if !hasSupportedTool {
+				return body, nil
+			}
+			if hasWebSearch && hasXSearch {
+				return body, nil
+			}
+
+			// Rewrite the array once rather than calling sjson once per missing
+			// tool. Agent requests can carry a large replay history, so avoiding
+			// the second whole-body copy keeps this hot path inexpensive.
+			rawTools := strings.TrimSpace(tools.Raw)
+			if len(rawTools) < 2 || rawTools[0] != '[' || rawTools[len(rawTools)-1] != ']' {
+				return body, nil
+			}
+			merged := make([]byte, 0, len(rawTools)+len(grokFreeCacheWebSearchToolJSON)+len(grokFreeCacheXSearchToolJSON)+2)
+			merged = append(merged, rawTools[:len(rawTools)-1]...)
+			if !hasWebSearch {
+				merged = append(merged, ',')
+				merged = append(merged, grokFreeCacheWebSearchToolJSON...)
+			}
+			if !hasXSearch {
+				merged = append(merged, ',')
+				merged = append(merged, grokFreeCacheXSearchToolJSON...)
+			}
+			merged = append(merged, ']')
+			return sjson.SetRawBytes(body, "tools", merged)
+		}
 	}
-	out, err = sjson.SetRawBytes(out, "tools", []byte(grokFreeCacheNativeToolsJSON))
+
+	// Preserve malformed non-array tool values so upstream validation remains
+	// visible. Missing, null, and empty tools remain eligible for the disabled
+	// native-tool route; sanitizer-removed explicit intent is handled below.
+	if tools.Exists() && tools.Type != gjson.Null && !tools.IsArray() {
+		return body, nil
+	}
+	// If sanitization removed a non-empty unsupported tool declaration (or a
+	// standalone active tool_choice), retain the prior fail-closed behavior
+	// rather than silently replacing that rejected intent with search tools.
+	if hasGrokExplicitToolIntent(intentSourceBody) {
+		return body, nil
+	}
+	out, err := sjson.SetRawBytes(body, "tools", []byte(grokFreeCacheNativeToolsJSON))
 	if err != nil {
 		return nil, err
 	}
 	return sjson.SetBytes(out, "tool_choice", grokFreeCacheDisabledToolChoice)
+}
+
+func hasGrokExplicitToolIntent(body []byte) bool {
+	tools := gjson.GetBytes(body, "tools")
+	if tools.Exists() && tools.Type != gjson.Null {
+		if !tools.IsArray() || len(tools.Array()) > 0 {
+			return true
+		}
+	}
+
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.Exists() || choice.Type == gjson.Null {
+		return false
+	}
+	return choice.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(choice.String()), grokFreeCacheDisabledToolChoice)
 }
 
 // applyGrokCacheHeaders applies the documented Chat Completions conversation

@@ -1153,6 +1153,127 @@ func TestForwardGrokResponsesNonStreamingUsesCacheIdentityAndCachedUsage(t *test
 	require.Equal(t, "resp_grok_non_stream", gjson.Get(recorder.Body.String(), "id").String())
 }
 
+func TestForwardGrokResponsesToolHistoryPreservesWirePrefixAndCacheIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	round1 := []byte(`{
+		"model":"grok",
+		"stream":false,
+		"instructions":"Keep this fixture prefix stable.",
+		"tools":[{"type":"function","name":"lookup","description":"Look up a fixture value","parameters":{"type":"object","properties":{"key":{"type":"string"}},"required":["key"],"additionalProperties":false}}],
+		"tool_choice":"auto",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Look up alpha."}]}]
+	}`)
+	round2 := []byte(`{
+		"model":"grok",
+		"stream":false,
+		"instructions":"Keep this fixture prefix stable.",
+		"tools":[{"type":"function","name":"lookup","description":"Look up a fixture value","parameters":{"type":"object","properties":{"key":{"type":"string"}},"required":["key"],"additionalProperties":false}}],
+		"tool_choice":"auto",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Look up alpha."}]},
+			{"type":"function_call","id":"fc_lookup_1","call_id":"call_lookup_1","name":"lookup","arguments":"{\"key\":\"alpha\"}","status":"completed"},
+			{"type":"function_call_output","call_id":"call_lookup_1","output":"{\"value\":42}"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Summarize that value."}]}
+		]
+	}`)
+
+	account := &Account{
+		ID:          5601,
+		Name:        "grok-tool-cache-prefix",
+		Platform:    PlatformGrok,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token": "access-token",
+			"expires_at":   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			"base_url":     xai.DefaultCLIBaseURL,
+		},
+	}
+	repo := &grokQuotaAccountRepo{
+		mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+			accountsByID: map[int64]*Account{account.ID: account},
+		},
+	}
+	response := func(body string) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+	}
+	// Keep the reported zero-cache usage in the fixture, but treat it only as
+	// upstream output. This regression test proves the final wire prefix and
+	// cache identity; a mock response cannot establish an upstream cache hit.
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		response(`{"id":"resp_tool_1","object":"response","model":"grok-4.5","status":"completed","output":[{"type":"function_call","id":"fc_lookup_1","call_id":"call_lookup_1","name":"lookup","arguments":"{\"key\":\"alpha\"}","status":"completed"}],"usage":{"input_tokens":14080,"output_tokens":8,"total_tokens":14088,"input_tokens_details":{"cached_tokens":0}}}`),
+		response(`{"id":"resp_tool_2","object":"response","model":"grok-4.5","status":"completed","output":[{"type":"message","id":"msg_tool_2","role":"assistant","status":"completed","content":[{"type":"output_text","text":"The value is 42."}]}],"usage":{"input_tokens":14132,"output_tokens":6,"total_tokens":14138,"input_tokens_details":{"cached_tokens":0}}}`),
+	}}
+	svc := &OpenAIGatewayService{
+		httpUpstream:      upstream,
+		grokTokenProvider: NewGrokTokenProvider(repo, nil),
+		accountRepo:       repo,
+	}
+	newContext := func(body []byte) *gin.Context {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set("api_key", &APIKey{ID: 5602, Group: &Group{Platform: PlatformGrok}})
+		return c
+	}
+
+	firstResult, err := svc.forwardGrokResponses(context.Background(), newContext(round1), account, round1, "grok", false, time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, firstResult)
+	require.Zero(t, firstResult.Usage.CacheReadInputTokens)
+	secondResult, err := svc.forwardGrokResponses(context.Background(), newContext(round2), account, round2, "grok", false, time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, secondResult)
+	require.Zero(t, secondResult.Usage.CacheReadInputTokens)
+
+	require.Len(t, upstream.requests, 2)
+	require.Len(t, upstream.bodies, 2)
+	for _, req := range upstream.requests {
+		require.Equal(t, xai.DefaultCLIBaseURL+"/responses", req.URL.String())
+		require.Equal(t, "Bearer access-token", req.Header.Get("Authorization"))
+		require.Equal(t, grokCLIVersion, req.Header.Get("X-Grok-Client-Version"))
+	}
+
+	firstBody, secondBody := upstream.bodies[0], upstream.bodies[1]
+	firstIdentity := gjson.GetBytes(firstBody, "prompt_cache_key").String()
+	secondIdentity := gjson.GetBytes(secondBody, "prompt_cache_key").String()
+	require.NotEmpty(t, firstIdentity)
+	require.Equal(t, firstIdentity, secondIdentity)
+	require.Equal(t, firstIdentity, upstream.requests[0].Header.Get(grokConversationIDHeader))
+	require.Equal(t, secondIdentity, upstream.requests[1].Header.Get(grokConversationIDHeader))
+
+	for _, path := range []string{"model", "stream", "instructions", "tools", "tool_choice", "prompt_cache_key"} {
+		require.JSONEq(t, gjson.GetBytes(firstBody, path).Raw, gjson.GetBytes(secondBody, path).Raw, path)
+	}
+	firstInput := gjson.GetBytes(firstBody, "input").Array()
+	secondInput := gjson.GetBytes(secondBody, "input").Array()
+	require.Len(t, firstInput, 1)
+	require.Len(t, secondInput, 4)
+	require.JSONEq(t, firstInput[0].Raw, secondInput[0].Raw)
+	require.Equal(t, "function_call", secondInput[1].Get("type").String())
+	require.Equal(t, "fc_lookup_1", secondInput[1].Get("id").String())
+	require.Equal(t, "call_lookup_1", secondInput[1].Get("call_id").String())
+	require.Equal(t, "lookup", secondInput[1].Get("name").String())
+	require.JSONEq(t, `{"key":"alpha"}`, secondInput[1].Get("arguments").String())
+	require.Equal(t, "function_call_output", secondInput[2].Get("type").String())
+	require.Equal(t, "call_lookup_1", secondInput[2].Get("call_id").String())
+	require.JSONEq(t, `{"value":42}`, secondInput[2].Get("output").String())
+
+	tools := gjson.GetBytes(secondBody, "tools").Array()
+	require.Len(t, tools, 3, "explicit function tools must retain the client tool and gain both native cache-routing tools")
+	require.Equal(t, "function", tools[0].Get("type").String())
+	require.Equal(t, "web_search", tools[1].Get("type").String())
+	require.Equal(t, "x_search", tools[2].Get("type").String())
+	require.Equal(t, "auto", gjson.GetBytes(secondBody, "tool_choice").String())
+	require.False(t, gjson.GetBytes(secondBody, "previous_response_id").Exists())
+}
+
 func TestForwardGrokResponsesFailoverKeepsCacheIdentityAcrossAccounts(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
