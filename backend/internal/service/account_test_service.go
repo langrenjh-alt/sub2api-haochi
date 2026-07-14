@@ -738,10 +738,14 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	var responseBody []byte
+	if resp.StatusCode != http.StatusOK {
+		responseBody, _ = io.ReadAll(resp.Body)
+	}
 	now := time.Now()
 	snapshot := parseGrokQuotaSnapshot(resp.Header, resp.StatusCode, now)
 	if snapshot != nil && s.accountRepo != nil {
-		resetAt, limited := grokRateLimitResetAtForAccount(snapshot, account, now)
+		resetAt, limited := grokRateLimitResetAtForResponse(snapshot, account, responseBody, now)
 		if limited {
 			normalizeGrokExhaustedWindowResets(snapshot, resetAt, now)
 		}
@@ -754,8 +758,7 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok Responses API returned %d: %s", resp.StatusCode, string(body)))
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Grok Responses API returned %d: %s", resp.StatusCode, string(responseBody)))
 	}
 
 	return s.processOpenAIStream(c, resp.Body)

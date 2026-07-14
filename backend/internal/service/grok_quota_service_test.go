@@ -95,6 +95,7 @@ type grokHybridUpstream struct {
 	monthlyLimitCents  *float64
 	activeStatus       int
 	activeHeaders      http.Header
+	activeBody         string
 	billingStarted     chan struct{}
 	billingRelease     <-chan struct{}
 	billingStartOnce   sync.Once
@@ -124,7 +125,11 @@ func (u *grokHybridUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*h
 				"X-Ratelimit-Remaining-Tokens": []string{"1500000"},
 			}
 		}
-		return &http.Response{StatusCode: status, Header: headers, Body: io.NopCloser(strings.NewReader(`{"id":"resp_probe"}`))}, nil
+		responseBody := u.activeBody
+		if responseBody == "" {
+			responseBody = `{"id":"resp_probe"}`
+		}
+		return &http.Response{StatusCode: status, Header: headers, Body: io.NopCloser(strings.NewReader(responseBody))}, nil
 	}
 	if u.billingStarted != nil {
 		u.billingStartOnce.Do(func() { close(u.billingStarted) })
@@ -853,15 +858,18 @@ func TestGrokQuotaServiceQueryQuotaFree429WithoutHeadersUses24HourFallback(t *te
 	account := &Account{
 		ID: 58, Platform: PlatformGrok, Type: AccountTypeOAuth, Concurrency: 1,
 		Credentials: map[string]any{
-			"access_token":      "access-token",
-			"expires_at":        time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-			"subscription_tier": "FREE",
+			"access_token": "access-token",
+			"expires_at":   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 		},
 	}
 	repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
 		accountsByID: map[int64]*Account{account.ID: account},
 	}}
-	upstream := &grokHybridUpstream{activeStatus: http.StatusTooManyRequests}
+	upstream := &grokHybridUpstream{
+		activeStatus:  http.StatusTooManyRequests,
+		activeHeaders: make(http.Header),
+		activeBody:    grokFreeUsageExhaustedResponseForTest,
+	}
 	svc := NewGrokQuotaService(repo, nil, NewGrokTokenProvider(repo, nil), upstream)
 	before := time.Now()
 

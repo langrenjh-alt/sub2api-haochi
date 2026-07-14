@@ -772,12 +772,16 @@ func applyGrokCLIHeaders(headers http.Header) {
 }
 
 func (s *OpenAIGatewayService) updateGrokUsageSnapshot(ctx context.Context, account *Account, snapshot *xai.QuotaSnapshot) {
+	s.updateGrokUsageSnapshotFromResponse(ctx, account, snapshot, nil)
+}
+
+func (s *OpenAIGatewayService) updateGrokUsageSnapshotFromResponse(ctx context.Context, account *Account, snapshot *xai.QuotaSnapshot, responseBody []byte) {
 	if s == nil || account == nil || account.ID <= 0 || snapshot == nil {
 		return
 	}
 	accountID := account.ID
 	now := time.Now()
-	resetAt, hasActiveLimit := grokRateLimitResetAtForAccount(snapshot, account, now)
+	resetAt, hasActiveLimit := grokRateLimitResetAtForResponse(snapshot, account, responseBody, now)
 	if hasActiveLimit {
 		normalizeGrokExhaustedWindowResets(snapshot, resetAt, now)
 	}
@@ -849,8 +853,12 @@ func grokRateLimitResetAt(snapshot *xai.QuotaSnapshot, now time.Time) (time.Time
 }
 
 func grokRateLimitResetAtForAccount(snapshot *xai.QuotaSnapshot, account *Account, now time.Time) (time.Time, bool) {
+	return grokRateLimitResetAtForResponse(snapshot, account, nil, now)
+}
+
+func grokRateLimitResetAtForResponse(snapshot *xai.QuotaSnapshot, account *Account, responseBody []byte, now time.Time) (time.Time, bool) {
 	fallback := grokRateLimitFallbackCooldown
-	if isGrokFreeQuotaAccount(account) {
+	if isGrokFreeUsageExhaustedError(responseBody) || isGrokFreeQuotaAccount(account) {
 		// Free subscriptions use a 24-hour quota window. xAI commonly omits both
 		// quota and Retry-After headers once that allowance is exhausted, so the
 		// short transient-429 fallback would repeatedly put the account back into
@@ -858,6 +866,18 @@ func grokRateLimitResetAtForAccount(snapshot *xai.QuotaSnapshot, account *Accoun
 		fallback = grokFreeRateLimitFallbackCooldown
 	}
 	return grokRateLimitResetAtWithFallback(snapshot, now, fallback)
+}
+
+func isGrokFreeUsageExhaustedError(body []byte) bool {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return false
+	}
+	for _, path := range []string{"code", "error.code"} {
+		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, path).String()), "subscription:free-usage-exhausted") {
+			return true
+		}
+	}
+	return false
 }
 
 func grokRateLimitResetAtWithFallback(snapshot *xai.QuotaSnapshot, now time.Time, fallback time.Duration) (time.Time, bool) {
@@ -1009,7 +1029,7 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 		return
 	}
 	now := time.Now()
-	s.updateGrokUsageSnapshot(ctx, account, parseGrokQuotaSnapshot(headers, statusCode, now))
+	s.updateGrokUsageSnapshotFromResponse(ctx, account, parseGrokQuotaSnapshot(headers, statusCode, now), responseBody)
 	switch statusCode {
 	case http.StatusUnauthorized:
 		s.tempUnscheduleGrok(ctx, account, 10*time.Minute, "grok credentials unauthorized")
@@ -1022,7 +1042,6 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 			s.tempUnscheduleGrok(ctx, account, 2*time.Minute, "grok upstream temporary error")
 		}
 	}
-	_ = responseBody
 }
 
 func (s *OpenAIGatewayService) tempUnscheduleGrok(ctx context.Context, account *Account, cooldown time.Duration, reason string) {

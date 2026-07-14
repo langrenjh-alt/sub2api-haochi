@@ -22,6 +22,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const grokFreeUsageExhaustedResponseForTest = `{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window - tokens (actual/limit): 2071066/2000000."}`
+
 func TestPatchGrokResponsesBodySetsMappedModelAndDropsUnsupportedFields(t *testing.T) {
 	t.Parallel()
 
@@ -1574,21 +1576,37 @@ func TestHandleGrokAccountUpstreamError429UsesFallbackReset(t *testing.T) {
 	require.Zero(t, repo.tempUnschedCalls)
 }
 
-func TestHandleGrokFreeAccountUpstreamError429WithoutHeadersUses24HourFallback(t *testing.T) {
-	account := &Account{
-		ID: 69, Platform: PlatformGrok, Type: AccountTypeOAuth,
-		Credentials: map[string]any{"subscription_tier": "FREE"},
-	}
+func TestHandleGrokFreeUsageExhaustedError429WithoutAccountTierUses24HourFallback(t *testing.T) {
+	account := &Account{ID: 69, Platform: PlatformGrok, Type: AccountTypeOAuth}
 	repo := &grokQuotaAccountRepo{}
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	before := time.Now()
 
-	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, nil, []byte(`{"error":{"message":"quota exhausted"}}`))
+	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, nil, []byte(grokFreeUsageExhaustedResponseForTest))
 
 	require.Equal(t, 1, repo.rateLimitedCalls)
 	require.WithinDuration(t, before.Add(grokFreeRateLimitFallbackCooldown), repo.lastRateLimitResetAt, time.Second)
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 	require.Zero(t, repo.tempUnschedCalls)
+}
+
+func TestIsGrokFreeUsageExhaustedError(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "top-level code", body: grokFreeUsageExhaustedResponseForTest, want: true},
+		{name: "nested code", body: `{"error":{"code":"subscription:free-usage-exhausted","message":"quota exhausted"}}`, want: true},
+		{name: "other 429", body: `{"code":"rate_limit_exceeded","error":"slow down"}`, want: false},
+		{name: "invalid json", body: `subscription:free-usage-exhausted`, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isGrokFreeUsageExhaustedError([]byte(tt.body)))
+		})
+	}
 }
 
 func TestIsGrokFreeQuotaAccountUsesObservedPlanBeforeCredentials(t *testing.T) {

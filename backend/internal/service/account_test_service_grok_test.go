@@ -166,16 +166,15 @@ func TestAccountTestService_GrokFree429WithoutQuotaHeadersUses24HourFallback(t *
 		ID: 15, Name: "grok-oauth-limited-no-headers", Platform: PlatformGrok,
 		Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1,
 		Credentials: map[string]any{
-			"access_token":      "grok-access-token",
-			"expires_at":        time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-			"subscription_tier": "FREE",
+			"access_token": "grok-access-token",
+			"expires_at":   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 		},
 	}
 	baseRepo := &mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}
 	repo := &grokAccountTestRateLimitRepo{mockAccountRepoForGemini: baseRepo}
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusTooManyRequests,
-		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"quota exhausted"}}`)),
+		Body:       io.NopCloser(strings.NewReader(grokFreeUsageExhaustedResponseForTest)),
 	}}
 	svc := &AccountTestService{
 		accountRepo: repo, grokTokenProvider: NewGrokTokenProvider(repo, nil), httpUpstream: upstream,
