@@ -160,14 +160,15 @@ func TestAccountTestService_Grok429PersistsRateLimitReset(t *testing.T) {
 	require.WithinDuration(t, time.Now().Add(45*time.Second), repo.resetAt, time.Second)
 }
 
-func TestAccountTestService_Grok429WithoutQuotaHeadersUsesFallback(t *testing.T) {
+func TestAccountTestService_GrokFree429WithoutQuotaHeadersUses24HourFallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	account := &Account{
 		ID: 15, Name: "grok-oauth-limited-no-headers", Platform: PlatformGrok,
 		Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1,
 		Credentials: map[string]any{
-			"access_token": "grok-access-token",
-			"expires_at":   time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			"access_token":      "grok-access-token",
+			"expires_at":        time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			"subscription_tier": "FREE",
 		},
 	}
 	baseRepo := &mockAccountRepoForGemini{accountsByID: map[int64]*Account{account.ID: account}}
@@ -188,5 +189,5 @@ func TestAccountTestService_Grok429WithoutQuotaHeadersUsesFallback(t *testing.T)
 
 	require.Error(t, err)
 	require.Equal(t, 1, repo.rateLimitedCalls)
-	require.WithinDuration(t, before.Add(grokRateLimitFallbackCooldown), repo.resetAt, time.Second)
+	require.WithinDuration(t, before.Add(grokFreeRateLimitFallbackCooldown), repo.resetAt, time.Second)
 }

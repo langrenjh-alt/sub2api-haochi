@@ -847,6 +847,34 @@ func TestGrokQuotaServiceQueryQuotaFree429PersistsLimitAndKeepsBilling(t *testin
 	require.WithinDuration(t, time.Now().Add(45*time.Second), repo.lastRateLimitResetAt, time.Second)
 }
 
+func TestGrokQuotaServiceQueryQuotaFree429WithoutHeadersUses24HourFallback(t *testing.T) {
+	t.Parallel()
+
+	account := &Account{
+		ID: 58, Platform: PlatformGrok, Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{
+			"access_token":      "access-token",
+			"expires_at":        time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			"subscription_tier": "FREE",
+		},
+	}
+	repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+		accountsByID: map[int64]*Account{account.ID: account},
+	}}
+	upstream := &grokHybridUpstream{activeStatus: http.StatusTooManyRequests}
+	svc := NewGrokQuotaService(repo, nil, NewGrokTokenProvider(repo, nil), upstream)
+	before := time.Now()
+
+	result, err := svc.QueryQuota(context.Background(), account.ID)
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+	require.NotNil(t, result.Snapshot)
+	require.False(t, result.Snapshot.HeadersObserved)
+	require.Equal(t, 1, repo.rateLimitedCalls)
+	require.WithinDuration(t, before.Add(grokFreeRateLimitFallbackCooldown), repo.lastRateLimitResetAt, time.Second)
+}
+
 func TestGrokQuotaServiceResetQuotaUnsupported(t *testing.T) {
 	t.Parallel()
 

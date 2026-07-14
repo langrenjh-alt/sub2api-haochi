@@ -1521,7 +1521,10 @@ func TestHandleGrokAccountUpstreamErrorTempUnschedulesNonRateLimitStates(t *test
 }
 
 func TestHandleGrokAccountUpstreamError429SetsRateLimitedFromRetryAfter(t *testing.T) {
-	account := &Account{ID: 61, Platform: PlatformGrok, Type: AccountTypeOAuth}
+	account := &Account{
+		ID: 61, Platform: PlatformGrok, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"subscription_tier": "FREE"},
+	}
 	repo := &grokQuotaAccountRepo{}
 	svc := &OpenAIGatewayService{accountRepo: repo}
 	before := time.Now()
@@ -1569,6 +1572,69 @@ func TestHandleGrokAccountUpstreamError429UsesFallbackReset(t *testing.T) {
 	require.Equal(t, 1, repo.rateLimitedCalls)
 	require.WithinDuration(t, before.Add(grokRateLimitFallbackCooldown), repo.lastRateLimitResetAt, time.Second)
 	require.Zero(t, repo.tempUnschedCalls)
+}
+
+func TestHandleGrokFreeAccountUpstreamError429WithoutHeadersUses24HourFallback(t *testing.T) {
+	account := &Account{
+		ID: 69, Platform: PlatformGrok, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"subscription_tier": "FREE"},
+	}
+	repo := &grokQuotaAccountRepo{}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	before := time.Now()
+
+	svc.handleGrokAccountUpstreamError(context.Background(), account, http.StatusTooManyRequests, nil, []byte(`{"error":{"message":"quota exhausted"}}`))
+
+	require.Equal(t, 1, repo.rateLimitedCalls)
+	require.WithinDuration(t, before.Add(grokFreeRateLimitFallbackCooldown), repo.lastRateLimitResetAt, time.Second)
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.Zero(t, repo.tempUnschedCalls)
+}
+
+func TestIsGrokFreeQuotaAccountUsesObservedPlanBeforeCredentials(t *testing.T) {
+	tests := []struct {
+		name    string
+		account *Account
+		want    bool
+	}{
+		{
+			name: "credential free",
+			account: &Account{Platform: PlatformGrok, Type: AccountTypeOAuth,
+				Credentials: map[string]any{"subscription_tier": "FREE"}},
+			want: true,
+		},
+		{
+			name: "legacy basic",
+			account: &Account{Platform: PlatformGrok, Type: AccountTypeOAuth,
+				Credentials: map[string]any{"plan_type": "basic"}},
+			want: true,
+		},
+		{
+			name: "observed free",
+			account: &Account{Platform: PlatformGrok, Type: AccountTypeOAuth,
+				Extra: map[string]any{grokQuotaSnapshotExtraKey: xai.QuotaSnapshot{SubscriptionTier: "free"}}},
+			want: true,
+		},
+		{
+			name: "paid billing overrides stale credential",
+			account: &Account{Platform: PlatformGrok, Type: AccountTypeOAuth,
+				Credentials: map[string]any{"subscription_tier": "FREE"},
+				Extra:       map[string]any{grokBillingExtraKey: xai.BillingSummary{Plan: "SuperGrok"}}},
+			want: false,
+		},
+		{
+			name: "api key is not free subscription quota",
+			account: &Account{Platform: PlatformGrok, Type: AccountTypeAPIKey,
+				Credentials: map[string]any{"subscription_tier": "FREE"}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isGrokFreeQuotaAccount(tt.account))
+		})
+	}
 }
 
 func TestGrokRateLimitResetAtUsesFutureWindowAfterRetryAfterExpires(t *testing.T) {
@@ -1696,6 +1762,32 @@ func TestUpdateGrokUsageSnapshotExhaustedSuccessWithoutResetUsesFallback(t *test
 	require.True(t, paused)
 	paused, _ = shouldAutoPauseGrokQuotaWindow("tokens", stored.Tokens, repo.lastRateLimitResetAt.Add(time.Second))
 	require.False(t, paused)
+}
+
+func TestUpdateGrokFreeUsageSnapshotExhaustedWithoutResetUses24HourFallback(t *testing.T) {
+	repo := &grokQuotaAccountRepo{}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	account := &Account{
+		ID: 70, Platform: PlatformGrok, Type: AccountTypeOAuth,
+		Credentials: map[string]any{"subscription_tier": "basic"},
+	}
+	before := time.Now()
+
+	svc.updateGrokUsageSnapshot(context.Background(), account, &xai.QuotaSnapshot{
+		StatusCode: http.StatusOK,
+		Tokens: &xai.QuotaWindow{
+			Limit:     grokInt64PtrForTest(2_000_000),
+			Remaining: grokInt64PtrForTest(0),
+		},
+		UpdatedAt: before.UTC().Format(time.RFC3339),
+	})
+
+	require.Equal(t, 1, repo.rateLimitedCalls)
+	require.WithinDuration(t, before.Add(grokFreeRateLimitFallbackCooldown), repo.lastRateLimitResetAt, time.Second)
+	stored, ok := repo.updates[account.ID][grokQuotaSnapshotExtraKey].(*xai.QuotaSnapshot)
+	require.True(t, ok)
+	require.NotNil(t, stored.Tokens.ResetUnix)
+	require.WithinDuration(t, repo.lastRateLimitResetAt, time.Unix(*stored.Tokens.ResetUnix, 0), time.Second)
 }
 
 func TestOpenAIWSHTTPBridgeGrok429PersistsRateLimit(t *testing.T) {

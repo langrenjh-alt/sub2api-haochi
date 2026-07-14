@@ -741,7 +741,7 @@ func (s *AccountTestService) testGrokAccountConnection(c *gin.Context, account *
 	now := time.Now()
 	snapshot := parseGrokQuotaSnapshot(resp.Header, resp.StatusCode, now)
 	if snapshot != nil && s.accountRepo != nil {
-		resetAt, limited := grokRateLimitResetAt(snapshot, now)
+		resetAt, limited := grokRateLimitResetAtForAccount(snapshot, account, now)
 		if limited {
 			normalizeGrokExhaustedWindowResets(snapshot, resetAt, now)
 		}

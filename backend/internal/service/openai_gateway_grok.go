@@ -25,6 +25,7 @@ const (
 	grokCLIVersion                         = "0.2.93"
 	grokDefaultResponsesModel              = "grok-4.5"
 	grokRateLimitFallbackCooldown          = 2 * time.Minute
+	grokFreeRateLimitFallbackCooldown      = 24 * time.Hour
 )
 
 func (s *OpenAIGatewayService) forwardGrokResponses(
@@ -776,7 +777,7 @@ func (s *OpenAIGatewayService) updateGrokUsageSnapshot(ctx context.Context, acco
 	}
 	accountID := account.ID
 	now := time.Now()
-	resetAt, hasActiveLimit := grokRateLimitResetAt(snapshot, now)
+	resetAt, hasActiveLimit := grokRateLimitResetAtForAccount(snapshot, account, now)
 	if hasActiveLimit {
 		normalizeGrokExhaustedWindowResets(snapshot, resetAt, now)
 	}
@@ -844,8 +845,27 @@ func normalizeGrokExhaustedWindowResets(snapshot *xai.QuotaSnapshot, resetAt, no
 }
 
 func grokRateLimitResetAt(snapshot *xai.QuotaSnapshot, now time.Time) (time.Time, bool) {
+	return grokRateLimitResetAtWithFallback(snapshot, now, grokRateLimitFallbackCooldown)
+}
+
+func grokRateLimitResetAtForAccount(snapshot *xai.QuotaSnapshot, account *Account, now time.Time) (time.Time, bool) {
+	fallback := grokRateLimitFallbackCooldown
+	if isGrokFreeQuotaAccount(account) {
+		// Free subscriptions use a 24-hour quota window. xAI commonly omits both
+		// quota and Retry-After headers once that allowance is exhausted, so the
+		// short transient-429 fallback would repeatedly put the account back into
+		// rotation while it is still exhausted.
+		fallback = grokFreeRateLimitFallbackCooldown
+	}
+	return grokRateLimitResetAtWithFallback(snapshot, now, fallback)
+}
+
+func grokRateLimitResetAtWithFallback(snapshot *xai.QuotaSnapshot, now time.Time, fallback time.Duration) (time.Time, bool) {
 	if snapshot == nil {
 		return time.Time{}, false
+	}
+	if fallback <= 0 {
+		fallback = grokRateLimitFallbackCooldown
 	}
 
 	// Retry-After is xAI's explicit retry boundary. Use the observation time so
@@ -891,9 +911,51 @@ func grokRateLimitResetAt(snapshot *xai.QuotaSnapshot, now time.Time) (time.Time
 		return time.Time{}, false
 	}
 	if exhausted || snapshot.StatusCode == http.StatusTooManyRequests {
-		return now.Add(grokRateLimitFallbackCooldown), true
+		return now.Add(fallback), true
 	}
 	return time.Time{}, false
+}
+
+func isGrokFreeQuotaAccount(account *Account) bool {
+	if account == nil || !account.IsGrokOAuth() {
+		return false
+	}
+
+	// Match the account-list precedence: fresh persisted observations override
+	// imported credential metadata, which can become stale after a plan change.
+	if billing, err := grokBillingSnapshotFromExtra(account.Extra); err == nil && billing != nil {
+		if plan := strings.TrimSpace(billing.Plan); plan != "" {
+			return isGrokFreePlanLabel(plan)
+		}
+	}
+	if snapshot, err := grokQuotaSnapshotFromExtra(account.Extra); err == nil && snapshot != nil {
+		if tier := strings.TrimSpace(snapshot.SubscriptionTier); tier != "" {
+			return isGrokFreePlanLabel(tier)
+		}
+	}
+	if tier := strings.TrimSpace(account.GetCredential("subscription_tier")); tier != "" {
+		return isGrokFreePlanLabel(tier)
+	}
+	if tier := grokExtraString(account.Extra, "subscription_tier"); tier != "" {
+		return isGrokFreePlanLabel(tier)
+	}
+	if plan := strings.TrimSpace(account.GetCredential("plan_type")); plan != "" {
+		return isGrokFreePlanLabel(plan)
+	}
+	return false
+}
+
+func grokExtraString(extra map[string]any, key string) string {
+	if extra == nil {
+		return ""
+	}
+	value, _ := extra[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func isGrokFreePlanLabel(value string) bool {
+	normalized := strings.NewReplacer(" ", "", "_", "", "-", "").Replace(strings.ToLower(strings.TrimSpace(value)))
+	return normalized == "free" || normalized == "basic"
 }
 
 func normalizeGrokRateLimitResetAt(account *Account, resetAt, now time.Time) time.Time {
