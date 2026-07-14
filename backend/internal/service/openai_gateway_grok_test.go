@@ -24,6 +24,22 @@ import (
 
 const grokFreeUsageExhaustedResponseForTest = `{"code":"subscription:free-usage-exhausted","error":"You've used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window - tokens (actual/limit): 2071066/2000000."}`
 
+type blockingGrokSnapshotRepo struct {
+	*grokQuotaAccountRepo
+	updateStarted chan struct{}
+	releaseUpdate chan struct{}
+}
+
+func (r *blockingGrokSnapshotRepo) UpdateExtra(ctx context.Context, id int64, updates map[string]any) error {
+	close(r.updateStarted)
+	select {
+	case <-r.releaseUpdate:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return r.grokQuotaAccountRepo.UpdateExtra(ctx, id, updates)
+}
+
 func TestPatchGrokResponsesBodySetsMappedModelAndDropsUnsupportedFields(t *testing.T) {
 	t.Parallel()
 
@@ -1588,6 +1604,35 @@ func TestHandleGrokFreeUsageExhaustedError429WithoutAccountTierUses24HourFallbac
 	require.WithinDuration(t, before.Add(grokFreeRateLimitFallbackCooldown), repo.lastRateLimitResetAt, time.Second)
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 	require.Zero(t, repo.tempUnschedCalls)
+}
+
+func TestHandleGrokFreeUsageExhaustedBlocksSchedulingBeforeSnapshotWrite(t *testing.T) {
+	account := &Account{ID: 71, Platform: PlatformGrok, Type: AccountTypeOAuth}
+	baseRepo := &grokQuotaAccountRepo{}
+	repo := &blockingGrokSnapshotRepo{
+		grokQuotaAccountRepo: baseRepo,
+		updateStarted:        make(chan struct{}),
+		releaseUpdate:        make(chan struct{}),
+	}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		svc.handleGrokAccountUpstreamError(
+			context.Background(),
+			account,
+			http.StatusTooManyRequests,
+			nil,
+			[]byte(grokFreeUsageExhaustedResponseForTest),
+		)
+	}()
+
+	<-repo.updateStarted
+	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+	require.Equal(t, 1, baseRepo.rateLimitedCalls)
+	close(repo.releaseUpdate)
+	<-done
 }
 
 func TestIsGrokFreeUsageExhaustedError(t *testing.T) {

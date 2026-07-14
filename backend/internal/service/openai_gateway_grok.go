@@ -798,19 +798,16 @@ func (s *OpenAIGatewayService) updateGrokUsageSnapshotFromResponse(ctx context.C
 		var cancel context.CancelFunc
 		stateCtx, cancel = openAIAccountStateContext(ctx)
 		defer cancel()
+		// Install the process-local block before any repository I/O, then publish
+		// the durable rate limit before the auxiliary quota snapshot. Otherwise a
+		// slow snapshot write leaves a window where concurrent requests can keep
+		// selecting an account that has already returned a decisive 429.
+		s.rateLimitGrok(stateCtx, account, resetAt)
 	}
 	if s.accountRepo != nil {
 		_ = s.accountRepo.UpdateExtra(stateCtx, accountID, map[string]any{
 			grokQuotaSnapshotExtraKey: snapshot,
 		})
-	}
-	// Error responses are reconciled by handleGrokAccountUpstreamError, which
-	// also installs the immediate in-memory scheduling block. Successful
-	// responses can still consume the last available request/token, so persist
-	// that exhausted window here as a real rate limit rather than relying only
-	// on the passive snapshot scheduler check.
-	if hasActiveLimit {
-		s.rateLimitGrok(stateCtx, account, resetAt)
 	}
 }
 
