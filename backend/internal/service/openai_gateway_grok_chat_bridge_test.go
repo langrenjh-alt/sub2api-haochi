@@ -277,6 +277,7 @@ func TestForwardGrokOpenCodeToolChatViaResponsesKeepsCachePrefix(t *testing.T) {
 		],
 		"stream":false,
 		"max_tokens":32768,
+		"reasoning_effort":"high",
 		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a fixture","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
 		"tool_choice":"auto"
 	}`)
@@ -291,6 +292,7 @@ func TestForwardGrokOpenCodeToolChatViaResponsesKeepsCachePrefix(t *testing.T) {
 		],
 		"stream":false,
 		"max_tokens":32768,
+		"reasoning_effort":"high",
 		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a fixture","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
 		"tool_choice":"auto"
 	}`)
@@ -325,6 +327,8 @@ func TestForwardGrokOpenCodeToolChatViaResponsesKeepsCachePrefix(t *testing.T) {
 	require.NotNil(t, firstResult)
 	require.Zero(t, firstResult.Usage.CacheReadInputTokens)
 	require.Equal(t, grokChatResponsesEndpoint, firstResult.UpstreamEndpoint)
+	require.NotNil(t, firstResult.ReasoningEffort)
+	require.Equal(t, "high", *firstResult.ReasoningEffort)
 	require.Equal(t, http.StatusOK, firstRecorder.Code)
 
 	secondContext, secondRecorder := newContext(secondTurn, 7801)
@@ -333,6 +337,8 @@ func TestForwardGrokOpenCodeToolChatViaResponsesKeepsCachePrefix(t *testing.T) {
 	require.NotNil(t, secondResult)
 	require.Equal(t, 12288, secondResult.Usage.CacheReadInputTokens)
 	require.Equal(t, grokChatResponsesEndpoint, secondResult.UpstreamEndpoint)
+	require.NotNil(t, secondResult.ReasoningEffort)
+	require.Equal(t, "high", *secondResult.ReasoningEffort)
 	require.Equal(t, http.StatusOK, secondRecorder.Code)
 
 	require.Len(t, upstream.requests, 2)
@@ -357,6 +363,8 @@ func TestForwardGrokOpenCodeToolChatViaResponsesKeepsCachePrefix(t *testing.T) {
 		require.Equal(t, "web_search", tools[1].Get("type").String())
 		require.Equal(t, "x_search", tools[2].Get("type").String())
 		require.Equal(t, "auto", gjson.GetBytes(body, "tool_choice").String())
+		require.Equal(t, "high", gjson.GetBytes(body, "reasoning_effort").String())
+		require.False(t, gjson.GetBytes(body, "reasoning").Exists())
 	}
 
 	firstInput := gjson.GetBytes(firstBody, "input").Array()

@@ -12,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -467,12 +468,12 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	}
 	responsesReq.Model = upstreamModel
 	responsesReq.Stream = true
-	if responsesReq.Reasoning != nil {
-		// Chat reasoning_effort has no summary switch. The generic converter
-		// enables summary=auto for Codex, so remove it here to preserve the Chat
-		// request while retaining the requested effort.
-		responsesReq.Reasoning.Summary = ""
-	}
+	// xAI's Grok CLI Responses endpoint consumes the Chat-compatible top-level
+	// reasoning_effort field. The generic OpenAI converter emits
+	// reasoning.effort instead, which the endpoint accepts but does not apply.
+	// Re-add the original field after marshaling and omit the nested variant.
+	reasoningEffort := strings.ToLower(strings.TrimSpace(chatReq.ReasoningEffort))
+	responsesReq.Reasoning = nil
 	// These fields are useful to Codex but are not needed by the Grok CLI
 	// protocol. Keep the bridge request as close as possible to native Grok.
 	responsesReq.Include = nil
@@ -481,6 +482,12 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	responsesBody, err := json.Marshal(responsesReq)
 	if err != nil {
 		return nil, fmt.Errorf("marshal grok responses bridge request: %w", err)
+	}
+	if reasoningEffort != "" {
+		responsesBody, err = sjson.SetBytes(responsesBody, "reasoning_effort", reasoningEffort)
+		if err != nil {
+			return nil, fmt.Errorf("preserve grok chat reasoning effort: %w", err)
+		}
 	}
 	responsesBody, err = patchGrokResponsesBody(responsesBody, upstreamModel)
 	if err != nil {
