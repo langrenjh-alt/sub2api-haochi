@@ -237,6 +237,7 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 
 	var finalResp *apicompat.AnthropicResponse
 	var usage ClaudeUsage
+	var contentDeltas anthropicContentDeltaBuffers
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -279,16 +280,12 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 		if event.Type == "content_block_delta" && event.Delta != nil && finalResp != nil && event.Index != nil {
 			idx := *event.Index
 			if idx < len(finalResp.Content) {
-				switch event.Delta.Type {
-				case "text_delta":
-					finalResp.Content[idx].Text += event.Delta.Text
-				case "thinking_delta":
-					finalResp.Content[idx].Thinking += event.Delta.Thinking
-				case "input_json_delta":
-					finalResp.Content[idx].Input = appendRawJSON(finalResp.Content[idx].Input, event.Delta.PartialJSON)
-				}
+				contentDeltas.append(finalResp.Content, idx, event.Delta)
 			}
 		}
+	}
+	if finalResp != nil {
+		contentDeltas.flush(finalResp.Content)
 	}
 
 	if err := scanner.Err(); err != nil {

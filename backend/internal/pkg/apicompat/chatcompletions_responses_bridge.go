@@ -1063,6 +1063,7 @@ type ChatCompletionsToResponsesStreamState struct {
 
 	// Tool-call lifecycle, keyed by the upstream tool_call index.
 	ToolCalls       map[int]*ChatToolCall
+	ToolArguments   map[int]*strings.Builder
 	ToolItemIDs     map[int]string
 	ToolOutputIndex map[int]int
 
@@ -1106,6 +1107,7 @@ func NewChatCompletionsToResponsesStreamState(model string) *ChatCompletionsToRe
 		Model:            model,
 		Created:          time.Now().Unix(),
 		ToolCalls:        make(map[int]*ChatToolCall),
+		ToolArguments:    make(map[int]*strings.Builder),
 		ToolItemIDs:      make(map[int]string),
 		ToolOutputIndex:  make(map[int]int),
 		toolIsCustom:     make(map[int]bool),
@@ -1113,6 +1115,41 @@ func NewChatCompletionsToResponsesStreamState(model string) *ChatCompletionsToRe
 		toolNamespace:    make(map[int]NamespacedToolName),
 		toolAnnounced:    make(map[int]bool),
 	}
+}
+
+func (state *ChatCompletionsToResponsesStreamState) appendToolArguments(idx int, fragment string) {
+	if state == nil || fragment == "" {
+		return
+	}
+	if state.ToolArguments == nil {
+		state.ToolArguments = make(map[int]*strings.Builder)
+	}
+	builder := state.ToolArguments[idx]
+	if builder == nil {
+		builder = &strings.Builder{}
+		state.ToolArguments[idx] = builder
+	}
+	_, _ = builder.WriteString(fragment)
+}
+
+func (state *ChatCompletionsToResponsesStreamState) toolArguments(idx int, stored *ChatToolCall) string {
+	if state != nil {
+		if builder := state.ToolArguments[idx]; builder != nil {
+			return builder.String()
+		}
+	}
+	if stored == nil {
+		return ""
+	}
+	return stored.Function.Arguments
+}
+
+func (state *ChatCompletionsToResponsesStreamState) materializeToolArguments(idx int, stored *ChatToolCall) string {
+	arguments := state.toolArguments(idx, stored)
+	if stored != nil {
+		stored.Function.Arguments = arguments
+	}
+	return arguments
 }
 
 func (state *ChatCompletionsToResponsesStreamState) allocOutputIndex() int {
@@ -1207,7 +1244,7 @@ func ChatCompletionsChunkToResponsesEvents(
 			}
 			events = append(events, announceChatToolItem(state, idx, stored, false)...)
 			if toolCall.Function.Arguments != "" {
-				stored.Function.Arguments += toolCall.Function.Arguments
+				state.appendToolArguments(idx, toolCall.Function.Arguments)
 				// 未宣告（名字未到）时仅累积，宣告时统一补发；custom 调用的
 				// arguments 是包裹 input 的 JSON 片段，无法增量还原为自由文本
 				// 输入，缓冲整份 arguments 收尾时一次性下发（见 closeChatToolItems）；
@@ -1477,11 +1514,12 @@ func announceChatToolItem(
 		},
 	})}
 	// 迟到宣告时补发已累积的参数增量（custom/tool_search 的输入收尾统一下发，不补发）。
-	if !isCustom && !isToolSearch && stored.Function.Arguments != "" {
+	arguments := state.toolArguments(idx, stored)
+	if !isCustom && !isToolSearch && arguments != "" {
 		events = append(events, chatToResponsesEvent(state, "response.function_call_arguments.delta", &ResponsesStreamEvent{
 			OutputIndex: state.ToolOutputIndex[idx],
 			ItemID:      state.ToolItemIDs[idx],
-			Delta:       stored.Function.Arguments,
+			Delta:       arguments,
 			CallID:      stored.ID,
 			Name:        stored.Function.Name,
 		}))
@@ -1509,7 +1547,7 @@ func closeChatToolItems(state *ChatCompletionsToResponsesStreamState) []Response
 		}
 		// 名字始终未到导致尚未宣告的调用，收尾前按最终名字兜底宣告。
 		events = append(events, announceChatToolItem(state, i, toolCall, true)...)
-		arguments := toolCall.Function.Arguments
+		arguments := state.materializeToolArguments(i, toolCall)
 		if strings.TrimSpace(arguments) == "" {
 			arguments = "{}"
 		}
@@ -1621,7 +1659,7 @@ func (state *ChatCompletionsToResponsesStreamState) chatOutput() []ResponsesOutp
 		if !ok || toolCall == nil {
 			continue
 		}
-		arguments := toolCall.Function.Arguments
+		arguments := state.materializeToolArguments(i, toolCall)
 		if strings.TrimSpace(arguments) == "" {
 			arguments = "{}"
 		}

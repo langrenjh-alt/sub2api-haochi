@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +21,43 @@ import (
 
 type contentModerationTestSettingRepo struct {
 	values map[string]string
+}
+
+type countingContentModerationSettingRepo struct {
+	*contentModerationTestSettingRepo
+	getValueCalls atomic.Int64
+	started       chan struct{}
+	release       chan struct{}
+	startOnce     sync.Once
+}
+
+type failingContentModerationSettingRepo struct {
+	*contentModerationTestSettingRepo
+	getValueCalls atomic.Int64
+	delay         time.Duration
+}
+
+func (r *failingContentModerationSettingRepo) GetValue(context.Context, string) (string, error) {
+	r.getValueCalls.Add(1)
+	if r.delay > 0 {
+		time.Sleep(r.delay)
+	}
+	return "", errors.New("settings unavailable")
+}
+
+func (r *countingContentModerationSettingRepo) GetValue(ctx context.Context, key string) (string, error) {
+	r.getValueCalls.Add(1)
+	if r.started != nil {
+		r.startOnce.Do(func() { close(r.started) })
+	}
+	if r.release != nil {
+		select {
+		case <-r.release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	return r.contentModerationTestSettingRepo.GetValue(ctx, key)
 }
 
 func (r *contentModerationTestSettingRepo) Get(ctx context.Context, key string) (*Setting, error) {
@@ -77,13 +116,17 @@ func (r *contentModerationTestSettingRepo) Delete(ctx context.Context, key strin
 }
 
 type contentModerationTestRepo struct {
-	mu   sync.Mutex
-	logs []ContentModerationLog
+	mu        sync.Mutex
+	logs      []ContentModerationLog
+	createErr error
 }
 
 func (r *contentModerationTestRepo) CreateLog(ctx context.Context, log *ContentModerationLog) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.createErr != nil {
+		return r.createErr
+	}
 	if log != nil {
 		r.logs = append(r.logs, *log)
 	}
@@ -157,6 +200,7 @@ type contentModerationTestHashCache struct {
 	deleted       []string
 	hasResult     bool
 	hasResultUsed bool
+	recordErr     error
 }
 
 type contentModerationTestUserRepo struct {
@@ -307,6 +351,9 @@ func (i *contentModerationTestAuthCacheInvalidator) InvalidateAuthCacheByGroupID
 func (c *contentModerationTestHashCache) RecordFlaggedInputHash(ctx context.Context, inputHash string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.recordErr != nil {
+		return c.recordErr
+	}
 	if c.hashes == nil {
 		c.hashes = map[string]struct{}{}
 	}
@@ -724,6 +771,303 @@ func TestContentModerationLoadConfig_LegacyConfigDefaultsModelFilterToAll(t *tes
 	require.Empty(t, cfg.ModelFilter.Models)
 	require.True(t, cfg.includesModel("gpt-5.5"))
 	require.True(t, cfg.includesModel("gpt-5.4"))
+}
+
+func TestContentModerationLoadConfigCoalescesConcurrentReads(t *testing.T) {
+	repo := &countingContentModerationSettingRepo{
+		contentModerationTestSettingRepo: &contentModerationTestSettingRepo{values: map[string]string{}},
+		started:                          make(chan struct{}),
+		release:                          make(chan struct{}),
+	}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+
+	var wg sync.WaitGroup
+	var loadErrors atomic.Int64
+	start := make(chan struct{})
+	for i := 0; i < maxContentModerationWorkerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := svc.loadConfig(context.Background()); err != nil {
+				loadErrors.Add(1)
+			}
+		}()
+	}
+	close(start)
+	select {
+	case <-repo.started:
+	case <-time.After(time.Second):
+		t.Fatal("config load did not start")
+	}
+	close(repo.release)
+	wg.Wait()
+
+	require.Zero(t, loadErrors.Load())
+	require.Equal(t, int64(1), repo.getValueCalls.Load())
+	_, err := svc.loadConfig(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), repo.getValueCalls.Load())
+}
+
+func TestContentModerationRiskControlReadIsCachedAndCoalesced(t *testing.T) {
+	repo := &countingContentModerationSettingRepo{
+		contentModerationTestSettingRepo: &contentModerationTestSettingRepo{values: map[string]string{
+			SettingKeyRiskControlEnabled: "true",
+		}},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+
+	var wg sync.WaitGroup
+	var disabled atomic.Int64
+	start := make(chan struct{})
+	for i := 0; i < maxContentModerationWorkerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if !svc.isRiskControlEnabled(context.Background()) {
+				disabled.Add(1)
+			}
+		}()
+	}
+	close(start)
+	select {
+	case <-repo.started:
+	case <-time.After(time.Second):
+		t.Fatal("risk control load did not start")
+	}
+	close(repo.release)
+	wg.Wait()
+
+	require.Zero(t, disabled.Load())
+	require.Equal(t, int64(1), repo.getValueCalls.Load())
+	require.True(t, svc.isRiskControlEnabled(context.Background()))
+	require.Equal(t, int64(1), repo.getValueCalls.Load())
+}
+
+func TestContentModerationConfigCacheRejectsStaleLoaderWrite(t *testing.T) {
+	svc := NewContentModerationService(&contentModerationTestSettingRepo{}, nil, nil, nil, nil, nil, nil)
+	stale := defaultContentModerationConfig()
+	stale.WorkerCount = 2
+	updated := defaultContentModerationConfig()
+	updated.WorkerCount = 8
+
+	loaderGeneration := svc.configGeneration.Load()
+	svc.publishConfigCache(updated, time.Now())
+	svc.storeConfigCacheIfGeneration(stale, time.Now(), loaderGeneration)
+
+	cached := svc.cachedConfig(time.Now())
+	require.NotNil(t, cached)
+	require.Equal(t, 8, cached.WorkerCount)
+}
+
+func TestContentModerationStaleRequestCannotRaisePublishedWorkerLimit(t *testing.T) {
+	svc := &ContentModerationService{
+		asyncQueue:         make(chan contentModerationTask, 1),
+		workerLimit:        defaultContentModerationWorkerCount,
+		workerStateChanged: make(chan struct{}),
+	}
+	updated := defaultContentModerationConfig()
+	updated.WorkerCount = 1
+	svc.publishConfigCache(updated, time.Now())
+	stale := defaultContentModerationConfig()
+	stale.WorkerCount = maxContentModerationWorkerCount
+
+	svc.enqueueAsync(ContentModerationCheckInput{}, stale, ContentModerationInput{}, "hash")
+	enabled, _ := svc.workerState(1)
+	require.False(t, enabled)
+}
+
+func TestContentModerationInitialConfigLoadPublishesWorkerLimit(t *testing.T) {
+	cfg := defaultContentModerationConfig()
+	cfg.WorkerCount = 8
+	raw, err := json.Marshal(cfg)
+	require.NoError(t, err)
+	svc := NewContentModerationService(&contentModerationTestSettingRepo{values: map[string]string{
+		SettingKeyContentModerationConfig: string(raw),
+	}}, nil, nil, nil, nil, nil, nil)
+
+	_, err = svc.loadConfig(context.Background())
+	require.NoError(t, err)
+	enabled, _ := svc.workerState(7)
+	require.True(t, enabled)
+}
+
+func TestContentModerationConfigLoadErrorsHaveRetryCooldown(t *testing.T) {
+	repo := &failingContentModerationSettingRepo{
+		contentModerationTestSettingRepo: &contentModerationTestSettingRepo{},
+	}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+
+	_, firstErr := svc.loadConfig(context.Background())
+	_, secondErr := svc.loadConfig(context.Background())
+	require.Error(t, firstErr)
+	require.Error(t, secondErr)
+	require.Equal(t, int64(1), repo.getValueCalls.Load())
+}
+
+func TestContentModerationRiskControlLoadErrorsHaveRetryCooldown(t *testing.T) {
+	repo := &failingContentModerationSettingRepo{
+		contentModerationTestSettingRepo: &contentModerationTestSettingRepo{},
+	}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+
+	require.False(t, svc.isRiskControlEnabled(context.Background()))
+	require.False(t, svc.isRiskControlEnabled(context.Background()))
+	require.Equal(t, int64(1), repo.getValueCalls.Load())
+}
+
+func TestContentModerationRiskControlErrorCooldownStartsAfterSlowLoad(t *testing.T) {
+	repo := &failingContentModerationSettingRepo{
+		contentModerationTestSettingRepo: &contentModerationTestSettingRepo{},
+		delay:                            250 * time.Millisecond,
+	}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+
+	require.False(t, svc.isRiskControlEnabled(context.Background()))
+	require.Greater(t, time.Until(svc.riskControlExpiresAt), 900*time.Millisecond)
+	require.False(t, svc.isRiskControlEnabled(context.Background()))
+	require.Equal(t, int64(1), repo.getValueCalls.Load())
+}
+
+func TestContentModerationAsyncTaskDoesNotRetainConfigSnapshot(t *testing.T) {
+	svc := &ContentModerationService{
+		asyncQueue:         make(chan contentModerationTask, 1),
+		workerLimit:        1,
+		workerStateChanged: make(chan struct{}),
+	}
+	cfg := defaultContentModerationConfig()
+	cfg.WorkerCount = 1
+	svc.enqueueAsync(ContentModerationCheckInput{}, cfg, ContentModerationInput{}, "hash")
+
+	task := <-svc.asyncQueue
+	require.Nil(t, task.config)
+}
+
+func TestContentModerationRecordTaskRetainsOnlySideEffectConfig(t *testing.T) {
+	svc := &ContentModerationService{
+		asyncQueue:         make(chan contentModerationTask, 1),
+		workerLimit:        1,
+		workerStateChanged: make(chan struct{}),
+	}
+	cfg := defaultContentModerationConfig()
+	cfg.APIKeys = []string{"secret"}
+	cfg.BlockedKeywords = []string{"large-keyword-list"}
+	cfg.ModelFilter.Models = []string{"model"}
+	svc.enqueueRecord(ContentModerationCheckInput{}, cfg, &ContentModerationLog{}, "hash", true, true)
+
+	task := <-svc.asyncQueue
+	require.NotNil(t, task.config)
+	require.Empty(t, task.config.APIKeys)
+	require.Empty(t, task.config.BlockedKeywords)
+	require.Empty(t, task.config.ModelFilter.Models)
+	require.Equal(t, cfg.BanThreshold, task.config.BanThreshold)
+	require.Equal(t, cfg.ViolationWindowHours, task.config.ViolationWindowHours)
+	require.Equal(t, cfg.EmailOnHit, task.config.EmailOnHit)
+	require.Equal(t, cfg.AutoBanEnabled, task.config.AutoBanEnabled)
+}
+
+func TestContentModerationQueueFullLogsAreThrottled(t *testing.T) {
+	svc := &ContentModerationService{asyncQueue: make(chan contentModerationTask, 1)}
+	svc.asyncQueue <- contentModerationTask{}
+	cfg := defaultContentModerationConfig()
+	cfg.QueueSize = 1
+
+	svc.enqueueAsync(ContentModerationCheckInput{UserID: 1}, cfg, ContentModerationInput{}, "hash")
+	firstLogAt := svc.queueFullLastLog.Load()
+	for i := 0; i < 99; i++ {
+		svc.enqueueAsync(ContentModerationCheckInput{UserID: 1}, cfg, ContentModerationInput{}, "hash")
+	}
+
+	require.Equal(t, int64(100), svc.asyncDropped.Load())
+	require.NotZero(t, firstLogAt)
+	require.Equal(t, firstLogAt, svc.queueFullLastLog.Load())
+}
+
+func TestContentModerationPersistenceFailureLogsAreThrottledPerEvent(t *testing.T) {
+	failure := errors.New("persistence unavailable")
+	svc := &ContentModerationService{
+		repo:      &contentModerationTestRepo{createErr: failure},
+		hashCache: &contentModerationTestHashCache{recordErr: failure},
+	}
+	log := &ContentModerationLog{Endpoint: "/v1/messages", Action: ContentModerationActionBlock}
+
+	svc.persistContentModerationLog(context.Background(), nil, log, "hash", true, false)
+	firstHashLogAt := svc.recordHashFailureLastLog.Load()
+	firstCreateLogAt := svc.createLogFailureLastLog.Load()
+	require.NotZero(t, firstHashLogAt)
+	require.NotZero(t, firstCreateLogAt)
+
+	svc.persistContentModerationLog(context.Background(), nil, log, "hash", true, false)
+	require.Equal(t, firstHashLogAt, svc.recordHashFailureLastLog.Load())
+	require.Equal(t, firstCreateLogAt, svc.createLogFailureLastLog.Load())
+
+	expiredHashLogAt := firstHashLogAt - int64(contentModerationHotLogInterval)
+	svc.recordHashFailureLastLog.Store(expiredHashLogAt)
+	svc.persistContentModerationLog(context.Background(), nil, log, "hash", true, false)
+	require.Greater(t, svc.recordHashFailureLastLog.Load(), expiredHashLogAt)
+	require.Equal(t, firstCreateLogAt, svc.createLogFailureLastLog.Load())
+}
+
+func TestContentModerationFailureLogThrottleAllowsOneConcurrentLog(t *testing.T) {
+	var lastLog atomic.Int64
+	var allowed atomic.Int64
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if shouldLogContentModerationWarning(&lastLog) {
+				allowed.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	require.Equal(t, int64(1), allowed.Load())
+	require.NotZero(t, lastLog.Load())
+}
+
+func TestContentModerationWorkerWaitsUntilEnabled(t *testing.T) {
+	svc := &ContentModerationService{
+		asyncQueue:         make(chan contentModerationTask, 1),
+		workerLimit:        1,
+		workerStateChanged: make(chan struct{}),
+	}
+	svc.asyncQueue <- contentModerationTask{config: defaultContentModerationConfig()}
+	done := make(chan struct{})
+	go func() {
+		svc.worker(1)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	require.Len(t, svc.asyncQueue, 1)
+	svc.setWorkerLimit(2)
+	require.Eventually(t, func() bool { return len(svc.asyncQueue) == 0 }, time.Second, 10*time.Millisecond)
+	close(svc.asyncQueue)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop after queue closed")
+	}
+}
+
+func TestContentModerationUpdateConfigPublishesWorkerLimit(t *testing.T) {
+	repo := &contentModerationTestSettingRepo{values: map[string]string{}}
+	svc := NewContentModerationService(repo, nil, nil, nil, nil, nil, nil)
+	workerCount := 8
+
+	_, err := svc.UpdateConfig(context.Background(), UpdateContentModerationConfigInput{WorkerCount: &workerCount})
+	require.NoError(t, err)
+	enabled, _ := svc.workerState(workerCount - 1)
+	require.True(t, enabled)
 }
 
 func TestContentModerationCheck_ModelFilterUsesRequestedModelNotBodyModel(t *testing.T) {

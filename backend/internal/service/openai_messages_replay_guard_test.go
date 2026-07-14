@@ -56,3 +56,59 @@ func TestApplyAnthropicCompatFullReplayGuard_KeepsToolBoundaryIntact(t *testing.
 	require.Contains(t, string(req.Messages[0].Content), `"toolu_keep"`)
 	require.Contains(t, string(req.Messages[2].Content), `"tool_result"`)
 }
+
+func TestExpandAnthropicCompatTrimBoundary_DeepDependencyChain(t *testing.T) {
+	t.Parallel()
+
+	const messageCount = 4096
+	messages := buildDeepAnthropicToolDependencyMessages(0, messageCount)
+	start := len(messages) - openAICompatAnthropicReplayMaxTailMessages
+
+	result := expandAnthropicCompatTrimBoundary(messages, start)
+
+	require.Zero(t, result)
+}
+
+func TestApplyAnthropicCompatFullReplayGuard_DeepDependencyStopsAtRoot(t *testing.T) {
+	t.Parallel()
+
+	const (
+		unrelatedPrefix = 128
+		chainLength     = 2048
+	)
+	messages := make([]apicompat.AnthropicMessage, unrelatedPrefix)
+	for i := range messages {
+		messages[i] = apicompat.AnthropicMessage{
+			Role:    "user",
+			Content: json.RawMessage(fmt.Sprintf(`"unrelated-%04d"`, i)),
+		}
+	}
+	messages = append(messages, buildDeepAnthropicToolDependencyMessages(unrelatedPrefix, chainLength)...)
+	req := &apicompat.AnthropicRequest{Messages: messages}
+
+	trimmed := applyAnthropicCompatFullReplayGuard(req)
+
+	require.True(t, trimmed)
+	require.Len(t, req.Messages, chainLength)
+	require.Contains(t, string(req.Messages[0].Content), fmt.Sprintf(`"tool-%d"`, unrelatedPrefix))
+}
+
+func buildDeepAnthropicToolDependencyMessages(firstID, count int) []apicompat.AnthropicMessage {
+	messages := make([]apicompat.AnthropicMessage, 0, count)
+	for offset := 0; offset < count; offset++ {
+		id := firstID + offset
+		content := fmt.Sprintf(`[{"type":"tool_use","id":"tool-%d","name":"Read","input":{}}]`, id)
+		if offset > 0 {
+			content = fmt.Sprintf(
+				`[{"type":"tool_use","id":"tool-%d","name":"Read","input":{}},{"type":"tool_result","tool_use_id":"tool-%d","content":"ok"}]`,
+				id,
+				id-1,
+			)
+		}
+		messages = append(messages, apicompat.AnthropicMessage{
+			Role:    "assistant",
+			Content: json.RawMessage(content),
+		})
+	}
+	return messages
+}

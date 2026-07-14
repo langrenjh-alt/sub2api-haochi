@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,6 +11,41 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
+
+type blockingRateLimitResetLoader struct {
+	calls   int64
+	started chan struct{}
+	release chan struct{}
+	done    chan struct{}
+}
+
+type concurrentRateLimitResetLoader struct {
+	calls   atomic.Int64
+	release chan struct{}
+}
+
+func (l *concurrentRateLimitResetLoader) GetRateLimitData(context.Context, int64) (*APIKeyRateLimitData, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (l *concurrentRateLimitResetLoader) ResetRateLimitWindows(context.Context, int64) error {
+	l.calls.Add(1)
+	<-l.release
+	return nil
+}
+
+func (l *blockingRateLimitResetLoader) GetRateLimitData(context.Context, int64) (*APIKeyRateLimitData, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (l *blockingRateLimitResetLoader) ResetRateLimitWindows(context.Context, int64) error {
+	if atomic.AddInt64(&l.calls, 1) == 1 {
+		close(l.started)
+	}
+	<-l.release
+	close(l.done)
+	return nil
+}
 
 type billingCacheWorkerStub struct {
 	balanceUpdates      int64
@@ -129,4 +165,95 @@ func TestBillingCacheServiceEnqueueAfterStopReturnsFalse(t *testing.T) {
 		amount: 1,
 	})
 	require.False(t, enqueued)
+}
+
+func TestBillingCacheServiceCoalescesExpiredWindowResets(t *testing.T) {
+	loader := &blockingRateLimitResetLoader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+	svc := &BillingCacheService{
+		cache:                 &billingCacheWorkerStub{},
+		apiKeyRateLimitLoader: loader,
+	}
+	expired := time.Now().Add(-RateLimitWindow5h - time.Minute)
+	apiKey := &APIKey{
+		ID:            42,
+		RateLimit5h:   10,
+		Window5hStart: &expired,
+	}
+
+	var wg sync.WaitGroup
+	var evaluationErrors int64
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := svc.evaluateRateLimits(context.Background(), apiKey, 1, 0, 0, apiKey.Window5hStart, nil, nil); err != nil {
+				atomic.AddInt64(&evaluationErrors, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	require.Zero(t, atomic.LoadInt64(&evaluationErrors))
+
+	select {
+	case <-loader.started:
+	case <-time.After(time.Second):
+		t.Fatal("rate limit reset did not start")
+	}
+	require.Equal(t, int64(1), atomic.LoadInt64(&loader.calls))
+
+	for i := 0; i < 20; i++ {
+		require.NoError(t, svc.evaluateRateLimits(context.Background(), apiKey, 1, 0, 0, apiKey.Window5hStart, nil, nil))
+	}
+	require.Equal(t, int64(1), atomic.LoadInt64(&loader.calls))
+
+	close(loader.release)
+	select {
+	case <-loader.done:
+	case <-time.After(time.Second):
+		t.Fatal("rate limit reset did not finish")
+	}
+
+	for i := 0; i < 20; i++ {
+		require.NoError(t, svc.evaluateRateLimits(context.Background(), apiKey, 1, 0, 0, apiKey.Window5hStart, nil, nil))
+	}
+	require.Equal(t, int64(1), atomic.LoadInt64(&loader.calls))
+}
+
+func TestBillingCacheServiceDoesNotResetNilRateLimitWindows(t *testing.T) {
+	loader := &concurrentRateLimitResetLoader{release: make(chan struct{})}
+	svc := &BillingCacheService{
+		cache:                 &billingCacheWorkerStub{},
+		apiKeyRateLimitLoader: loader,
+	}
+	apiKey := &APIKey{ID: 42, RateLimit5h: 10}
+
+	for i := 0; i < 20; i++ {
+		require.NoError(t, svc.evaluateRateLimits(context.Background(), apiKey, apiKey.RateLimit5h, 0, 0, nil, nil, nil))
+	}
+	require.Never(t, func() bool { return loader.calls.Load() > 0 }, 100*time.Millisecond, 10*time.Millisecond)
+	close(loader.release)
+}
+
+func TestBillingCacheServiceBoundsDistinctRateLimitResets(t *testing.T) {
+	loader := &concurrentRateLimitResetLoader{release: make(chan struct{})}
+	svc := &BillingCacheService{
+		cache:                 &billingCacheWorkerStub{},
+		apiKeyRateLimitLoader: loader,
+	}
+	expired := time.Now().Add(-RateLimitWindow5h - time.Minute)
+
+	for i := 1; i <= apiKeyRateLimitResetConcurrency*4; i++ {
+		apiKey := &APIKey{ID: int64(i), RateLimit5h: 10}
+		require.NoError(t, svc.evaluateRateLimits(context.Background(), apiKey, 1, 0, 0, &expired, nil, nil))
+	}
+	require.Eventually(t, func() bool {
+		return loader.calls.Load() == int64(apiKeyRateLimitResetConcurrency)
+	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, int64(apiKeyRateLimitResetConcurrency), loader.calls.Load())
+	require.LessOrEqual(t, len(svc.apiKeyRateLimitResets), apiKeyRateLimitResetConcurrency)
+	close(loader.release)
 }

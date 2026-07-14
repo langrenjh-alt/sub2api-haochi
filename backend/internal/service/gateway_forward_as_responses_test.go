@@ -3,6 +3,7 @@
 package service
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,9 +11,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAnthropicContentDeltaBuffersPreserveAllFragments(t *testing.T) {
+	t.Parallel()
+	blocks := []apicompat.AnthropicContentBlock{
+		{Type: "text", Text: "hello"},
+		{Type: "thinking", Thinking: "plan"},
+		{Type: "tool_use", Input: json.RawMessage(`{"city":`)},
+	}
+	var buffers anthropicContentDeltaBuffers
+	buffers.append(blocks, 0, &apicompat.AnthropicDelta{Type: "text_delta", Text: " world"})
+	buffers.append(blocks, 0, &apicompat.AnthropicDelta{Type: "text_delta", Text: "!"})
+	buffers.append(blocks, 1, &apicompat.AnthropicDelta{Type: "thinking_delta", Thinking: " first"})
+	buffers.append(blocks, 2, &apicompat.AnthropicDelta{Type: "input_json_delta", PartialJSON: `"Paris"`})
+	buffers.append(blocks, 2, &apicompat.AnthropicDelta{Type: "input_json_delta", PartialJSON: `}`})
+	buffers.flush(blocks)
+
+	require.Equal(t, "hello world!", blocks[0].Text)
+	require.Equal(t, "plan first", blocks[1].Thinking)
+	require.JSONEq(t, `{"city":"Paris"}`, string(blocks[2].Input))
+}
 
 func TestExtractResponsesReasoningEffortFromBody(t *testing.T) {
 	t.Parallel()
