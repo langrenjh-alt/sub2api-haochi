@@ -78,6 +78,15 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	originalModel := reqModel
 
 	if account.Platform == PlatformGrok {
+		// Grok's native Responses route may surface its server-side
+		// web_search/x_search tools alongside client function tools. Agents that
+		// only declared the latter cannot execute those calls. Keep ordinary
+		// Responses traffic on the native endpoint, but preserve tool-bearing
+		// requests through Grok Chat Completions where the declared tool set and
+		// cache routing header remain under our control.
+		if account.IsGrokOAuth() && !isOpenAIResponsesCompactPath(c) && grokResponsesRawChatEligible(body) {
+			return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+		}
 		return s.forwardGrokResponses(ctx, c, account, body, originalModel, reqStream, startTime)
 	}
 

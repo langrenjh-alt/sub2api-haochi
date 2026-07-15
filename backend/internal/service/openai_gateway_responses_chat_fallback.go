@@ -16,8 +16,65 @@ import (
 	"go.uber.org/zap"
 )
 
+// grokResponsesRawChatEligible identifies Responses requests whose
+// client-executable tools can be represented by Chat Completions. Native
+// web_search/x_search declarations may coexist with those tools after an
+// intermediate proxy conversion; they are deliberately omitted by the bridge
+// so they cannot surface as undeclared calls in the original agent client.
+func grokResponsesRawChatEligible(body []byte) bool {
+	var req apicompat.ResponsesRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false
+	}
+	effectiveTools, err := apicompat.EffectiveResponsesTools(&req)
+	if err != nil {
+		return false
+	}
+	hasClientTool := false
+	for _, tool := range effectiveTools {
+		switch strings.TrimSpace(tool.Type) {
+		case "function", "custom":
+			if strings.TrimSpace(tool.Name) == "" {
+				return false
+			}
+			hasClientTool = true
+		case "tool_search":
+			hasClientTool = true
+		case "namespace":
+			if strings.TrimSpace(tool.Name) == "" {
+				return false
+			}
+			children := tool.Tools
+			if len(children) == 0 {
+				children = tool.Children
+			}
+			if len(children) == 0 {
+				return false
+			}
+			for _, child := range children {
+				if strings.TrimSpace(child.Type) != "function" || strings.TrimSpace(child.Name) == "" {
+					return false
+				}
+			}
+			hasClientTool = true
+		case "web_search", "x_search":
+			// Server-side tools have no Chat equivalent and are intentionally
+			// excluded when a client-executable tool makes this bridge eligible.
+		default:
+			// Do not silently discard any other explicitly requested capability.
+			return false
+		}
+	}
+	if !hasClientTool {
+		return false
+	}
+	chatReq, err := apicompat.ResponsesToChatCompletionsRequest(&req)
+	return err == nil && len(chatReq.Tools) > 0
+}
+
 // forwardResponsesViaRawChatCompletions serves /v1/responses clients through an
-// upstream that only supports /v1/chat/completions.
+// upstream that only supports /v1/chat/completions, or through Grok Chat
+// Completions when a Responses request must preserve client-executable tools.
 func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	ctx context.Context,
 	c *gin.Context,
@@ -92,12 +149,32 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 		zap.Bool("stream", clientStream),
 	)
 
-	// Build and send upstream request via the shared CC pipeline
-	apiKey, targetURL, err := s.resolveCCFallbackTarget(account)
-	if err != nil {
-		return nil, err
+	// Build and send upstream request via the shared CC pipeline.
+	bearerToken := ""
+	targetURL := ""
+	cacheIdentity := ""
+	userAgent := account.GetOpenAIUserAgent()
+	if account.IsGrok() {
+		bearerToken, _, err = s.getRequestCredential(ctx, c, account)
+		if err != nil {
+			return nil, err
+		}
+		targetURL, err = s.rawChatCompletionsURL(account)
+		if err != nil {
+			return nil, err
+		}
+		cacheIdentity = resolveGrokCacheIdentity(c, body, responsesReq.PromptCacheKey, upstreamModel)
+		SetActualOpenAIUpstreamEndpoint(c, grokChatRawEndpoint)
+		if userAgent == "" && account.IsGrokOAuth() {
+			userAgent = grokUpstreamUserAgent
+		}
+	} else {
+		bearerToken, targetURL, err = s.resolveCCFallbackTarget(account)
+		if err != nil {
+			return nil, err
+		}
 	}
-	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "")
+	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, bearerToken, userAgent, cacheIdentity)
 	if err != nil {
 		return nil, err
 	}
@@ -105,16 +182,50 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
+		if account.IsGrok() {
+			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+				Platform:           account.Platform,
+				AccountID:          account.ID,
+				AccountName:        account.Name,
+				UpstreamStatusCode: resp.StatusCode,
+				UpstreamRequestID:  firstNonEmpty(resp.Header.Get("x-request-id"), resp.Header.Get("xai-request-id")),
+				Kind:               "failover",
+				Message:            upstreamMsg,
+			})
+			s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+			if s.shouldFailoverUpstreamError(resp.StatusCode) {
+				return nil, &UpstreamFailoverError{
+					StatusCode:             resp.StatusCode,
+					ResponseBody:           respBody,
+					ResponseHeaders:        resp.Header.Clone(),
+					RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
+				}
+			}
+			return s.handleErrorResponse(ctx, resp, c, account, chatBody, billingModel)
+		}
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}
 		return s.handleErrorResponse(ctx, resp, c, account, chatBody, billingModel)
 	}
-
-	if clientStream {
-		return s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	if account.IsGrok() {
+		s.updateGrokUsageFromResponse(ctx, account, resp.Header, resp.StatusCode)
 	}
-	return s.bufferChatCompletionsAsResponses(c, resp, originalModel, customTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+
+	var result *OpenAIForwardResult
+	if clientStream {
+		result, err = s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	} else {
+		result, err = s.bufferChatCompletionsAsResponses(c, resp, originalModel, customTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	}
+	if result != nil && account.IsGrok() {
+		result.UpstreamEndpoint = grokChatRawEndpoint
+		result.ResponseHeaders = resp.Header.Clone()
+		if result.RequestID == "" {
+			result.RequestID = resp.Header.Get("xai-request-id")
+		}
+	}
+	return result, err
 }
 
 func (s *OpenAIGatewayService) bufferChatCompletionsAsResponses(
