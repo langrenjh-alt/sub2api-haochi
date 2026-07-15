@@ -15,8 +15,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// forwardAnthropicViaRawChatCompletions serves /v1/messages clients through
-// an OpenAI-compatible upstream that only supports /v1/chat/completions.
+// forwardAnthropicViaRawChatCompletions serves /v1/messages clients through a
+// native Chat Completions upstream. It covers both API-key providers without a
+// Responses endpoint and Grok tool requests that must preserve the exact client
+// tool set while using X-Grok-Conv-Id for cache routing.
 //
 // Conversion chain (direct, no Responses intermediary):
 //
@@ -32,6 +34,7 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	c *gin.Context,
 	account *Account,
 	body []byte,
+	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
@@ -90,11 +93,35 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	)
 
 	// 3. Build and send upstream request via the shared CC pipeline
-	apiKey, targetURL, err := s.resolveCCFallbackTarget(account)
-	if err != nil {
-		return nil, err
+	bearerToken := ""
+	targetURL := ""
+	cacheIdentity := ""
+	userAgent := account.GetOpenAIUserAgent()
+	if account.IsGrok() {
+		bearerToken, _, err = s.getRequestCredential(ctx, c, account)
+		if err != nil {
+			return nil, err
+		}
+		targetURL, err = s.rawChatCompletionsURL(account)
+		if err != nil {
+			return nil, err
+		}
+		cacheSeed := strings.TrimSpace(promptCacheKey)
+		if cacheSeed == "" {
+			cacheSeed = promptCacheKeyFromAnthropicMetadataSession(&anthropicReq)
+		}
+		cacheIdentity = resolveGrokCacheIdentity(c, chatBody, cacheSeed, upstreamModel)
+		SetActualOpenAIUpstreamEndpoint(c, grokChatRawEndpoint)
+		if userAgent == "" && account.IsGrokOAuth() {
+			userAgent = grokUpstreamUserAgent
+		}
+	} else {
+		bearerToken, targetURL, err = s.resolveCCFallbackTarget(account)
+		if err != nil {
+			return nil, err
+		}
 	}
-	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "")
+	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, bearerToken, userAgent, cacheIdentity)
 	if err != nil {
 		return nil, err
 	}
@@ -103,6 +130,27 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	// 4. Handle error responses
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
+		if account.IsGrok() {
+			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+				Platform:           account.Platform,
+				AccountID:          account.ID,
+				AccountName:        account.Name,
+				UpstreamStatusCode: resp.StatusCode,
+				UpstreamRequestID:  firstNonEmpty(resp.Header.Get("x-request-id"), resp.Header.Get("xai-request-id")),
+				Kind:               "failover",
+				Message:            upstreamMsg,
+			})
+			s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+			if s.shouldFailoverUpstreamError(resp.StatusCode) {
+				return nil, &UpstreamFailoverError{
+					StatusCode:             resp.StatusCode,
+					ResponseBody:           respBody,
+					ResponseHeaders:        resp.Header.Clone(),
+					RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
+				}
+			}
+			return s.handleAnthropicErrorResponse(resp, c, account, billingModel)
+		}
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}
@@ -110,12 +158,22 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 		// shared compat handler (passthrough rules, ops recording, cyber_policy).
 		return s.handleAnthropicErrorResponse(resp, c, account, billingModel)
 	}
+	if account.IsGrok() {
+		s.updateGrokUsageFromResponse(ctx, account, resp.Header, resp.StatusCode)
+	}
 
 	// 5. Convert response
+	var result *OpenAIForwardResult
 	if clientStream {
-		return s.streamChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		result, err = s.streamChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	} else {
+		result, err = s.bufferChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
-	return s.bufferChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	if result != nil && account.IsGrok() {
+		result.UpstreamEndpoint = grokChatRawEndpoint
+		result.ResponseHeaders = resp.Header.Clone()
+	}
+	return result, err
 }
 
 func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
