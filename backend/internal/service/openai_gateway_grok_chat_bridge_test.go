@@ -36,7 +36,7 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 		},
 		{
 			name: "safe generation options",
-			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true},"max_completion_tokens":256,"temperature":0.2,"top_p":0.9,"prompt_cache_key":"session","tools":[],"functions":null,"tool_choice":"none"}`,
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true},"max_completion_tokens":256,"temperature":0.2,"top_p":0.9,"presence_penalty":0,"frequency_penalty":0,"prompt_cache_key":"session","tools":[],"functions":null,"tool_choice":"none"}`,
 			want: true,
 		},
 		{
@@ -60,8 +60,18 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			want: true,
 		},
 		{
-			name:   "automatic tool choice falls back",
-			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[],"tool_choice":"auto"}`,
+			name: "automatic tool choice without tools bridges",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[],"tool_choice":"auto"}`,
+			want: true,
+		},
+		{
+			name: "automatic tool choice with missing tools bridges",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tool_choice":"auto"}`,
+			want: true,
+		},
+		{
+			name:   "required tool choice without tools falls back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[],"tool_choice":"required"}`,
 			reason: "unsupported_tool_choice",
 		},
 		{
@@ -187,7 +197,7 @@ func TestGrokChatResponsesRuntimeEligibility(t *testing.T) {
 func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	body := []byte(`{"model":"grok","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"hi"}],"stream":false,"prompt_cache_key":"stable-session","tools":[],"functions":null,"tool_choice":"none"}`)
+	body := []byte(`{"model":"grok","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"hi"}],"stream":false,"temperature":0.2,"top_p":0.9,"presence_penalty":0,"frequency_penalty":0,"prompt_cache_key":"stable-session","tools":[],"functions":null,"tool_choice":"auto"}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
@@ -222,6 +232,10 @@ func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.
 	require.Equal(t, "x_search", gjson.GetBytes(upstream.lastBody, "tools.1.type").String())
 	require.Equal(t, grokFreeCacheDisabledToolChoice, gjson.GetBytes(upstream.lastBody, "tool_choice").String())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+	require.Equal(t, 0.2, gjson.GetBytes(upstream.lastBody, "temperature").Float())
+	require.Equal(t, 0.9, gjson.GetBytes(upstream.lastBody, "top_p").Float())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "presence_penalty").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "frequency_penalty").Exists())
 	require.Equal(t, "system", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
 	require.Equal(t, "user", gjson.GetBytes(upstream.lastBody, "input.1.role").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())

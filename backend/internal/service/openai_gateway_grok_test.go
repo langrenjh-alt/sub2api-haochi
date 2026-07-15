@@ -115,7 +115,7 @@ func TestExtractGrokResponsesReasoningEffortSupportsOpenAICompatibleField(t *tes
 	require.Equal(t, "high", *effort)
 }
 
-func TestPatchGrokResponsesBodyDropsGrok45ReasoningUnsupportedFields(t *testing.T) {
+func TestPatchGrokResponsesBodyDropsGrok45UnsupportedFields(t *testing.T) {
 	t.Parallel()
 
 	body := []byte(`{
@@ -125,6 +125,9 @@ func TestPatchGrokResponsesBodyDropsGrok45ReasoningUnsupportedFields(t *testing.
 		"presencePenalty": 0.2,
 		"frequency_penalty": 0.3,
 		"frequencyPenalty": 0.4,
+		"temperature": 0.25,
+		"top_p": 0.9,
+		"stream": true,
 		"stop": ["done"]
 	}`)
 
@@ -136,10 +139,13 @@ func TestPatchGrokResponsesBodyDropsGrok45ReasoningUnsupportedFields(t *testing.
 	require.False(t, gjson.GetBytes(patched, "presencePenalty").Exists())
 	require.False(t, gjson.GetBytes(patched, "frequency_penalty").Exists())
 	require.False(t, gjson.GetBytes(patched, "frequencyPenalty").Exists())
+	require.Equal(t, 0.25, gjson.GetBytes(patched, "temperature").Float())
+	require.Equal(t, 0.9, gjson.GetBytes(patched, "top_p").Float())
+	require.True(t, gjson.GetBytes(patched, "stream").Bool())
 	require.False(t, gjson.GetBytes(patched, "stop").Exists())
 }
 
-func TestPatchGrokResponsesBodyKeepsPenaltyAndStopFieldsForNon45Models(t *testing.T) {
+func TestPatchGrokResponsesBodyDropsPenaltiesAndKeepsStopForNon45Models(t *testing.T) {
 	t.Parallel()
 
 	body := []byte(`{
@@ -154,8 +160,8 @@ func TestPatchGrokResponsesBodyKeepsPenaltyAndStopFieldsForNon45Models(t *testin
 	require.NoError(t, err)
 	require.True(t, json.Valid(patched))
 	require.Equal(t, "grok-4.3", gjson.GetBytes(patched, "model").String())
-	require.Equal(t, 0.1, gjson.GetBytes(patched, "presence_penalty").Float())
-	require.Equal(t, 0.2, gjson.GetBytes(patched, "frequency_penalty").Float())
+	require.False(t, gjson.GetBytes(patched, "presence_penalty").Exists())
+	require.False(t, gjson.GetBytes(patched, "frequency_penalty").Exists())
 	require.Len(t, gjson.GetBytes(patched, "stop").Array(), 1)
 }
 
@@ -222,6 +228,21 @@ func TestPatchGrokResponsesBodyDropsToolChoiceWhenNoSupportedToolsRemain(t *test
 	require.True(t, json.Valid(patched))
 	require.False(t, gjson.GetBytes(patched, "tools").Exists())
 	require.False(t, gjson.GetBytes(patched, "tool_choice").Exists())
+}
+
+func TestPatchGrokResponsesBodyDropsToolChoiceWithoutTools(t *testing.T) {
+	t.Parallel()
+
+	tests := []string{
+		`{"model":"grok","input":"hello","tool_choice":"auto"}`,
+		`{"model":"grok","input":"hello","tools":null,"tool_choice":"required"}`,
+		`{"model":"grok","input":"hello","tools":[],"tool_choice":{"type":"function","name":"lookup"}}`,
+	}
+	for _, body := range tests {
+		patched, err := patchGrokResponsesBody([]byte(body), "grok-4.5")
+		require.NoError(t, err)
+		require.False(t, gjson.GetBytes(patched, "tool_choice").Exists())
+	}
 }
 
 func TestPatchGrokResponsesBodyDropsCodexAdditionalToolsInputItems(t *testing.T) {

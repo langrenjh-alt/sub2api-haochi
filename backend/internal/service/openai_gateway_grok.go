@@ -168,13 +168,15 @@ func patchGrokResponsesBody(body []byte, upstreamModel string) ([]byte, error) {
 			}
 		}
 	}
+	out, err = sanitizeGrokPenaltyFields(out)
+	if err != nil {
+		return nil, err
+	}
 	if strings.EqualFold(upstreamModel, "grok-4.5") {
-		for _, unsupportedField := range []string{"presence_penalty", "presencePenalty", "frequency_penalty", "frequencyPenalty", "stop"} {
-			if gjson.GetBytes(out, unsupportedField).Exists() {
-				out, err = sjson.DeleteBytes(out, unsupportedField)
-				if err != nil {
-					return nil, err
-				}
+		if gjson.GetBytes(out, "stop").Exists() {
+			out, err = sjson.DeleteBytes(out, "stop")
+			if err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -193,6 +195,28 @@ func patchGrokResponsesBody(body []byte, upstreamModel string) ([]byte, error) {
 	out, err = sanitizeGrokResponsesTools(out)
 	if err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+var grokUnsupportedPenaltyFields = []string{
+	"presence_penalty",
+	"presencePenalty",
+	"frequency_penalty",
+	"frequencyPenalty",
+}
+
+func sanitizeGrokPenaltyFields(body []byte) ([]byte, error) {
+	out := body
+	for _, field := range grokUnsupportedPenaltyFields {
+		if !gjson.GetBytes(out, field).Exists() {
+			continue
+		}
+		var err error
+		out, err = sjson.DeleteBytes(out, field)
+		if err != nil {
+			return nil, fmt.Errorf("remove unsupported Grok %s: %w", field, err)
+		}
 	}
 	return out, nil
 }
@@ -352,7 +376,13 @@ var grokResponsesSupportedToolTypes = map[string]struct{}{
 
 func sanitizeGrokResponsesTools(body []byte) ([]byte, error) {
 	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() {
+	if !tools.Exists() || tools.Type == gjson.Null {
+		if !gjson.GetBytes(body, "tool_choice").Exists() {
+			return body, nil
+		}
+		return sjson.DeleteBytes(body, "tool_choice")
+	}
+	if !tools.IsArray() {
 		return body, nil
 	}
 

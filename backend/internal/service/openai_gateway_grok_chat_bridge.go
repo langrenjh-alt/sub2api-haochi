@@ -29,6 +29,10 @@ var grokStandardChatResponsesBridgeTopLevelFields = map[string]struct{}{
 	"max_completion_tokens": {},
 	"temperature":           {},
 	"top_p":                 {},
+	"presence_penalty":      {},
+	"presencePenalty":       {},
+	"frequency_penalty":     {},
+	"frequencyPenalty":      {},
 	"prompt_cache_key":      {},
 	"tools":                 {},
 	"tool_choice":           {},
@@ -241,7 +245,7 @@ func grokStandardChatToolChoiceEligible(raw json.RawMessage) (bool, string) {
 
 func grokStandardChatToolChoiceRequiresTools(raw json.RawMessage) bool {
 	var choice string
-	return json.Unmarshal(raw, &choice) == nil && !strings.EqualFold(strings.TrimSpace(choice), "none")
+	return json.Unmarshal(raw, &choice) == nil && strings.EqualFold(strings.TrimSpace(choice), "required")
 }
 
 func grokStandardChatMessageEligible(message map[string]json.RawMessage) (bool, string) {

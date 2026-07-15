@@ -151,6 +151,17 @@ func applyGrokFreeCacheNativeTools(body, intentSourceBody []byte) ([]byte, error
 					hasWebSearch = true
 				case "x_search":
 					hasXSearch = true
+				case "function":
+					toolName := strings.TrimSpace(tool.Get("name").String())
+					if toolName == "" {
+						toolName = strings.TrimSpace(tool.Get("function.name").String())
+					}
+					switch toolName {
+					case "web_search":
+						hasWebSearch = true
+					case "x_search":
+						hasXSearch = true
+					}
 				}
 			}
 			// apply normally receives a sanitized body. Keep this guard for
@@ -216,7 +227,15 @@ func hasGrokExplicitToolIntent(body []byte) bool {
 	if !choice.Exists() || choice.Type == gjson.Null {
 		return false
 	}
-	return choice.Type != gjson.String || !strings.EqualFold(strings.TrimSpace(choice.String()), grokFreeCacheDisabledToolChoice)
+	if choice.Type != gjson.String {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(choice.String())) {
+	case "auto", grokFreeCacheDisabledToolChoice:
+		return false
+	default:
+		return true
+	}
 }
 
 // applyGrokCacheHeaders applies the documented Chat Completions conversation

@@ -329,6 +329,46 @@ func TestApplyGrokCacheIdentityDoesNotDuplicateNativeTools(t *testing.T) {
 	}
 }
 
+func TestApplyGrokCacheIdentityDoesNotDuplicateFunctionNamedSearchTools(t *testing.T) {
+	tests := []struct {
+		name           string
+		body           string
+		wantNativeWeb  int
+		wantNativeX    int
+		wantTotalTools int
+	}{
+		{
+			name:           "flat web search function",
+			body:           `{"model":"grok","tools":[{"type":"function","name":"web_search"}],"tool_choice":"auto"}`,
+			wantNativeX:    1,
+			wantTotalTools: 2,
+		},
+		{
+			name:           "nested x search function",
+			body:           `{"model":"grok","tools":[{"type":"function","function":{"name":"x_search"}}],"tool_choice":"auto"}`,
+			wantNativeWeb:  1,
+			wantTotalTools: 2,
+		},
+		{
+			name:           "both search function names",
+			body:           `{"model":"grok","tools":[{"type":"function","name":"web_search"},{"type":"function","name":"x_search"}],"tool_choice":"auto"}`,
+			wantTotalTools: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := applyGrokResponsesCacheIdentity([]byte(tt.body), []byte(tt.body), "isolated-id", true)
+
+			require.NoError(t, err)
+			tools := gjson.GetBytes(body, "tools").Array()
+			require.Len(t, tools, tt.wantTotalTools)
+			require.Equal(t, tt.wantNativeWeb, countGrokCacheTestTools(tools, "web_search"))
+			require.Equal(t, tt.wantNativeX, countGrokCacheTestTools(tools, "x_search"))
+		})
+	}
+}
+
 func TestApplyGrokCacheIdentityNativeToolMergeIsIdempotent(t *testing.T) {
 	source := []byte(`{"model":"grok","input":"hello","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":"auto"}`)
 

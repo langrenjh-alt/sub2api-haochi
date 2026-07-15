@@ -79,6 +79,33 @@ func TestBuildOpenAIResponsesURL_ProbeURL(t *testing.T) {
 	}
 }
 
+func TestSanitizeGrokRawChatBody(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{
+		"model":"grok-4.3",
+		"messages":[{"role":"user","content":"hello"}],
+		"temperature":0.2,
+		"top_p":0.9,
+		"stream":true,
+		"presence_penalty":0,
+		"presencePenalty":0,
+		"frequency_penalty":0,
+		"frequencyPenalty":0,
+		"tool_choice":"auto"
+	}`)
+
+	patched, err := sanitizeGrokRawChatBody(body)
+	require.NoError(t, err)
+	require.Equal(t, 0.2, gjson.GetBytes(patched, "temperature").Float())
+	require.Equal(t, 0.9, gjson.GetBytes(patched, "top_p").Float())
+	require.True(t, gjson.GetBytes(patched, "stream").Bool())
+	for _, field := range grokUnsupportedPenaltyFields {
+		require.False(t, gjson.GetBytes(patched, field).Exists())
+	}
+	require.False(t, gjson.GetBytes(patched, "tool_choice").Exists())
+}
+
 func TestForwardAsRawChatCompletions_ForcesStreamUsageUpstreamAndPassesUsageDownstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
