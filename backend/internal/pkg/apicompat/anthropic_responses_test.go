@@ -428,6 +428,36 @@ func TestResponsesToAnthropic_EmptyOutput(t *testing.T) {
 	assert.Equal(t, "", anth.Content[0].Text)
 }
 
+func TestResponsesToAnthropic_WebSearchCallIsInternal(t *testing.T) {
+	resp := &ResponsesResponse{
+		ID:     "resp_web_search",
+		Model:  "grok-4.5",
+		Status: "completed",
+		Output: []ResponsesOutput{
+			{
+				Type:   "web_search_call",
+				ID:     "ws_1",
+				Status: "completed",
+				Action: &WebSearchAction{Type: "search", Query: "latest release"},
+			},
+			{
+				Type:    "message",
+				Content: []ResponsesContentPart{{Type: "output_text", Text: "The latest release is available."}},
+			},
+		},
+	}
+
+	anth := ResponsesToAnthropic(resp, "claude-sonnet-4-6")
+	require.Len(t, anth.Content, 1)
+	assert.Equal(t, "text", anth.Content[0].Type)
+	assert.Equal(t, "The latest release is available.", anth.Content[0].Text)
+
+	raw, err := json.Marshal(anth)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "server_tool_use")
+	assert.NotContains(t, string(raw), "web_search_tool_result")
+}
+
 // ---------------------------------------------------------------------------
 // Streaming: ResponsesEventToAnthropicEvents tests
 // ---------------------------------------------------------------------------
@@ -785,12 +815,182 @@ func TestStreamingReasoning(t *testing.T) {
 	assert.Equal(t, "thinking_delta", events[0].Delta.Type)
 	assert.Equal(t, "Let me think...", events[0].Delta.Thinking)
 
-	// reasoning done
+	// Per-part reasoning *.done must not close the Anthropic thinking block:
+	// Grok/OpenAI may stream multiple summary parts under one reasoning item.
+	// Closing early and then emitting more deltas causes Claude Code
+	// "Content block not found".
 	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
 		Type: "response.reasoning_summary_text.done",
 	}, state)
+	assert.Empty(t, events)
+	assert.True(t, state.ContentBlockOpen)
+	assert.Equal(t, "thinking", state.CurrentBlockType)
+
+	// Second summary part continues on the same open block.
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.reasoning_summary_text.delta",
+		OutputIndex: 0,
+		Delta:       " more",
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_delta", events[0].Type)
+	require.NotNil(t, events[0].Index)
+	assert.Equal(t, 0, *events[0].Index)
+
+	// Close only when the reasoning output_item finishes.
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.done",
+		OutputIndex: 0,
+		Item:        &ResponsesOutput{Type: "reasoning"},
+	}, state)
 	require.Len(t, events, 1)
 	assert.Equal(t, "content_block_stop", events[0].Type)
+}
+
+func TestStreamingReasoningDeltaWithoutOutputItemAdded(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	// No response.created / output_item.added — still must emit a valid sequence
+	// so Claude Code does not throw "Content block not found".
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.reasoning_text.delta",
+		OutputIndex: 0,
+		Delta:       "thinking out loud",
+	}, state)
+	require.GreaterOrEqual(t, len(events), 3)
+	assert.Equal(t, "message_start", events[0].Type)
+	assert.Equal(t, "content_block_start", events[1].Type)
+	assert.Equal(t, "thinking", events[1].ContentBlock.Type)
+	assert.Equal(t, "content_block_delta", events[2].Type)
+	assert.Equal(t, "thinking_delta", events[2].Delta.Type)
+}
+
+func TestStreamingFuncArgsDeltaAfterBlockClosedIsDropped(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:     "response.created",
+		Response: &ResponsesResponse{ID: "resp_closed_tool", Model: "gpt-5.2"},
+	}, state)
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.added",
+		OutputIndex: 0,
+		Item:        &ResponsesOutput{Type: "function_call", CallID: "call_1", Name: "Bash"},
+	}, state)
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.function_call_arguments.done",
+		OutputIndex: 0,
+		Arguments:   `{"command":"true"}`,
+	}, state)
+	require.False(t, state.ContentBlockOpen)
+
+	// Late delta after stop must be ignored (not re-emitted to a closed index).
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.function_call_arguments.delta",
+		OutputIndex: 0,
+		Delta:       `,"x":1`,
+	}, state)
+	assert.Empty(t, events)
+}
+
+func TestStreamingFuncArgsDoneAfterBlockClosedIsDropped(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:     "response.created",
+		Response: &ResponsesResponse{ID: "resp_duplicate_tool_done", Model: "grok-4.5"},
+	}, state)
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.added",
+		OutputIndex: 0,
+		Item:        &ResponsesOutput{Type: "function_call", CallID: "call_1", Name: "Bash"},
+	}, state)
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.function_call_arguments.done",
+		OutputIndex: 0,
+		Arguments:   `{"command":"true"}`,
+	}, state)
+	require.Len(t, events, 2)
+	require.False(t, state.ContentBlockOpen)
+	assert.Equal(t, 1, state.ContentBlockIndex)
+
+	// A duplicate done used to emit a delta at index 1 without a matching
+	// content_block_start, producing "Content block not found" in Claude Code.
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.function_call_arguments.done",
+		OutputIndex: 0,
+		Arguments:   `{"command":"true"}`,
+	}, state)
+	assert.Empty(t, events)
+	assert.Equal(t, 1, state.ContentBlockIndex)
+}
+
+func TestStreamingLateFuncArgsDoneDoesNotCloseTextBlock(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:     "response.created",
+		Response: &ResponsesResponse{ID: "resp_late_tool_done", Model: "grok-4.5"},
+	}, state)
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_text.delta",
+		OutputIndex: 1,
+		Delta:       "still streaming",
+	}, state)
+	require.True(t, state.ContentBlockOpen)
+	assert.Equal(t, "text", state.CurrentBlockType)
+
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.function_call_arguments.done",
+		OutputIndex: 0,
+		Arguments:   `{"command":"true"}`,
+	}, state)
+	assert.Empty(t, events)
+	require.True(t, state.ContentBlockOpen)
+	assert.Equal(t, "text", state.CurrentBlockType)
+}
+
+func TestStreamingWebSearchCallIsInternalAndKeepsCurrentBlockOpen(t *testing.T) {
+	state := NewResponsesEventToAnthropicState()
+
+	ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:     "response.created",
+		Response: &ResponsesResponse{ID: "resp_grok_search", Model: "grok-4.5"},
+	}, state)
+	events := ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_text.delta",
+		OutputIndex: 1,
+		Delta:       "Search result: ",
+	}, state)
+	require.Len(t, events, 2)
+	require.True(t, state.ContentBlockOpen)
+	assert.Equal(t, 0, state.ContentBlockIndex)
+
+	// The server-side search item is an internal Grok event. It must neither
+	// become an unsupported Anthropic content block nor close text block 0.
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_item.done",
+		OutputIndex: 0,
+		Item: &ResponsesOutput{
+			Type:   "web_search_call",
+			ID:     "ws_1",
+			Status: "completed",
+			Action: &WebSearchAction{Type: "search", Query: "latest release"},
+		},
+	}, state)
+	assert.Empty(t, events)
+	require.True(t, state.ContentBlockOpen)
+	assert.Equal(t, 0, state.ContentBlockIndex)
+
+	events = ResponsesEventToAnthropicEvents(&ResponsesStreamEvent{
+		Type:        "response.output_text.delta",
+		OutputIndex: 1,
+		Delta:       "version 1.2.3",
+	}, state)
+	require.Len(t, events, 1)
+	assert.Equal(t, "content_block_delta", events[0].Type)
+	require.NotNil(t, events[0].Index)
+	assert.Equal(t, 0, *events[0].Index)
 }
 
 func TestStreamingIncomplete(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 func TestResToAnthFuncArgsDelta_ReadToolStreamsDeltas(t *testing.T) {
 	state := NewResponsesEventToAnthropicState()
 	state.MessageStartSent = true
+	state.ContentBlockOpen = true
 	state.CurrentBlockType = "tool_use"
 	state.CurrentToolName = "Read"
 	state.OutputIndexToBlockIdx = map[int]int{0: 0}
@@ -66,6 +67,7 @@ func TestResToAnthFuncArgsDelta_ReadToolWithoutDone(t *testing.T) {
 func TestResToAnthFuncArgsDelta_NonReadToolUnchanged(t *testing.T) {
 	state := NewResponsesEventToAnthropicState()
 	state.MessageStartSent = true
+	state.ContentBlockOpen = true
 	state.CurrentBlockType = "tool_use"
 	state.CurrentToolName = "Write"
 	state.OutputIndexToBlockIdx = map[int]int{0: 0}
