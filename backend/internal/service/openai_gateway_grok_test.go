@@ -1207,6 +1207,53 @@ func TestForwardAsChatCompletionsForGrokStreamingUsesRawXAIChatCompletions(t *te
 	require.NotNil(t, repo.updates[53][grokQuotaSnapshotExtraKey])
 }
 
+func TestForwardGrokResponsesFunctionToolsStayOnResponsesForCaching(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	body := []byte(`{
+		"model":"grok","stream":false,"prompt_cache_key":"downstream-claude-session",
+		"input":[{"type":"message","role":"user","content":"look up alpha"}],
+		"tools":[{"type":"function","name":"lookup","description":"look up a key","parameters":{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}}],
+		"tool_choice":"auto"
+	}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("api_key", &APIKey{ID: 5203})
+
+	account := healthyGrokOAuthGatewayTestAccount(5602, "access-token")
+	repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+		accountsByID: map[int64]*Account{account.ID: account},
+	}}
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"id":"resp_grok_cached_tool","object":"response","model":"grok-4.5","status":"completed","output":[{"type":"function_call","id":"fc_lookup","call_id":"call_lookup","name":"lookup","arguments":"{\"key\":\"alpha\"}","status":"completed"}],"usage":{"input_tokens":7000,"output_tokens":2,"total_tokens":7002,"input_tokens_details":{"cached_tokens":6144}}}`,
+		)),
+	}}
+	svc := &OpenAIGatewayService{
+		httpUpstream:      upstream,
+		grokTokenProvider: NewGrokTokenProvider(repo, nil),
+		accountRepo:       repo,
+	}
+
+	result, err := svc.Forward(context.Background(), c, account, body)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
+	require.NotContains(t, upstream.lastReq.URL.Path, "chat/completions")
+	require.Equal(t, "function", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
+	require.Equal(t, "lookup", gjson.GetBytes(upstream.lastBody, "tools.0.name").String())
+	identity := gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String()
+	require.NotEmpty(t, identity)
+	require.NotEqual(t, "downstream-claude-session", identity)
+	require.Equal(t, identity, upstream.lastReq.Header.Get(grokConversationIDHeader))
+	require.Equal(t, 6144, result.Usage.CacheReadInputTokens)
+	require.Equal(t, int64(6144), gjson.Get(recorder.Body.String(), "usage.input_tokens_details.cached_tokens").Int())
+}
+
 func TestForwardGrokResponsesNonStreamingUsesCacheIdentityAndCachedUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
