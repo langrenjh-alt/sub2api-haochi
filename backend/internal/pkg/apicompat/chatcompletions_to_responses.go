@@ -77,15 +77,18 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 		out.Text.Format = format
 	}
 
-	// tools[] and legacy functions[] → ResponsesTool[]
+	// Convert tools[] and legacy functions[] to ResponsesTool[].
 	if len(req.Tools) > 0 || len(req.Functions) > 0 {
 		out.Tools = convertChatToolsToResponses(req.Tools, req.Functions)
 	}
 
-	// tool_choice: already compatible format — pass through directly.
-	// Legacy function_call needs mapping.
+	// Normalize Chat tool_choice and legacy function_call to Responses format.
 	if len(req.ToolChoice) > 0 {
-		out.ToolChoice = req.ToolChoice
+		tc, err := convertChatToolChoiceToResponses(req.ToolChoice)
+		if err != nil {
+			return nil, fmt.Errorf("convert tool_choice: %w", err)
+		}
+		out.ToolChoice = tc
 	} else if len(req.FunctionCall) > 0 {
 		tc, err := convertChatFunctionCallToToolChoice(req.FunctionCall)
 		if err != nil {
@@ -116,6 +119,8 @@ func convertChatMessagesToResponsesInput(msgs []ChatMessage) ([]ResponsesInputIt
 func chatMessageToResponsesItems(m ChatMessage) ([]ResponsesInputItem, error) {
 	switch m.Role {
 	case "system":
+		return chatSystemToResponses(m)
+	case "developer":
 		return chatSystemToResponses(m)
 	case "user":
 		return chatUserToResponses(m)
@@ -202,6 +207,18 @@ func chatAssistantToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 			Type:      "function_call",
 			CallID:    tc.ID,
 			Name:      tc.Function.Name,
+			Arguments: args,
+		})
+	}
+	if m.FunctionCall != nil && strings.TrimSpace(m.FunctionCall.Name) != "" {
+		args := m.FunctionCall.Arguments
+		if args == "" {
+			args = "{}"
+		}
+		items = append(items, ResponsesInputItem{
+			Type:      "function_call",
+			CallID:    m.FunctionCall.Name,
+			Name:      m.FunctionCall.Name,
 			Arguments: args,
 		})
 	}
@@ -479,4 +496,35 @@ func convertChatFunctionCallToToolChoice(raw json.RawMessage) (json.RawMessage, 
 		"type": "function",
 		"name": obj.Name,
 	})
+}
+
+// convertChatToolChoiceToResponses maps Chat Completions' nested forced
+// function shape to the Responses API's top-level function name shape.
+func convertChatToolChoiceToResponses(raw json.RawMessage) (json.RawMessage, error) {
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		return json.Marshal(value)
+	}
+
+	var choice struct {
+		Type     string `json:"type"`
+		Name     string `json:"name"`
+		Function *struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(raw, &choice); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(choice.Type) != "function" {
+		return raw, nil
+	}
+	name := strings.TrimSpace(choice.Name)
+	if name == "" && choice.Function != nil {
+		name = strings.TrimSpace(choice.Function.Name)
+	}
+	if name == "" {
+		return nil, fmt.Errorf("function tool_choice name is required")
+	}
+	return json.Marshal(map[string]string{"type": "function", "name": name})
 }

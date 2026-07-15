@@ -92,6 +92,24 @@ func TestChatCompletionsToResponses_SystemMessage(t *testing.T) {
 	assert.Equal(t, "user", items[1].Role)
 }
 
+func TestChatCompletionsToResponses_DeveloperMessageKeepsInstructionRole(t *testing.T) {
+	req := &ChatCompletionsRequest{
+		Model: "grok-4.5",
+		Messages: []ChatMessage{
+			{Role: "developer", Content: json.RawMessage(`"Follow project rules."`)},
+			{Role: "user", Content: json.RawMessage(`"Hi"`)},
+		},
+	}
+
+	resp, err := ChatCompletionsToResponses(req)
+	require.NoError(t, err)
+	var items []ResponsesInputItem
+	require.NoError(t, json.Unmarshal(resp.Input, &items))
+	require.Len(t, items, 2)
+	require.Equal(t, "system", items[0].Role)
+	require.Equal(t, "user", items[1].Role)
+}
+
 func TestChatCompletionsToResponses_ToolCalls(t *testing.T) {
 	req := &ChatCompletionsRequest{
 		Model: "gpt-4o",
@@ -559,6 +577,38 @@ func TestChatCompletionsToResponses_LegacyFunctions(t *testing.T) {
 	assert.Equal(t, "function", tc["type"])
 	assert.Equal(t, "get_weather", tc["name"])
 	assert.NotContains(t, tc, "function")
+}
+
+func TestChatCompletionsToResponses_NormalizesNestedFunctionToolChoice(t *testing.T) {
+	req := &ChatCompletionsRequest{
+		Model:      "grok-4.5",
+		Messages:   []ChatMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+		ToolChoice: json.RawMessage(`{"type":"function","function":{"name":"get_weather"}}`),
+	}
+
+	resp, err := ChatCompletionsToResponses(req)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"type":"function","name":"get_weather"}`, string(resp.ToolChoice))
+}
+
+func TestChatCompletionsToResponses_LegacyAssistantFunctionCallHistory(t *testing.T) {
+	req := &ChatCompletionsRequest{
+		Model: "grok-4.5",
+		Messages: []ChatMessage{
+			{Role: "assistant", FunctionCall: &ChatFunctionCall{Name: "get_weather", Arguments: `{"city":"Paris"}`}},
+			{Role: "function", Name: "get_weather", Content: json.RawMessage(`"sunny"`)},
+		},
+	}
+
+	resp, err := ChatCompletionsToResponses(req)
+	require.NoError(t, err)
+	var items []ResponsesInputItem
+	require.NoError(t, json.Unmarshal(resp.Input, &items))
+	require.Len(t, items, 2)
+	require.Equal(t, "function_call", items[0].Type)
+	require.Equal(t, "get_weather", items[0].CallID)
+	require.Equal(t, "function_call_output", items[1].Type)
+	require.Equal(t, "get_weather", items[1].CallID)
 }
 
 func TestChatCompletionsToResponses_ServiceTier(t *testing.T) {

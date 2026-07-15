@@ -11,7 +11,6 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -42,10 +41,9 @@ var grokStandardChatResponsesBridgeTopLevelFields = map[string]struct{}{
 	"reasoning_effort":      {},
 }
 
-// grokChatResponsesBridgeEligibility deliberately accepts only request shapes
-// whose Chat Completions semantics are preserved by the Responses bridge.
-// Everything else stays on raw Chat Completions rather than being silently
-// dropped or rewritten.
+// grokChatResponsesBridgeEligibility reports how closely a Chat Completions
+// body matches the lossless Responses subset. It is retained for compatibility
+// diagnostics and converter tests; Grok routing itself always uses Responses.
 func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil || root == nil {
@@ -494,14 +492,10 @@ func grokChatCacheIntentBody(body []byte) ([]byte, error) {
 	return json.Marshal(root)
 }
 
-func grokChatResponsesRuntimeEligible(upstreamModel, cacheIdentity string) bool {
-	return strings.TrimSpace(upstreamModel) == "grok-4.5" && strings.TrimSpace(cacheIdentity) != ""
-}
-
-// forwardGrokChatCompletionsViaResponses converts a strictly compatible Chat
-// request into xAI Responses format and reuses the established Responses-to-
-// Chat response translators. It intentionally does not run the Codex OAuth
-// transform because Grok CLI is a separate upstream protocol.
+// forwardGrokChatCompletionsViaResponses converts every Grok Chat Completions
+// ingress request into xAI Responses format and reuses the established
+// Responses-to-Chat response translators. It intentionally does not run the
+// Codex OAuth transform because Grok CLI is a separate upstream protocol.
 func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	ctx context.Context,
 	c *gin.Context,
@@ -511,6 +505,7 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
+	originalBody := body
 
 	var chatReq apicompat.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &chatReq); err != nil {
@@ -520,14 +515,38 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	clientStream := chatReq.Stream
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
-	cacheIdentity := resolveGrokCacheIdentity(c, body, promptCacheKey, upstreamModel)
-	// Image inputs must go through the Responses bridge: the raw Chat
-	// Completions path cannot forward image_url parts to Grok's native vision
-	// for non-composer models, so they would be silently dropped. Route them to
-	// Responses even when no prompt-cache identity is available.
-	hasImageInput := openAIJSONValueMayContainImageInput(gjson.GetBytes(body, "messages"))
-	if !grokChatResponsesRuntimeEligible(upstreamModel, cacheIdentity) && (!hasImageInput || strings.TrimSpace(upstreamModel) != "grok-4.5") {
-		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+	cacheIdentity := resolveGrokCacheIdentity(c, originalBody, promptCacheKey, upstreamModel)
+
+	token, tokenKind, err := s.getRequestCredential(ctx, c, account)
+	if err != nil {
+		return nil, fmt.Errorf("get grok access token: %w", err)
+	}
+	if strings.TrimSpace(token) == "" {
+		return nil, fmt.Errorf("account %d missing %s credential", account.ID, tokenKind)
+	}
+
+	// Composer cannot consume image_url content directly. Keep its existing
+	// vision-description bridge, but send both the auxiliary vision request and
+	// the final Composer turn through Responses.
+	var bridgeUsage OpenAIUsage
+	bridgeBody := body
+	if upstreamModel != originalModel {
+		bridgeBody = ReplaceModelInBody(body, upstreamModel)
+	}
+	bridgedBody, usage, bridged, bridgeErr := s.bridgeGrokComposerImageInputs(ctx, c, account, bridgeBody, token)
+	if bridgeErr != nil {
+		var failoverErr *UpstreamFailoverError
+		if !errors.As(bridgeErr, &failoverErr) && c != nil && c.Writer != nil && !c.Writer.Written() {
+			writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", bridgeErr.Error())
+		}
+		return nil, bridgeErr
+	}
+	if bridged {
+		body = bridgedBody
+		addOpenAIUsage(&bridgeUsage, usage)
+		if err := json.Unmarshal(body, &chatReq); err != nil {
+			return nil, fmt.Errorf("parse bridged grok chat completions request: %w", err)
+		}
 	}
 
 	responsesReq, err := apicompat.ChatCompletionsToResponses(&chatReq)
@@ -565,7 +584,7 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	if err != nil {
 		return nil, fmt.Errorf("normalize grok responses bridge tool intent: %w", err)
 	}
-	responsesBody, err = applyGrokResponsesCacheIdentity(responsesBody, intentBody, cacheIdentity, true)
+	responsesBody, err = applyGrokResponsesCacheIdentity(responsesBody, intentBody, cacheIdentity, account.IsGrokOAuth())
 	if err != nil {
 		return nil, fmt.Errorf("apply grok responses bridge cache identity: %w", err)
 	}
@@ -585,10 +604,6 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	}
 	responsesBody = updatedBody
 
-	token, _, err := s.getRequestCredential(ctx, c, account)
-	if err != nil {
-		return nil, fmt.Errorf("get grok access token: %w", err)
-	}
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	upstreamReq, err := buildGrokResponsesRequest(upstreamCtx, c, account, responsesBody, token, cacheIdentity, s.cfg)
 	releaseUpstreamCtx()
@@ -642,12 +657,13 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 		result, err = s.handleChatBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
 	}
 	if result != nil {
+		addOpenAIUsage(&result.Usage, bridgeUsage)
 		result.UpstreamEndpoint = grokChatResponsesEndpoint
 		result.ResponseHeaders = resp.Header.Clone()
 		if result.RequestID == "" {
 			result.RequestID = firstNonEmpty(resp.Header.Get("x-request-id"), resp.Header.Get("xai-request-id"))
 		}
-		result.ReasoningEffort = extractOpenAIReasoningEffortFromBody(body, upstreamModel, billingModel, originalModel)
+		result.ReasoningEffort = extractOpenAIReasoningEffortFromBody(originalBody, upstreamModel, billingModel, originalModel)
 	}
 	return result, err
 }

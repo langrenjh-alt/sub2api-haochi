@@ -201,14 +201,6 @@ func TestGrokChatResponsesBridgeRejectsMalformedStandardToolHistory(t *testing.T
 	}
 }
 
-func TestGrokChatResponsesRuntimeEligibility(t *testing.T) {
-	t.Parallel()
-	require.True(t, grokChatResponsesRuntimeEligible("grok-4.5", "isolated-id"))
-	require.False(t, grokChatResponsesRuntimeEligible("grok-4.3", "isolated-id"))
-	require.False(t, grokChatResponsesRuntimeEligible("grok-4.5-build-free", "isolated-id"))
-	require.False(t, grokChatResponsesRuntimeEligible("grok-4.5", ""))
-}
-
 func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -412,7 +404,7 @@ func TestForwardGrokOpenCodeToolChatViaResponsesKeepsCachePrefix(t *testing.T) {
 	require.Equal(t, "fixture value", secondInput[3].Get("output").String())
 }
 
-func TestForwardGrokChatRuntimeGateFallsBackToRaw(t *testing.T) {
+func TestForwardGrokChatAlwaysUsesResponsesWithoutRuntimeGate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
@@ -442,13 +434,7 @@ func TestForwardGrokChatRuntimeGateFallsBackToRaw(t *testing.T) {
 			repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
 				accountsByID: map[int64]*Account{account.ID: account},
 			}}
-			upstream := &httpUpstreamRecorder{resp: &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body: io.NopCloser(strings.NewReader(
-					`{"id":"chat_raw","object":"chat.completion","model":"` + tt.wantUpstream + `","choices":[{"index":0,"message":{"role":"assistant","content":"raw ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`,
-				)),
-			}}
+			upstream := &httpUpstreamRecorder{resp: grokChatBridgeCompletedResponse("resp_always_responses", 0)}
 			svc := &OpenAIGatewayService{
 				httpUpstream:      upstream,
 				grokTokenProvider: NewGrokTokenProvider(repo, nil),
@@ -458,11 +444,16 @@ func TestForwardGrokChatRuntimeGateFallsBackToRaw(t *testing.T) {
 			result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
 			require.NoError(t, err)
 			require.NotNil(t, result)
-			require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
-			require.Equal(t, grokChatRawEndpoint, result.UpstreamEndpoint)
+			require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
+			require.Equal(t, grokChatResponsesEndpoint, result.UpstreamEndpoint)
 			require.Equal(t, tt.wantUpstream, result.UpstreamModel)
-			require.False(t, gjson.GetBytes(upstream.lastBody, "tools").Exists())
-			require.Equal(t, "raw ok", gjson.Get(recorder.Body.String(), "choices.0.message.content").String())
+			if tt.setAPIKey {
+				require.Equal(t, "web_search", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
+				require.Equal(t, "x_search", gjson.GetBytes(upstream.lastBody, "tools.1.type").String())
+			} else {
+				require.False(t, gjson.GetBytes(upstream.lastBody, "tools").Exists())
+			}
+			require.Equal(t, "cached ok", gjson.Get(recorder.Body.String(), "choices.0.message.content").String())
 		})
 	}
 }
@@ -510,7 +501,7 @@ func TestForwardGrokChatViaResponses429UsesGrokRateLimitPolicy(t *testing.T) {
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
-func TestForwardGrokRawChat429PreservesRetryAfter(t *testing.T) {
+func TestForwardGrokChatResponses429PreservesRetryAfter(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":false,"stop":"done"}`)
@@ -546,10 +537,10 @@ func TestForwardGrokRawChat429PreservesRetryAfter(t *testing.T) {
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
 	require.Equal(t, "45", failoverErr.ResponseHeaders.Get("Retry-After"))
-	require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
+	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
 }
 
-func TestForwardGrokRawChatErrorRecordsActualEndpoint(t *testing.T) {
+func TestForwardGrokChatResponsesErrorRecordsActualEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":false,"stop":"done"}`)
@@ -576,8 +567,8 @@ func TestForwardGrokRawChatErrorRecordsActualEndpoint(t *testing.T) {
 	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
 	require.Error(t, err)
 	require.Nil(t, result)
-	require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
-	require.Equal(t, grokChatRawEndpoint, GetActualOpenAIUpstreamEndpoint(c))
+	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
+	require.Equal(t, grokChatResponsesEndpoint, GetActualOpenAIUpstreamEndpoint(c))
 }
 
 func grokChatBridgeTestAccount(id int64) *Account {
