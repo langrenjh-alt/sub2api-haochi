@@ -160,6 +160,118 @@ func TestApplyGrokCLIProxyHeaders(t *testing.T) {
 	})
 }
 
+func TestOpenAIConnectionPoolIsolationOverride(t *testing.T) {
+	cfg := &config.Config{Gateway: config.GatewayConfig{
+		ConnectionPoolIsolation:       config.ConnectionPoolIsolationAccountProxy,
+		OpenAIConnectionPoolIsolation: config.ConnectionPoolIsolationProxy,
+	}}
+	svc := NewHTTPUpstream(cfg).(*httpUpstreamService)
+
+	require.Equal(t, config.ConnectionPoolIsolationProxy, svc.getIsolationModeForProfile(service.HTTPUpstreamProfileOpenAI))
+	require.Equal(t, config.ConnectionPoolIsolationAccountProxy, svc.getIsolationModeForProfile(service.HTTPUpstreamProfileDefault))
+
+	first, err := svc.getClientEntry("http://proxy.local:8080", 1, 3, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	second, err := svc.getClientEntry("http://proxy.local:8080", 2, 7, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	require.Same(t, first, second, "OpenAI accounts on the same proxy should share a client")
+
+	tlsProfile := &tlsfingerprint.Profile{Name: "openai-shared-proxy", Curves: []uint16{23}}
+	tlsFirst, err := svc.getClientEntryWithTLS("http://proxy.local:8080", 1, 3, tlsProfile, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	tlsProfileCopy := &tlsfingerprint.Profile{Name: "openai-shared-proxy", Curves: []uint16{23}}
+	tlsSecond, err := svc.getClientEntryWithTLS("http://proxy.local:8080", 2, 7, tlsProfileCopy, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	require.Same(t, tlsFirst, tlsSecond, "equal OpenAI TLS profiles on the same proxy should share a client")
+
+	differentTLSProfile := &tlsfingerprint.Profile{Name: "openai-shared-proxy", Curves: []uint16{24}}
+	tlsThird, err := svc.getClientEntryWithTLS("http://proxy.local:8080", 3, 7, differentTLSProfile, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	require.NotSame(t, tlsFirst, tlsThird, "different OpenAI TLS profiles must use separate clients")
+	require.Equal(t, tlsFingerprintProfileIdentity(tlsProfile), tlsFingerprintProfileIdentity(tlsProfileCopy))
+	require.NotEqual(t, tlsFingerprintProfileIdentity(tlsProfile), tlsFingerprintProfileIdentity(differentTLSProfile))
+}
+
+func TestOpenAIConnectionPoolIsolationEmptyFallsBackToGeneral(t *testing.T) {
+	cfg := &config.Config{Gateway: config.GatewayConfig{
+		ConnectionPoolIsolation:       config.ConnectionPoolIsolationAccount,
+		OpenAIConnectionPoolIsolation: "",
+	}}
+	svc := NewHTTPUpstream(cfg).(*httpUpstreamService)
+
+	require.Equal(t, config.ConnectionPoolIsolationAccount, svc.getIsolationModeForProfile(service.HTTPUpstreamProfileOpenAI))
+
+	first, err := svc.getClientEntry("http://proxy.local:8080", 1, 3, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	second, err := svc.getClientEntry("http://proxy.local:8080", 2, 3, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	require.NotSame(t, first, second, "empty OpenAI override should preserve account isolation")
+}
+
+func TestOpenAILowLatencyModeDefaultsToProxyIsolation(t *testing.T) {
+	cfg := &config.Config{Gateway: config.GatewayConfig{
+		ConnectionPoolIsolation:       config.ConnectionPoolIsolationAccountProxy,
+		OpenAILatencyMode:             config.OpenAILatencyModeLowLatency,
+		OpenAIConnectionPoolIsolation: "",
+	}}
+	svc := NewHTTPUpstream(cfg).(*httpUpstreamService)
+
+	require.Equal(t, config.ConnectionPoolIsolationProxy, svc.getIsolationModeForProfile(service.HTTPUpstreamProfileOpenAI))
+
+	first, err := svc.getClientEntry("http://proxy.local:8080", 1, 3, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	second, err := svc.getClientEntry("http://proxy.local:8080", 2, 7, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	require.Same(t, first, second, "low_latency mode should share OpenAI clients on the same proxy")
+}
+
+func TestOpenAILatencyModeRequestSnapshotControlsPoolIsolation(t *testing.T) {
+	cfg := &config.Config{Gateway: config.GatewayConfig{
+		ConnectionPoolIsolation:       config.ConnectionPoolIsolationAccountProxy,
+		OpenAILatencyMode:             config.OpenAILatencyModeCompatible,
+		OpenAIConnectionPoolIsolation: "",
+	}}
+	svc := NewHTTPUpstream(cfg).(*httpUpstreamService)
+	proxyURL := "http://proxy.local:8080"
+
+	compatibleFirst, err := svc.getClientEntry(proxyURL, 1, 3, service.HTTPUpstreamProfileOpenAI, false, false, config.OpenAILatencyModeCompatible)
+	require.NoError(t, err)
+	compatibleSecond, err := svc.getClientEntry(proxyURL, 2, 7, service.HTTPUpstreamProfileOpenAI, false, false, config.OpenAILatencyModeCompatible)
+	require.NoError(t, err)
+	require.NotSame(t, compatibleFirst, compatibleSecond)
+
+	lowLatencyFirst, err := svc.getClientEntry(proxyURL, 1, 3, service.HTTPUpstreamProfileOpenAI, false, false, config.OpenAILatencyModeLowLatency)
+	require.NoError(t, err)
+	lowLatencySecond, err := svc.getClientEntry(proxyURL, 2, 7, service.HTTPUpstreamProfileOpenAI, false, false, config.OpenAILatencyModeLowLatency)
+	require.NoError(t, err)
+	require.Same(t, lowLatencyFirst, lowLatencySecond)
+
+	require.Equal(t, config.OpenAILatencyModeCompatible, cfg.Gateway.OpenAILatencyMode)
+}
+
+func TestOpenAILatencyModeRequestSnapshotWorksWithoutConfig(t *testing.T) {
+	svc := &httpUpstreamService{}
+
+	require.Equal(t, config.ConnectionPoolIsolationProxy, svc.getIsolationModeForProfile(
+		service.HTTPUpstreamProfileOpenAI,
+		config.OpenAILatencyModeLowLatency,
+	))
+}
+
+func TestBuildUpstreamTransportSharesTLSClientSessionCache(t *testing.T) {
+	settings := defaultPoolSettings(nil)
+	first, err := buildUpstreamTransport(settings, nil, upstreamProtocolModeDefault)
+	require.NoError(t, err)
+	second, err := buildUpstreamTransport(settings, nil, upstreamProtocolModeOpenAIH2)
+	require.NoError(t, err)
+
+	require.NotNil(t, first.TLSClientConfig)
+	require.NotNil(t, second.TLSClientConfig)
+	require.NotSame(t, first.TLSClientConfig, second.TLSClientConfig, "transports should keep independent TLS configs")
+	require.NotNil(t, first.TLSClientConfig.ClientSessionCache)
+	require.Same(t, first.TLSClientConfig.ClientSessionCache, second.TLSClientConfig.ClientSessionCache)
+}
+
 // HTTPUpstreamSuite HTTP 上游服务测试套件
 // 使用 testify/suite 组织测试，支持 SetupTest 初始化
 type HTTPUpstreamSuite struct {

@@ -210,7 +210,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
 	if instructionsEmpty && !compatMessagesBridge {
-		markPatchSet("instructions", defaultCodexSynthInstructions(reqModel))
+		markPatchSet("instructions", s.openAIMissingInstructions(ctx, reqModel))
 	}
 
 	billingModel := account.GetMappedModel(reqModel)
@@ -335,6 +335,13 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{IsCodexCLI: isCodexCLI, IsCompact: isCompactRequest, SkipDefaultInstructions: true, PreserveToolCallIDs: true})
 			ensureCodexOAuthInstructionsField(decoded)
 			markDecodedModified()
+		} else if s.useEmptyOpenAIMissingInstructions(ctx) {
+			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
+				IsCodexCLI:              isCodexCLI,
+				IsCompact:               isCompactRequest,
+				SkipDefaultInstructions: true,
+			})
+			ensureCodexOAuthInstructionsField(decoded)
 		} else {
 			codexResult = applyCodexOAuthTransform(decoded, isCodexCLI, isCompactRequest)
 		}
@@ -968,6 +975,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）
 	account.ApplyHeaderOverrides(req.Header)
+	// 必须放在账号级覆写之后，确保流式请求不会重新启用透明 gzip；小型 SSE
+	// 生命周期事件被压缩器攒块会直接抬高客户端首字节时间。
+	applyOpenAIStreamingTransportHeaders(req.Header, isStream && !isOpenAIResponsesCompactPath(c))
 
 	return req, nil
 }

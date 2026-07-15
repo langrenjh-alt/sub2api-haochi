@@ -3693,6 +3693,103 @@
 
         <!-- Tab: Gateway — Claude Code, Scheduling -->
         <div v-show="activeTab === 'gateway'" class="space-y-6">
+          <!-- OpenAI Latency Mode -->
+          <div class="card">
+            <div
+              class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
+            >
+              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+                {{ t("admin.settings.openaiLatencyMode.title") }}
+              </h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                {{ t("admin.settings.openaiLatencyMode.description") }}
+              </p>
+            </div>
+            <fieldset class="p-6">
+              <legend class="sr-only">
+                {{ t("admin.settings.openaiLatencyMode.modeLabel") }}
+              </legend>
+              <div
+                class="grid w-full grid-cols-2 gap-1 rounded-lg border border-gray-200 bg-gray-100 p-1 sm:w-[28rem] dark:border-dark-600 dark:bg-dark-800"
+              >
+                <label
+                  for="openai-latency-compatible"
+                  :class="[
+                    'flex min-h-[3.25rem] cursor-pointer flex-col items-center justify-center rounded-md px-3 py-2 text-center transition-colors focus-within:ring-2 focus-within:ring-primary-500 focus-within:ring-offset-2 dark:focus-within:ring-offset-dark-800',
+                    form.openai_latency_mode === 'compatible'
+                      ? 'bg-white text-primary-700 shadow-sm dark:bg-dark-700 dark:text-primary-300'
+                      : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200',
+                  ]"
+                >
+                  <input
+                    id="openai-latency-compatible"
+                    v-model="form.openai_latency_mode"
+                    class="sr-only"
+                    type="radio"
+                    value="compatible"
+                    aria-describedby="openai-latency-mode-description"
+                  />
+                  <span class="text-sm font-medium">
+                    {{ t("admin.settings.openaiLatencyMode.compatible") }}
+                  </span>
+                  <span class="mt-0.5 font-mono text-xs">compatible</span>
+                </label>
+                <label
+                  for="openai-latency-low"
+                  :class="[
+                    'flex min-h-[3.25rem] cursor-pointer flex-col items-center justify-center rounded-md px-3 py-2 text-center transition-colors focus-within:ring-2 focus-within:ring-primary-500 focus-within:ring-offset-2 dark:focus-within:ring-offset-dark-800',
+                    form.openai_latency_mode === 'low_latency'
+                      ? 'bg-white text-primary-700 shadow-sm dark:bg-dark-700 dark:text-primary-300'
+                      : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200',
+                  ]"
+                >
+                  <input
+                    id="openai-latency-low"
+                    v-model="form.openai_latency_mode"
+                    class="sr-only"
+                    type="radio"
+                    value="low_latency"
+                    aria-describedby="openai-latency-mode-description"
+                  />
+                  <span class="text-sm font-medium">
+                    {{ t("admin.settings.openaiLatencyMode.lowLatency") }}
+                  </span>
+                  <span class="mt-0.5 font-mono text-xs">low_latency</span>
+                </label>
+              </div>
+
+              <div
+                id="openai-latency-mode-description"
+                class="mt-4 border-l-2 border-primary-500 pl-3"
+              >
+                <div class="flex items-start gap-2">
+                  <Icon
+                    :name="
+                      form.openai_latency_mode === 'low_latency'
+                        ? 'bolt'
+                        : 'shield'
+                    "
+                    size="sm"
+                    class="mt-0.5 shrink-0 text-primary-600 dark:text-primary-400"
+                  />
+                  <p class="text-sm text-gray-600 dark:text-gray-300">
+                    {{
+                      form.openai_latency_mode === "low_latency"
+                        ? t("admin.settings.openaiLatencyMode.lowLatencyDescription")
+                        : t("admin.settings.openaiLatencyMode.compatibleDescription")
+                    }}
+                  </p>
+                </div>
+                <p
+                  class="mt-2 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400"
+                >
+                  <Icon name="refresh" size="xs" class="shrink-0" />
+                  {{ t("admin.settings.openaiLatencyMode.hotApplyHint") }}
+                </p>
+              </div>
+            </fieldset>
+          </div>
+
           <!-- Claude Code Settings -->
           <div class="card">
             <div
@@ -7342,6 +7439,7 @@ import {
   appendAuthSourceDefaultsToUpdateRequest,
   buildAuthSourceDefaultsState,
   normalizePlatformQuotasMap,
+  normalizeOpenAILatencyMode,
   sanitizePlatformQuotasMap,
   defaultWeChatConnectScopesForMode,
   deriveWeChatConnectStoredMode,
@@ -7356,6 +7454,7 @@ import type {
   DefaultSubscriptionSetting,
   DefaultPlatformQuotasMap,
   OpenAIFastPolicyRule,
+  OpenAILatencyMode,
   WeChatConnectMode,
   WebSearchEmulationConfig,
   WebSearchProviderConfig,
@@ -8040,6 +8139,7 @@ type SettingsForm = Omit<
   openai_advanced_scheduler_weight_quota_headroom: string;
   openai_advanced_scheduler_weight_previous_response: string;
   openai_advanced_scheduler_weight_session_sticky: string;
+  openai_latency_mode: OpenAILatencyMode;
   // 系统全局平台限额 map；form 内始终归一化为全 4 平台对象（模板非空绑定依赖此不变量）
   default_platform_quotas: DefaultPlatformQuotasMap;
 };
@@ -8231,6 +8331,7 @@ const form = reactive<SettingsForm>({
   max_claude_code_version: "",
   // 分组隔离
   allow_ungrouped_key_scheduling: false,
+  openai_latency_mode: "compatible",
   openai_advanced_scheduler_enabled: false,
   openai_advanced_scheduler_sticky_weighted_enabled: false,
   openai_advanced_scheduler_subscription_priority_enabled: false,
@@ -8280,6 +8381,7 @@ const form = reactive<SettingsForm>({
   // Allow user view error requests
   allow_user_view_error_requests: false,
 });
+const savedOpenAILatencyMode = ref<OpenAILatencyMode>("compatible");
 
 type OpenAIAdvancedSchedulerOverrideKey =
   | "openai_advanced_scheduler_lb_top_k"
@@ -9040,6 +9142,10 @@ async function loadSettings() {
         (form as Record<string, unknown>)[key] = value;
       }
     }
+    form.openai_latency_mode = normalizeOpenAILatencyMode(
+      settings.openai_latency_mode,
+    );
+    savedOpenAILatencyMode.value = form.openai_latency_mode;
     if (!form.claude_oauth_system_prompt_blocks?.trim()) {
       form.claude_oauth_system_prompt_blocks =
         defaultClaudeOAuthSystemPromptBlocks;
@@ -9250,6 +9356,7 @@ function findDuplicateDefaultSubscription(
 }
 
 async function saveSettings() {
+  const previousOpenAILatencyMode = savedOpenAILatencyMode.value;
   saving.value = true;
   try {
     const normalizedTableDefaultPageSize = Math.floor(
@@ -9544,6 +9651,7 @@ async function saveSettings() {
       min_claude_code_version: form.min_claude_code_version,
       max_claude_code_version: form.max_claude_code_version,
       allow_ungrouped_key_scheduling: form.allow_ungrouped_key_scheduling,
+      openai_latency_mode: form.openai_latency_mode,
       enable_fingerprint_unification: form.enable_fingerprint_unification,
       enable_metadata_passthrough: form.enable_metadata_passthrough,
       enable_cch_signing: form.enable_cch_signing,
@@ -9698,6 +9806,12 @@ async function saveSettings() {
         (form as Record<string, unknown>)[key] = value;
       }
     }
+    form.openai_latency_mode = normalizeOpenAILatencyMode(
+      updated.openai_latency_mode,
+    );
+    const openAILatencyModeChanged =
+      previousOpenAILatencyMode !== form.openai_latency_mode;
+    savedOpenAILatencyMode.value = form.openai_latency_mode;
     Object.assign(authSourceDefaults, buildAuthSourceDefaultsState(updated));
     form.default_platform_quotas = normalizePlatformQuotasMap(updated.default_platform_quotas);
     registrationEmailSuffixWhitelistTags.value =
@@ -9762,7 +9876,13 @@ async function saveSettings() {
     await appStore.fetchPublicSettings(true);
     await adminSettingsStore.fetch(true);
     if (wsOk) {
-      appStore.showSuccess(t("admin.settings.settingsSaved"));
+      appStore.showSuccess(
+        t(
+          openAILatencyModeChanged
+            ? "admin.settings.openaiLatencyMode.savedHotReloaded"
+            : "admin.settings.settingsSaved",
+        ),
+      );
     }
   } catch (error: unknown) {
     appStore.showError(

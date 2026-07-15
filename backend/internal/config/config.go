@@ -53,6 +53,18 @@ const (
 	ConnectionPoolIsolationAccountProxy = "account_proxy"
 )
 
+const (
+	OpenAILatencyModeCompatible = "compatible"
+	OpenAILatencyModeLowLatency = "low_latency"
+)
+
+const (
+	// OpenAIMissingInstructionsPolicyCodex injects the model-specific Codex base prompt.
+	OpenAIMissingInstructionsPolicyCodex = "codex"
+	// OpenAIMissingInstructionsPolicyEmpty sends an empty instructions string.
+	OpenAIMissingInstructionsPolicyEmpty = "empty"
+)
+
 // DefaultUpstreamResponseReadMaxBytes 上游非流式响应体的默认读取上限。
 // 128 MB 可容纳 2-3 张 4K PNG（base64 膨胀 33%，单张 4K PNG 最坏约 67MB base64）。
 // 可通过 gateway.upstream_response_read_max_bytes 配置项覆盖。
@@ -758,6 +770,18 @@ type GatewayConfig struct {
 	GeminiDebugResponseHeaders bool `mapstructure:"gemini_debug_response_headers"`
 	// ConnectionPoolIsolation: 上游连接池隔离策略（proxy/account/account_proxy）
 	ConnectionPoolIsolation string `mapstructure:"connection_pool_isolation"`
+	// OpenAILatencyMode: OpenAI 网关延迟预设（compatible/low_latency）。
+	// 细粒度 OpenAI 配置仍可用于高级覆盖和灰度回滚。
+	OpenAILatencyMode string `mapstructure:"openai_latency_mode"`
+	// OpenAIConnectionPoolIsolation: OpenAI 上游专属连接池隔离策略。
+	// 空值由 OpenAILatencyMode 决定：compatible 沿用通用策略，low_latency 按代理共享。
+	OpenAIConnectionPoolIsolation string `mapstructure:"openai_connection_pool_isolation"`
+	// OpenAIStreamFlushPreamble: 收到 OpenAI SSE 前导事件后是否立即提交下游响应。
+	// 默认关闭，以保留首个语义输出前的账号 failover 能力。
+	OpenAIStreamFlushPreamble bool `mapstructure:"openai_stream_flush_preamble"`
+	// OpenAIMissingInstructionsPolicy: 请求缺少 instructions 时的填充策略（codex/empty）。
+	// 默认 codex 保持现有行为；empty 可减少上游 prompt prefill 延迟。
+	OpenAIMissingInstructionsPolicy string `mapstructure:"openai_missing_instructions_policy"`
 	// ForceCodexCLI: 强制将 OpenAI `/v1/responses` 请求按 Codex CLI 处理。
 	// 用于网关未透传/改写 User-Agent 时的兼容兜底（默认关闭，避免影响其他客户端）。
 	ForceCodexCLI bool `mapstructure:"force_codex_cli"`
@@ -2027,6 +2051,10 @@ func setDefaults() {
 	viper.SetDefault("gateway.proxy_probe_response_read_max_bytes", int64(1024*1024))
 	viper.SetDefault("gateway.gemini_debug_response_headers", false)
 	viper.SetDefault("gateway.connection_pool_isolation", ConnectionPoolIsolationAccountProxy)
+	viper.SetDefault("gateway.openai_latency_mode", OpenAILatencyModeCompatible)
+	viper.SetDefault("gateway.openai_connection_pool_isolation", "")
+	viper.SetDefault("gateway.openai_stream_flush_preamble", false)
+	viper.SetDefault("gateway.openai_missing_instructions_policy", OpenAIMissingInstructionsPolicyCodex)
 	// HTTP 上游连接池配置（针对 5000+ 并发用户优化）
 	viper.SetDefault("gateway.max_idle_conns", 2560)          // 最大空闲连接总数（高并发场景可调大）
 	viper.SetDefault("gateway.max_idle_conns_per_host", 120)  // 每主机最大空闲连接（HTTP/2 场景默认）
@@ -2658,6 +2686,26 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("gateway.connection_pool_isolation must be one of: %s/%s/%s",
 				ConnectionPoolIsolationProxy, ConnectionPoolIsolationAccount, ConnectionPoolIsolationAccountProxy)
 		}
+	}
+	switch strings.TrimSpace(c.Gateway.OpenAILatencyMode) {
+	case OpenAILatencyModeCompatible, OpenAILatencyModeLowLatency:
+	default:
+		return fmt.Errorf("gateway.openai_latency_mode must be one of: %s/%s",
+			OpenAILatencyModeCompatible, OpenAILatencyModeLowLatency)
+	}
+	if strings.TrimSpace(c.Gateway.OpenAIConnectionPoolIsolation) != "" {
+		switch c.Gateway.OpenAIConnectionPoolIsolation {
+		case ConnectionPoolIsolationProxy, ConnectionPoolIsolationAccount, ConnectionPoolIsolationAccountProxy:
+		default:
+			return fmt.Errorf("gateway.openai_connection_pool_isolation must be one of: %s/%s/%s",
+				ConnectionPoolIsolationProxy, ConnectionPoolIsolationAccount, ConnectionPoolIsolationAccountProxy)
+		}
+	}
+	switch strings.TrimSpace(c.Gateway.OpenAIMissingInstructionsPolicy) {
+	case OpenAIMissingInstructionsPolicyCodex, OpenAIMissingInstructionsPolicyEmpty:
+	default:
+		return fmt.Errorf("gateway.openai_missing_instructions_policy must be one of: %s/%s",
+			OpenAIMissingInstructionsPolicyCodex, OpenAIMissingInstructionsPolicyEmpty)
 	}
 	if c.Gateway.ImageConcurrency.MaxConcurrentRequests < 0 {
 		return fmt.Errorf("gateway.image_concurrency.max_concurrent_requests must be non-negative")

@@ -371,6 +371,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.AllowUngroupedKeyScheduling != after.AllowUngroupedKeyScheduling {
 		changed = append(changed, "allow_ungrouped_key_scheduling")
 	}
+	if before.OpenAILatencyMode != after.OpenAILatencyMode {
+		changed = append(changed, "openai_latency_mode")
+	}
 	if before.BackendModeEnabled != after.BackendModeEnabled {
 		changed = append(changed, "backend_mode_enabled")
 	}

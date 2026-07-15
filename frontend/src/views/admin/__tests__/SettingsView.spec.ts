@@ -178,6 +178,7 @@ vi.mock("vue-i18n", async () => {
     "admin.settings.openaiExperimentalScheduler.quotaHeadroomWeight": "额度余量",
     "admin.settings.openaiExperimentalScheduler.previousResponseWeight": "previous_response 粘性",
     "admin.settings.openaiExperimentalScheduler.sessionStickyWeight": "session_hash 粘性",
+    "admin.settings.openaiLatencyMode.savedHotReloaded": "OpenAI 延迟模式已保存并已热重载，将应用于后续新请求。",
     "admin.settings.site.uploadImage": "上传图片",
     "admin.settings.site.remove": "移除",
     "admin.settings.platformQuota.platform": "平台",
@@ -392,6 +393,7 @@ const baseSettingsResponse = {
   min_claude_code_version: "",
   max_claude_code_version: "",
   allow_ungrouped_key_scheduling: false,
+  openai_latency_mode: "compatible",
   enable_fingerprint_unification: true,
   enable_metadata_passthrough: false,
   enable_cch_signing: false,
@@ -664,6 +666,34 @@ describe("admin SettingsView payment visible method controls", () => {
         enable_anthropic_cache_ttl_1h_injection: true,
       }),
     );
+  });
+
+  it("hot reloads a changed OpenAI latency mode", async () => {
+    const wrapper = mountView();
+
+    await flushPromises();
+    await wrapper.get("#openai-latency-low").setValue();
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        openai_latency_mode: "low_latency",
+      }),
+    );
+    expect(showSuccess).toHaveBeenCalledWith(
+      "OpenAI 延迟模式已保存并已热重载，将应用于后续新请求。",
+    );
+  });
+
+  it("keeps the generic success toast when the OpenAI latency mode is unchanged", async () => {
+    const wrapper = mountView();
+
+    await flushPromises();
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(showSuccess).toHaveBeenCalledWith("admin.settings.settingsSaved");
   });
 
   it("submits message cache_control rewrite gateway setting", async () => {

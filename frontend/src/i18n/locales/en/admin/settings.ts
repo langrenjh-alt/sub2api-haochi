@@ -304,6 +304,17 @@ export default {
         allowUngroupedKey: 'Allow Ungrouped Key Scheduling',
         allowUngroupedKeyHint: 'When disabled, API Keys not assigned to any group cannot make requests (403 Forbidden). Keep disabled to ensure all Keys belong to a specific group.'
       },
+      openaiLatencyMode: {
+        title: 'OpenAI Latency Mode',
+        description: 'This setting applies across the entire gateway and controls the first-byte priority and compatibility behavior of OpenAI Responses requests',
+        modeLabel: 'OpenAI latency mode',
+        compatible: 'Compatible',
+        compatibleDescription: 'Preserves account failover until the first semantic output; when instructions are missing, the built-in Codex prompt is used.',
+        lowLatency: 'Low latency',
+        lowLatencyDescription: 'Flushes each complete preamble SSE event immediately; when instructions are missing, an empty string is sent. Once the preamble is written, that request no longer switches accounts.',
+        hotApplyHint: 'Hot reloads after saving with no service restart; only new requests use the new mode, while streams already in progress keep their current mode.',
+        savedHotReloaded: 'OpenAI latency mode saved and hot reloaded for subsequent new requests.',
+      },
       gatewayForwarding: {
         title: 'Request Forwarding',
         description: 'Control how requests are forwarded to upstream OAuth accounts',

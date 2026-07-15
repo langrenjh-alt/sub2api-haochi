@@ -5,7 +5,10 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -66,8 +69,9 @@ const (
 	// （分钟级）。Go 的 http2.Transport 默认 ReadIdleTimeout=0（不发健康 PING），
 	// 无法检测。启用主动 PING 探测：连接空闲 ReadIdleTimeout 后发 PING，PingTimeout
 	// 内无响应即判定死连接并关闭，从源头避免请求挂在死连接上。
-	openAIHTTP2ReadIdleTimeout = 15 * time.Second
-	openAIHTTP2PingTimeout     = 15 * time.Second
+	openAIHTTP2ReadIdleTimeout  = 15 * time.Second
+	openAIHTTP2PingTimeout      = 15 * time.Second
+	upstreamTLSSessionCacheSize = 256
 
 	// The Grok CLI proxy rejects requests that do not identify a supported
 	// client version. Keep a known-good stable version in the binary while
@@ -85,6 +89,8 @@ const (
 )
 
 var errUpstreamClientLimitReached = errors.New("upstream client cache limit reached")
+
+var sharedUpstreamTLSClientSessionCache = tls.NewLRUClientSessionCache(upstreamTLSSessionCacheSize)
 
 // poolSettings 连接池配置参数
 // 封装 Transport 所需的各项连接池参数
@@ -184,12 +190,14 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 		return nil, err
 	}
 	profile := service.HTTPUpstreamProfileDefault
+	openAILatencyMode := ""
 	if req != nil {
 		profile = service.HTTPUpstreamProfileFromContext(req.Context())
+		openAILatencyMode, _ = service.OpenAILatencyModeFromContext(req.Context())
 	}
 
 	// 获取或创建对应的客户端，并标记请求占用
-	entry, err := s.acquireClientWithProfile(proxyURL, accountID, accountConcurrency, profile)
+	entry, err := s.acquireClientWithProfile(proxyURL, accountID, accountConcurrency, profile, openAILatencyMode)
 	if err != nil {
 		return nil, err
 	}
@@ -228,8 +236,10 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	}
 	applyGrokCLIProxyHeaders(req)
 	upstreamProfile := service.HTTPUpstreamProfileDefault
+	openAILatencyMode := ""
 	if req != nil {
 		upstreamProfile = service.HTTPUpstreamProfileFromContext(req.Context())
+		openAILatencyMode, _ = service.OpenAILatencyModeFromContext(req.Context())
 	}
 
 	targetHost := ""
@@ -246,7 +256,7 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 		return nil, err
 	}
 
-	entry, err := s.acquireClientWithTLS(proxyURL, accountID, accountConcurrency, profile, upstreamProfile)
+	entry, err := s.acquireClientWithTLS(proxyURL, accountID, accountConcurrency, profile, upstreamProfile, openAILatencyMode)
 	if err != nil {
 		slog.Debug("tls_fingerprint_acquire_client_failed", "account_id", accountID, "error", err)
 		return nil, err
@@ -299,22 +309,24 @@ func isSupportedGrokCLIVersion(version string) bool {
 }
 
 // acquireClientWithTLS 获取或创建带 TLS 指纹的客户端
-func (s *httpUpstreamService) acquireClientWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile service.HTTPUpstreamProfile) (*upstreamClientEntry, error) {
-	return s.getClientEntryWithTLS(proxyURL, accountID, accountConcurrency, profile, upstreamProfile, true, true)
+func (s *httpUpstreamService) acquireClientWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile service.HTTPUpstreamProfile, openAILatencyModes ...string) (*upstreamClientEntry, error) {
+	return s.getClientEntryWithTLS(proxyURL, accountID, accountConcurrency, profile, upstreamProfile, true, true, openAILatencyModes...)
 }
 
 // getClientEntryWithTLS 获取或创建带 TLS 指纹的客户端条目
 // TLS 指纹客户端使用独立的缓存键，与普通客户端隔离
-func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
-	isolation := s.getIsolationMode()
+func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile, upstreamProfile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool, openAILatencyModes ...string) (*upstreamClientEntry, error) {
+	isolation := s.getIsolationModeForProfile(upstreamProfile, openAILatencyModes...)
 	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
 	if err != nil {
 		return nil, err
 	}
 	settings := s.resolvePoolSettings(isolation, accountConcurrency)
 	settings = s.applyProfilePoolSettings(settings, upstreamProfile)
-	// TLS 指纹客户端使用独立的缓存键，加 "tls:" 前缀
-	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault)
+	// TLS 指纹客户端使用独立缓存键。指纹内容必须参与 key，否则 proxy
+	// 隔离下不同 profile 会错误复用首个账号创建的 Transport。
+	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault) +
+		"|fingerprint:" + tlsFingerprintProfileIdentity(profile)
 	poolKey := buildPoolKey(settings, upstreamProtocolModeDefault) + ":tls"
 
 	now := time.Now()
@@ -394,6 +406,20 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	return entry, nil
 }
 
+func tlsFingerprintProfileIdentity(profile *tlsfingerprint.Profile) string {
+	if profile == nil {
+		return "none"
+	}
+	payload, err := json.Marshal(profile)
+	if err != nil {
+		// Profile currently contains only JSON-safe scalar/slice fields. Keep a
+		// deterministic fallback if future fields make JSON encoding unsupported.
+		payload = []byte(fmt.Sprintf("%#v", *profile))
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:16])
+}
+
 func (s *httpUpstreamService) shouldValidateResolvedIP() bool {
 	if s.cfg == nil {
 		return false
@@ -435,8 +461,8 @@ func (s *httpUpstreamService) acquireClient(proxyURL string, accountID int64, ac
 }
 
 // acquireClientWithProfile 获取或创建客户端，并按请求 profile 选择协议策略。
-func (s *httpUpstreamService) acquireClientWithProfile(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile) (*upstreamClientEntry, error) {
-	return s.getClientEntry(proxyURL, accountID, accountConcurrency, profile, true, true)
+func (s *httpUpstreamService) acquireClientWithProfile(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile, openAILatencyModes ...string) (*upstreamClientEntry, error) {
+	return s.getClientEntry(proxyURL, accountID, accountConcurrency, profile, true, true, openAILatencyModes...)
 }
 
 // getOrCreateClient 获取或创建客户端
@@ -461,9 +487,9 @@ func (s *httpUpstreamService) getOrCreateClient(proxyURL string, accountID int64
 // getClientEntry 获取或创建客户端条目
 // markInFlight=true 时会标记进行中请求，用于请求路径防止被淘汰
 // enforceLimit=true 时会限制客户端数量，超限且无法淘汰时返回错误
-func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool) (*upstreamClientEntry, error) {
+func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, accountConcurrency int, profile service.HTTPUpstreamProfile, markInFlight bool, enforceLimit bool, openAILatencyModes ...string) (*upstreamClientEntry, error) {
 	// 获取隔离模式
-	isolation := s.getIsolationMode()
+	isolation := s.getIsolationModeForProfile(profile, openAILatencyModes...)
 	// 标准化代理 URL 并解析
 	proxyKey, parsedProxy, err := normalizeProxyURL(proxyURL)
 	if err != nil {
@@ -666,6 +692,35 @@ func (s *httpUpstreamService) getIsolationMode() string {
 	default:
 		return config.ConnectionPoolIsolationAccountProxy
 	}
+}
+
+// getIsolationModeForProfile returns a profile-specific isolation mode when
+// configured. Without an explicit OpenAI override, low_latency shares by proxy
+// while compatible and programmatic zero-value configs retain the general mode.
+func (s *httpUpstreamService) getIsolationModeForProfile(profile service.HTTPUpstreamProfile, openAILatencyModes ...string) string {
+	if profile == service.HTTPUpstreamProfileOpenAI {
+		if s != nil && s.cfg != nil {
+			mode := strings.ToLower(strings.TrimSpace(s.cfg.Gateway.OpenAIConnectionPoolIsolation))
+			switch mode {
+			case config.ConnectionPoolIsolationProxy, config.ConnectionPoolIsolationAccount, config.ConnectionPoolIsolationAccountProxy:
+				return mode
+			}
+		}
+		openAILatencyMode := ""
+		if s != nil && s.cfg != nil {
+			openAILatencyMode = strings.TrimSpace(s.cfg.Gateway.OpenAILatencyMode)
+		}
+		if len(openAILatencyModes) > 0 && strings.TrimSpace(openAILatencyModes[0]) != "" {
+			openAILatencyMode = strings.TrimSpace(openAILatencyModes[0])
+		}
+		if strings.EqualFold(openAILatencyMode, config.OpenAILatencyModeLowLatency) {
+			return config.ConnectionPoolIsolationProxy
+		}
+	}
+	if s == nil {
+		return config.ConnectionPoolIsolationAccountProxy
+	}
+	return s.getIsolationMode()
 }
 
 // maxUpstreamClients 获取最大客户端缓存数量
@@ -1106,6 +1161,10 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		MaxConnsPerHost:       settings.maxConnsPerHost,
 		IdleConnTimeout:       settings.idleConnTimeout,
 		ResponseHeaderTimeout: settings.responseHeaderTimeout,
+		ForceAttemptHTTP2:     true,
+		TLSClientConfig: &tls.Config{
+			ClientSessionCache: sharedUpstreamTLSClientSessionCache,
+		},
 	}
 	switch protocolMode {
 	case upstreamProtocolModeOpenAIH2:

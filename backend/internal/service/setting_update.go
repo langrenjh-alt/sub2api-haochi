@@ -73,6 +73,18 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	if err := s.normalizeOpenAIAdvancedSchedulerOverrides(settings); err != nil {
 		return nil, err
 	}
+	openAILatencyMode := openAILatencyModeConfigDefault(s.cfg)
+	if strings.TrimSpace(settings.OpenAILatencyMode) != "" {
+		var ok bool
+		openAILatencyMode, ok = normalizeOpenAILatencyMode(settings.OpenAILatencyMode)
+		if !ok {
+			return nil, infraerrors.BadRequest(
+				"INVALID_OPENAI_LATENCY_MODE",
+				"openai_latency_mode must be compatible or low_latency",
+			)
+		}
+	}
+	settings.OpenAILatencyMode = openAILatencyMode
 	settings.PaymentVisibleMethodAlipaySource = alipaySource
 	settings.PaymentVisibleMethodWxpaySource = wxpaySource
 	settings.WeChatConnectAppID = strings.TrimSpace(settings.WeChatConnectAppID)
@@ -369,6 +381,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyEnableClientDatelineNormalization] = strconv.FormatBool(settings.EnableClientDatelineNormalization)
 	updates[SettingKeyAntigravityUserAgentVersion] = antigravity.NormalizeUserAgentVersion(settings.AntigravityUserAgentVersion)
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
+	updates[SettingKeyOpenAILatencyMode] = settings.OpenAILatencyMode
 	// codex_cli_only 加固
 	updates[SettingKeyMinCodexVersion] = strings.TrimSpace(settings.MinCodexVersion)
 	updates[SettingKeyMaxCodexVersion] = strings.TrimSpace(settings.MaxCodexVersion)
@@ -538,6 +551,10 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		value:     codexUA,
 		expiresAt: time.Now().Add(openAICodexUserAgentCacheTTL).UnixNano(),
 	})
+	s.storeOpenAILatencyMode(normalizeOpenAILatencyModeOrDefault(
+		settings.OpenAILatencyMode,
+		openAILatencyModeConfigDefault(s.cfg),
+	))
 	openAIAdvancedSchedulerSettingSF.Forget(openAIAdvancedSchedulerSettingKey)
 	openAIAdvancedSchedulerSettingCache.Store(&cachedOpenAIAdvancedSchedulerSetting{
 		enabled:                     settings.OpenAIAdvancedSchedulerEnabled,

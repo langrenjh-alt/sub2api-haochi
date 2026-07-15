@@ -298,6 +298,17 @@ export default {
         allowUngroupedKey: '允许未分组 Key 调度',
         allowUngroupedKeyHint: '关闭后，未分配到任何分组的 API Key 将无法发起请求（返回 403）。建议保持关闭以确保所有 Key 都归属明确的分组。'
       },
+      openaiLatencyMode: {
+        title: 'OpenAI 延迟模式',
+        description: '此设置作用于整个网关，用于选择 OpenAI Responses 请求的首字节优先级与兼容行为',
+        modeLabel: 'OpenAI 延迟模式',
+        compatible: '兼容模式',
+        compatibleDescription: '保留首个语义输出前的账号切换能力；请求缺少 instructions 时使用内置 Codex prompt。',
+        lowLatency: '低延迟模式',
+        lowLatencyDescription: '收到完整的前导 SSE 事件后立即刷新；请求缺少 instructions 时发送空字符串。前导事件写出后，本次请求不再切换账号。',
+        hotApplyHint: '保存后立即热重载，无需重启服务；仅影响保存后的新请求，正在进行的流保持原模式。',
+        savedHotReloaded: 'OpenAI 延迟模式已保存并已热重载，将应用于后续新请求。',
+      },
       gatewayForwarding: {
         title: '请求转发行为',
         description: '控制请求转发到上游 OAuth 账号时的行为',

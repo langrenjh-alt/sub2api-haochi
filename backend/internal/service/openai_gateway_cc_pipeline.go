@@ -200,6 +200,7 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 		applyGrokCLIHeaders(upstreamReq.Header)
 		applyGrokCacheHeaders(upstreamReq.Header, grokCacheIdentity)
 	}
+	applyOpenAIStreamingTransportHeaders(upstreamReq.Header, stream)
 
 	proxyURL := ""
 	if account.Proxy != nil {

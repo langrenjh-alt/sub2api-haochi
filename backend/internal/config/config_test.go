@@ -259,6 +259,32 @@ func TestLoadOpenAIResponseHeaderTimeoutFromEnv(t *testing.T) {
 	require.Equal(t, 1800, cfg.Gateway.OpenAIResponseHeaderTimeout)
 }
 
+func TestLoadDefaultOpenAIConnectionAndStreamConfig(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, OpenAILatencyModeCompatible, cfg.Gateway.OpenAILatencyMode)
+	require.Empty(t, cfg.Gateway.OpenAIConnectionPoolIsolation)
+	require.False(t, cfg.Gateway.OpenAIStreamFlushPreamble)
+	require.Equal(t, OpenAIMissingInstructionsPolicyCodex, cfg.Gateway.OpenAIMissingInstructionsPolicy)
+}
+
+func TestLoadOpenAIConnectionAndStreamConfigFromEnv(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	t.Setenv("GATEWAY_OPENAI_LATENCY_MODE", OpenAILatencyModeLowLatency)
+	t.Setenv("GATEWAY_OPENAI_CONNECTION_POOL_ISOLATION", ConnectionPoolIsolationAccount)
+	t.Setenv("GATEWAY_OPENAI_STREAM_FLUSH_PREAMBLE", "true")
+	t.Setenv("GATEWAY_OPENAI_MISSING_INSTRUCTIONS_POLICY", OpenAIMissingInstructionsPolicyEmpty)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, OpenAILatencyModeLowLatency, cfg.Gateway.OpenAILatencyMode)
+	require.Equal(t, ConnectionPoolIsolationAccount, cfg.Gateway.OpenAIConnectionPoolIsolation)
+	require.True(t, cfg.Gateway.OpenAIStreamFlushPreamble)
+	require.Equal(t, OpenAIMissingInstructionsPolicyEmpty, cfg.Gateway.OpenAIMissingInstructionsPolicy)
+}
+
 func TestLoadImageNonstreamKeepaliveFromEnv(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	t.Setenv("GATEWAY_IMAGE_NONSTREAM_KEEPALIVE_INTERVAL", "15")
@@ -1387,6 +1413,21 @@ func TestValidateConfigErrors(t *testing.T) {
 			name:    "gateway connection isolation",
 			mutate:  func(c *Config) { c.Gateway.ConnectionPoolIsolation = "invalid" },
 			wantErr: "gateway.connection_pool_isolation",
+		},
+		{
+			name:    "gateway openai latency mode",
+			mutate:  func(c *Config) { c.Gateway.OpenAILatencyMode = "invalid" },
+			wantErr: "gateway.openai_latency_mode",
+		},
+		{
+			name:    "gateway openai connection isolation",
+			mutate:  func(c *Config) { c.Gateway.OpenAIConnectionPoolIsolation = "invalid" },
+			wantErr: "gateway.openai_connection_pool_isolation",
+		},
+		{
+			name:    "gateway openai missing instructions policy",
+			mutate:  func(c *Config) { c.Gateway.OpenAIMissingInstructionsPolicy = "invalid" },
+			wantErr: "gateway.openai_missing_instructions_policy",
 		},
 		{
 			name:    "gateway stream keepalive range",

@@ -88,6 +88,11 @@ export type PaymentVisibleMethodSource =
   | "official_wxpay"
   | "easypay_wxpay";
 export type WeChatConnectMode = "open" | "mp" | "mobile";
+export type OpenAILatencyMode = "compatible" | "low_latency";
+
+export function normalizeOpenAILatencyMode(value: unknown): OpenAILatencyMode {
+  return value === "low_latency" ? "low_latency" : "compatible";
+}
 
 export interface PaymentVisibleMethodSourceOption {
   value: PaymentVisibleMethodSource;
@@ -553,6 +558,7 @@ export interface SystemSettings {
   allow_ungrouped_key_scheduling: boolean;
 
   // Gateway forwarding behavior
+  openai_latency_mode: OpenAILatencyMode;
   enable_fingerprint_unification: boolean;
   enable_metadata_passthrough: boolean;
   enable_cch_signing: boolean;
@@ -827,6 +833,7 @@ export interface UpdateSettingsRequest {
   min_claude_code_version?: string;
   max_claude_code_version?: string;
   allow_ungrouped_key_scheduling?: boolean;
+  openai_latency_mode?: OpenAILatencyMode;
   enable_fingerprint_unification?: boolean;
   enable_metadata_passthrough?: boolean;
   enable_cch_signing?: boolean;

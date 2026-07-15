@@ -403,6 +403,8 @@ const (
 	// targets OpenAI's body-level service_tier field instead of Claude's
 	// anthropic-beta header.
 	SettingKeyOpenAIFastPolicySettings = "openai_fast_policy_settings"
+	// SettingKeyOpenAILatencyMode stores the gateway-wide OpenAI latency preset.
+	SettingKeyOpenAILatencyMode = "openai_latency_mode"
 
 	// =========================
 	// Claude Code Version Check

@@ -48,7 +48,20 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 
 	if account != nil && account.Type == AccountTypeOAuth {
-		if rejectReason := detectOpenAIPassthroughInstructionsRejectReason(reqModel, body); rejectReason != "" {
+		allowEmptyInstructions := s.useEmptyOpenAIMissingInstructions(ctx)
+		rejectReason := detectOpenAIPassthroughInstructionsRejectReason(reqModel, body)
+		if allowEmptyInstructions && rejectReason == "instructions_missing" {
+			nextBody, setErr := sjson.SetBytes(body, "instructions", "")
+			if setErr != nil {
+				return nil, fmt.Errorf("set empty passthrough instructions: %w", setErr)
+			}
+			body = nextBody
+			rejectReason = "instructions_empty"
+		}
+		if allowEmptyInstructions && rejectReason == "instructions_empty" {
+			rejectReason = ""
+		}
+		if rejectReason != "" {
 			rejectMsg := "OpenAI codex passthrough requires a non-empty instructions field"
 			MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
 			logOpenAIPassthroughInstructionsRejected(ctx, c, account, reqModel, rejectReason, body)
@@ -413,6 +426,10 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）
 	account.ApplyHeaderOverrides(req.Header)
+	applyOpenAIStreamingTransportHeaders(
+		req.Header,
+		gjson.GetBytes(body, "stream").Bool() && !isOpenAIResponsesCompactPath(c),
+	)
 
 	return req, nil
 }
@@ -603,6 +620,22 @@ func openAIStreamClientOutputStarted(c *gin.Context, localStarted bool) bool {
 func openAIStreamEventIsPreamble(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
 	case "response.created", "response.in_progress":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveOpenAIStreamEventType(data []byte, frameEventType string) string {
+	if eventType := strings.TrimSpace(gjson.GetBytes(data, "type").String()); eventType != "" {
+		return eventType
+	}
+	return strings.TrimSpace(frameEventType)
+}
+
+func openAIStreamEventTypeIsTerminal(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		return true
 	default:
 		return false
@@ -861,6 +894,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	sawFailedEvent := false
 	failedMessage := ""
 	clientOutputStarted := false
+	flushPreamble := s.shouldFlushOpenAIStreamPreamble(ctx)
+	preambleEventPending := false
+	frameEventType := ""
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	pendingLines := make([]string, 0, 8)
 	writePendingLines := func() bool {
@@ -897,6 +933,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		if eventType, ok := extractOpenAISSEEventLine(line); ok {
+			frameEventType = eventType
+		}
 		lineStartsClientOutput := false
 		forceFlushFailedEvent := false
 		if data, ok := extractOpenAISSEDataLine(line); ok {
@@ -930,7 +969,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 					line = "data: " + string(restoredData)
 				}
 			}
-			eventType := strings.TrimSpace(gjson.Get(trimmedData, "type").String())
+			eventType := resolveOpenAIStreamEventType(dataBytes, frameEventType)
 			if eventType == "response.failed" {
 				failedMessage = extractOpenAISSEErrorMessage(dataBytes)
 				// response.failed 自带上游已消耗的 usage（input token 通常已扣）；必须先解析
@@ -973,7 +1012,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			if trimmedData == "[DONE]" {
 				sawDone = true
 			}
-			if openAIStreamEventIsTerminal(trimmedData) {
+			if openAIStreamEventIsTerminal(trimmedData) || openAIStreamEventTypeIsTerminal(eventType) {
 				sawTerminalEvent = true
 			}
 			if responseID == "" {
@@ -990,6 +1029,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				line = "data: " + string(sanitizedData)
 			}
 			lineStartsClientOutput = forceFlushFailedEvent || openAIStreamDataStartsClientOutput(trimmedData, eventType)
+			if flushPreamble && !clientOutputStarted && openAIStreamEventIsPreamble(eventType) {
+				preambleEventPending = true
+			}
 			if firstTokenMs == nil && lineStartsClientOutput && trimmedData != "[DONE]" {
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
@@ -998,8 +1040,22 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 
 		if !clientDisconnected {
+			completesPreamble := flushPreamble && !clientOutputStarted && preambleEventPending && line == ""
 			if !clientOutputStarted && !lineStartsClientOutput {
 				pendingLines = append(pendingLines, line)
+				if !completesPreamble {
+					if line == "" {
+						preambleEventPending = false
+						frameEventType = ""
+					}
+					continue
+				}
+				if writePendingLines() {
+					clientOutputStarted = true
+					flusher.Flush()
+				}
+				preambleEventPending = false
+				frameEventType = ""
 				continue
 			}
 			if !clientOutputStarted && len(pendingLines) > 0 {
@@ -1014,6 +1070,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				clientOutputStarted = true
 				flusher.Flush()
 			}
+		}
+		if line == "" {
+			preambleEventPending = false
+			frameEventType = ""
 		}
 	}
 	if err := scanner.Err(); err != nil {

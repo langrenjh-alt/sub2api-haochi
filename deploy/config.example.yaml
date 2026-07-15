@@ -203,6 +203,26 @@ gateway:
   # - account_proxy: Isolate by account+proxy combination (default, finest granularity)
   # - account_proxy: 按账户+代理组合隔离（默认，最细粒度）
   connection_pool_isolation: "account_proxy"
+  # OpenAI latency preset: compatible preserves existing semantics; low_latency favors TTFB/TTFT.
+  # OpenAI 延迟预设：compatible 保持现有语义；low_latency 优先降低 TTFB/TTFT。
+  # In compatible mode, the granular OpenAI options below can opt individual optimizations in.
+  # compatible 模式下可用下方细粒度项逐项开启优化；low_latency 预设会同时开启低延迟语义。
+  openai_latency_mode: "compatible"
+  # Optional OpenAI-specific connection pool override. Empty follows openai_latency_mode:
+  # OpenAI 专属连接池高级覆盖。留空时由 openai_latency_mode 决定：
+  # compatible inherits connection_pool_isolation; low_latency uses proxy sharing.
+  # compatible 沿用通用隔离；low_latency 按代理共享，减少调度换号后的冷建连。
+  openai_connection_pool_isolation: ""
+  # Flush response.created/response.in_progress before the first semantic SSE event.
+  # 是否在首个语义 SSE 事件前立即转发 response.created/response.in_progress。
+  # Enabling lowers TTFB but commits the response before pre-output account failover can run.
+  # 开启可降低首字节时间，但会提前提交响应，失去首输出前换号能力。
+  openai_stream_flush_preamble: false
+  # Missing instructions policy: codex injects the full Codex base prompt; empty sends "".
+  # 缺少 instructions 时的策略：codex 注入完整 Codex 基础提示词；empty 仅发送空字符串。
+  # Keep codex for compatibility. Use empty when lower prompt-prefill latency is preferred.
+  # 默认 codex 保持兼容；低延迟优先时可设为 empty。
+  openai_missing_instructions_policy: "codex"
   # Force Codex CLI mode: treat all /openai/v1/responses requests as Codex CLI.
   # 强制按 Codex CLI 处理 /openai/v1/responses 请求（用于网关未透传/改写 User-Agent 的兜底）。
   #
