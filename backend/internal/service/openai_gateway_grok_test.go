@@ -1606,7 +1606,7 @@ func TestForwardAsAnthropicForGrokUsesXAIResponses(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), "ok")
 }
 
-func TestForwardAsAnthropicForGrokFunctionToolUsesRawChatCacheWithoutSyntheticTools(t *testing.T) {
+func TestForwardAsAnthropicForGrokFunctionToolUsesCacheCapableMixedRoute(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
@@ -1621,15 +1621,25 @@ func TestForwardAsAnthropicForGrokFunctionToolUsesRawChatCacheWithoutSyntheticTo
 	c.Set("api_key", &APIKey{ID: 5403})
 
 	account := healthyGrokOAuthGatewayTestAccount(58, "access-token")
+	account.Extra = map[string]any{grokBillingExtraKey: map[string]any{
+		"status_code":        http.StatusOK,
+		"source":             "billing_probe",
+		"monthly_updated_at": "2026-07-15T05:00:00Z",
+	}}
 	repo := &grokQuotaAccountRepo{
 		mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
 			accountsByID: map[int64]*Account{58: account},
 		},
 	}
-	responseBody := `{"id":"chatcmpl_grok_function","object":"chat.completion","model":"grok-4.5","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_lookup","type":"function","function":{"name":"lookup","arguments":"{\"key\":\"alpha\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":7000,"completion_tokens":2,"total_tokens":7002,"prompt_tokens_details":{"cached_tokens":6144}}}`
+	responseBody := strings.Join([]string{
+		`data: {"type":"response.completed","response":{"id":"resp_grok_function","object":"response","model":"grok-4.5","status":"completed","output":[{"type":"function_call","id":"fc_lookup","call_id":"call_lookup","name":"lookup","arguments":"{\"key\":\"alpha\"}","status":"completed"}],"usage":{"input_tokens":7000,"output_tokens":2,"total_tokens":7002,"input_tokens_details":{"cached_tokens":6144}}}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
 		Body:       io.NopCloser(strings.NewReader(responseBody)),
 	}}
 	svc := &OpenAIGatewayService{
@@ -1642,19 +1652,18 @@ func TestForwardAsAnthropicForGrokFunctionToolUsesRawChatCacheWithoutSyntheticTo
 
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
-	identity := upstream.lastReq.Header.Get(grokConversationIDHeader)
+	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
+	identity := gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String()
 	require.NotEmpty(t, identity)
-	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
+	require.Equal(t, identity, upstream.lastReq.Header.Get(grokConversationIDHeader))
 	tools := gjson.GetBytes(upstream.lastBody, "tools").Array()
-	require.Len(t, tools, 1)
+	require.Len(t, tools, 3)
 	require.Equal(t, "function", tools[0].Get("type").String())
-	require.Equal(t, "lookup", tools[0].Get("function.name").String())
-	require.Equal(t, "object", tools[0].Get("function.parameters.type").String())
-	require.NotContains(t, string(upstream.lastBody), "web_search")
-	require.NotContains(t, string(upstream.lastBody), "x_search")
+	require.Equal(t, "lookup", tools[0].Get("name").String())
+	require.Equal(t, "object", tools[0].Get("parameters.type").String())
+	require.Equal(t, "web_search", tools[1].Get("type").String())
+	require.Equal(t, "x_search", tools[2].Get("type").String())
 	require.Equal(t, "auto", gjson.GetBytes(upstream.lastBody, "tool_choice").String())
-	require.Equal(t, grokChatRawEndpoint, GetActualOpenAIUpstreamEndpoint(c))
 
 	require.Equal(t, 7000, result.Usage.InputTokens)
 	require.Equal(t, 6144, result.Usage.CacheReadInputTokens)
@@ -1666,58 +1675,6 @@ func TestForwardAsAnthropicForGrokFunctionToolUsesRawChatCacheWithoutSyntheticTo
 	require.Equal(t, "tool_use", gjson.Get(clientBody, "stop_reason").String())
 	require.Equal(t, int64(856), gjson.Get(clientBody, "usage.input_tokens").Int())
 	require.Equal(t, int64(6144), gjson.Get(clientBody, "usage.cache_read_input_tokens").Int())
-}
-
-func TestForwardAsAnthropicForGrokFunctionToolStreamingUsesRawChatCacheWithoutSyntheticTools(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	body := []byte(`{
-		"model":"grok","max_tokens":32,"stream":true,
-		"messages":[{"role":"user","content":"look up alpha"}],
-		"tools":[{"name":"lookup","description":"look up a key","input_schema":{"type":"object","properties":{"key":{"type":"string"}}}}],
-		"tool_choice":{"type":"auto"}
-	}`)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
-	c.Set("api_key", &APIKey{ID: 5404})
-
-	account := healthyGrokOAuthGatewayTestAccount(59, "access-token")
-	repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
-		accountsByID: map[int64]*Account{59: account},
-	}}
-	upstreamBody := strings.Join([]string{
-		`data: {"id":"chatcmpl_grok_stream","object":"chat.completion.chunk","model":"grok-4.5","choices":[{"index":0,"delta":{"content":"cached ok"}}]}`,
-		"",
-		`data: {"id":"chatcmpl_grok_stream","object":"chat.completion.chunk","model":"grok-4.5","choices":[],"usage":{"prompt_tokens":5000,"completion_tokens":3,"total_tokens":5003,"prompt_tokens_details":{"cached_tokens":4096}}}`,
-		"",
-		"data: [DONE]",
-		"",
-	}, "\n")
-	upstream := &httpUpstreamRecorder{resp: &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
-	}}
-	svc := &OpenAIGatewayService{
-		httpUpstream:      upstream,
-		grokTokenProvider: NewGrokTokenProvider(repo, nil),
-		accountRepo:       repo,
-	}
-
-	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
-
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.True(t, result.Stream)
-	require.Equal(t, 4096, result.Usage.CacheReadInputTokens)
-	require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
-	require.NotEmpty(t, upstream.lastReq.Header.Get(grokConversationIDHeader))
-	require.Len(t, gjson.GetBytes(upstream.lastBody, "tools").Array(), 1)
-	require.NotContains(t, string(upstream.lastBody), "web_search")
-	require.NotContains(t, string(upstream.lastBody), "x_search")
-	require.Contains(t, recorder.Body.String(), "cached ok")
-	require.Contains(t, recorder.Body.String(), `"cache_read_input_tokens":4096`)
 }
 
 func TestForwardAsAnthropicForGrokStreamingPreservesCacheUsage(t *testing.T) {

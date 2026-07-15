@@ -19,19 +19,6 @@ import (
 	"go.uber.org/zap"
 )
 
-func anthropicRequestHasClientFunctionTools(req *apicompat.AnthropicRequest) bool {
-	if req == nil {
-		return false
-	}
-	for _, tool := range req.Tools {
-		if strings.TrimSpace(tool.Name) == "" || strings.HasPrefix(strings.TrimSpace(tool.Type), "web_search") {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
 // ForwardAsAnthropic accepts an Anthropic Messages request body, converts it
 // to OpenAI Responses API format, forwards to the OpenAI upstream, and converts
 // the response back to Anthropic Messages format. This enables Claude Code
@@ -49,7 +36,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// 会被无条件转为 Responses 格式发往上游 /v1/responses，导致只支持
 	// /v1/chat/completions 的第三方 OpenAI 兼容上游全部 400。
 	if account.Type == AccountTypeAPIKey && !openai_compat.ShouldUseResponsesAPI(account.Extra) {
-		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel)
+		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 
 	startTime := time.Now()
@@ -58,12 +45,6 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	var anthropicReq apicompat.AnthropicRequest
 	if err := json.Unmarshal(body, &anthropicReq); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
-	}
-	// Synthetic web_search/x_search tools can surface as undeclared tool calls
-	// under tool_choice=auto. Preserve Claude Code's exact function set and use
-	// Grok's native Chat Completions conversation cache for these requests.
-	if account.IsGrokOAuth() && anthropicRequestHasClientFunctionTools(&anthropicReq) {
-		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel)
 	}
 	anthropicDigestReq := cloneAnthropicRequestForDigest(&anthropicReq)
 	originalModel := anthropicReq.Model
