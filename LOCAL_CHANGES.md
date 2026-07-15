@@ -1,13 +1,13 @@
-# Local Changes Against Official sub2api v0.1.155
+# Local Changes Against Official sub2api v0.1.156
 
-This repository is based on official `Wei-Shaw/sub2api` release `v0.1.155`.
+This repository is based on official `Wei-Shaw/sub2api` release `v0.1.156`.
 
-- Base commit: `41cec0db` (`v0.1.155`)
-- Working branch: `merge-user-changes-v0.1.155`
+- Base commit: `12f991dd` (`v0.1.156`)
+- Working branch: `merge-user-changes-v0.1.156`
 - Original local change bundle: `E:\号池sub2api\改动`
 - Original local commits: `f1a65550`, `66701c1c`, `46781d3a`
-- Last upstream merge: 2026-07-14 (`v0.1.153` -> `v0.1.155`)
-- Fork build version: `backend/cmd/server/VERSION` is pinned to `0.1.155` because the upstream `v0.1.155` tag still contains `0.1.153` and the merge commit is not an exact release tag.
+- Last upstream merge: 2026-07-15 (`v0.1.155` -> `v0.1.156`)
+- Fork build version: `backend/cmd/server/VERSION` is pinned to `0.1.156` because the upstream `v0.1.156` tag still contains `0.1.155`.
 - Purpose: preserve local behavior when upgrading to a newer official release.
 
 ## Kiro and Compatibility File List
@@ -241,6 +241,17 @@ Upgrade notes:
 
 - Official `v0.1.149` split Antigravity code across multiple files; this structure remains in `v0.1.150`, so preserve the behavior in the new retry file rather than restoring the old monolithic service file.
 - Keep `RetryableOnSameAccount` enabled so the bounded in-request retry/failover loop still runs.
+
+## v0.1.156 Merge Decisions
+
+- Kept the official complete-JSON scanner, first-output timeout, error sanitization, and event-boundary flushing fixes in the OpenAI forwarding paths.
+- Preserved the local low-latency preamble flush, but only flush complete SSE events.
+- Combined official Read-tool argument sanitization with the local closed-block and duplicate-event guards.
+- Combined official adaptive Grok 429 backoff and recovery clearing with the local 24-hour Free quota detection and immediate scheduler block.
+- Limited mixed function/native cache routing to known-Free, lossless Messages-style bridges (Anthropic Messages and the local Chat tool-history bridge); tool-free Free requests retain the disabled-native-tool cache route.
+- Kept local Chat Completions tool/reasoning bridge support and added the official image content bridge.
+- Adopted the official content-moderation runtime snapshot and keyword matcher while retaining the local worker/config cache behavior.
+- Made the official runtime snapshot expiry test deterministic on Windows by explicitly expiring its fixture timestamp.
 
 ## Verification Commands Used
 

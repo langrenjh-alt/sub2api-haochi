@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -274,14 +274,18 @@ func grokStandardChatMessageEligible(message map[string]json.RawMessage) (bool, 
 
 	switch role {
 	case "system", "user":
-		if raw, exists := message["content"]; !exists || !grokStandardChatTextContentEligible(raw, false) {
+		raw, exists := message["content"]
+		if !exists {
 			return false, "non_text_message_content"
+		}
+		if ok, reason := grokStandardChatContentEligible(raw, false, true); !ok {
+			return false, reason
 		}
 	case "assistant":
 		hasContent := false
 		if raw, exists := message["content"]; exists {
-			if !grokStandardChatTextContentEligible(raw, true) {
-				return false, "non_text_message_content"
+			if ok, reason := grokStandardChatContentEligible(raw, true, true); !ok {
+				return false, reason
 			}
 			hasContent = grokStandardChatTextContentNonEmpty(raw)
 		}
@@ -305,8 +309,12 @@ func grokStandardChatMessageEligible(message map[string]json.RawMessage) (bool, 
 			return false, "empty_message_content"
 		}
 	case "tool":
-		if raw, exists := message["content"]; !exists || !grokStandardChatTextContentEligible(raw, false) {
+		raw, exists := message["content"]
+		if !exists {
 			return false, "non_text_message_content"
+		}
+		if ok, reason := grokStandardChatContentEligible(raw, false, false); !ok {
+			return false, reason
 		}
 		var callID string
 		if raw, exists := message["tool_call_id"]; !exists || json.Unmarshal(raw, &callID) != nil || strings.TrimSpace(callID) == "" {
@@ -316,37 +324,46 @@ func grokStandardChatMessageEligible(message map[string]json.RawMessage) (bool, 
 	return true, ""
 }
 
-func grokStandardChatTextContentEligible(raw json.RawMessage, allowEmpty bool) bool {
+func grokStandardChatContentEligible(raw json.RawMessage, allowEmpty, allowImages bool) (bool, string) {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "null" {
-		return allowEmpty
+		if allowEmpty {
+			return true, ""
+		}
+		return false, "non_text_message_content"
 	}
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
-		return allowEmpty || strings.TrimSpace(text) != ""
+		if allowEmpty || strings.TrimSpace(text) != "" {
+			return true, ""
+		}
+		return false, "empty_message_content"
+	}
+	if allowImages {
+		return grokChatStructuredContentBridgeable(raw)
 	}
 	var parts []map[string]json.RawMessage
 	if json.Unmarshal(raw, &parts) != nil || len(parts) == 0 {
-		return false
+		return false, "non_text_message_content"
 	}
 	for _, part := range parts {
 		for field := range part {
 			if field != "type" && field != "text" {
-				return false
+				return false, "non_text_message_content"
 			}
 		}
 		var partType, partText string
 		if value, exists := part["type"]; !exists || json.Unmarshal(value, &partType) != nil || partType != "text" {
-			return false
+			return false, "non_text_message_content"
 		}
 		if value, exists := part["text"]; !exists || json.Unmarshal(value, &partText) != nil {
-			return false
+			return false, "non_text_message_content"
 		}
 		if !allowEmpty && strings.TrimSpace(partText) == "" {
-			return false
+			return false, "empty_message_content"
 		}
 	}
-	return true
+	return true, ""
 }
 
 func grokStandardChatTextContentNonEmpty(raw json.RawMessage) bool {
@@ -359,6 +376,13 @@ func grokStandardChatTextContentNonEmpty(raw json.RawMessage) bool {
 		return false
 	}
 	for _, part := range parts {
+		var partType string
+		if value, exists := part["type"]; exists && json.Unmarshal(value, &partType) == nil {
+			switch strings.TrimSpace(partType) {
+			case "image_url", "input_image":
+				return true
+			}
+		}
 		var partText string
 		if value, exists := part["text"]; exists && json.Unmarshal(value, &partText) == nil && strings.TrimSpace(partText) != "" {
 			return true
@@ -404,6 +428,41 @@ func grokStandardChatToolCallsEligible(raw json.RawMessage) (bool, string) {
 		if value, exists := function["arguments"]; !exists || json.Unmarshal(value, &arguments) != nil {
 			return false, "invalid_tool_call_arguments"
 		}
+	}
+	return true, ""
+}
+
+func grokChatStructuredContentBridgeable(raw json.RawMessage) (bool, string) {
+	var parts []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return false, "non_text_message_content"
+	}
+	if len(parts) == 0 {
+		return false, "empty_message_content"
+	}
+	hasContent := false
+	for _, part := range parts {
+		var partType string
+		rawType, ok := part["type"]
+		if !ok || json.Unmarshal(rawType, &partType) != nil {
+			return false, "non_text_message_content"
+		}
+		switch strings.TrimSpace(partType) {
+		case "text":
+			var text string
+			if raw, ok := part["text"]; ok && json.Unmarshal(raw, &text) == nil {
+				if strings.TrimSpace(text) != "" {
+					hasContent = true
+				}
+			}
+		case "image_url", "input_image":
+			hasContent = true
+		default:
+			return false, "unsupported_content_part_" + strings.TrimSpace(partType)
+		}
+	}
+	if !hasContent {
+		return false, "empty_message_content"
 	}
 	return true, ""
 }
@@ -462,7 +521,12 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
 	cacheIdentity := resolveGrokCacheIdentity(c, body, promptCacheKey, upstreamModel)
-	if !grokChatResponsesRuntimeEligible(upstreamModel, cacheIdentity) {
+	// Image inputs must go through the Responses bridge: the raw Chat
+	// Completions path cannot forward image_url parts to Grok's native vision
+	// for non-composer models, so they would be silently dropped. Route them to
+	// Responses even when no prompt-cache identity is available.
+	hasImageInput := openAIJSONValueMayContainImageInput(gjson.GetBytes(body, "messages"))
+	if !grokChatResponsesRuntimeEligible(upstreamModel, cacheIdentity) && (!hasImageInput || strings.TrimSpace(upstreamModel) != "grok-4.5") {
 		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 
@@ -505,6 +569,10 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	if err != nil {
 		return nil, fmt.Errorf("apply grok responses bridge cache identity: %w", err)
 	}
+	responsesBody, err = applyGrokFreeMessagesFunctionToolCacheRoute(responsesBody, responsesBody, account, cacheIdentity)
+	if err != nil {
+		return nil, fmt.Errorf("apply grok responses bridge function-tool cache route: %w", err)
+	}
 
 	updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, responsesBody)
 	if policyErr != nil {
@@ -517,12 +585,12 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	}
 	responsesBody = updatedBody
 
-	token, _, err := s.GetAccessToken(ctx, account)
+	token, _, err := s.getRequestCredential(ctx, c, account)
 	if err != nil {
 		return nil, fmt.Errorf("get grok access token: %w", err)
 	}
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
-	upstreamReq, err := buildGrokResponsesRequest(upstreamCtx, c, account, responsesBody, token, cacheIdentity)
+	upstreamReq, err := buildGrokResponsesRequest(upstreamCtx, c, account, responsesBody, token, cacheIdentity, s.cfg)
 	releaseUpstreamCtx()
 	if err != nil {
 		return nil, fmt.Errorf("build grok responses bridge request: %w", err)
@@ -558,13 +626,14 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,
+				ResponseHeaders:        resp.Header.Clone(),
 				RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
 			}
 		}
 		return s.handleChatCompletionsErrorResponse(resp, c, account, billingModel)
 	}
 
-	s.updateGrokUsageSnapshot(ctx, account, xai.ParseQuotaHeaders(resp.Header, resp.StatusCode))
+	s.updateGrokUsageFromResponse(ctx, account, resp.Header, resp.StatusCode)
 
 	var result *OpenAIForwardResult
 	if clientStream {
