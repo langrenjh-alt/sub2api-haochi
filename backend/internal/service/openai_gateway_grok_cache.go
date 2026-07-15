@@ -312,15 +312,18 @@ func appendMissingGrokFreeCacheNativeTools(body []byte) ([]byte, error) {
 	}
 	merged := make([]json.RawMessage, 0, len(items)+2)
 	present := make(map[string]bool, 2)
+	functionNames := make(map[string]bool, len(items))
 	hasFunction := false
 	for _, tool := range items {
 		toolType := strings.TrimSpace(tool.Get("type").String())
 		switch toolType {
 		case "function":
-			if !tool.IsObject() || strings.TrimSpace(tool.Get("name").String()) == "" || tool.Get("function").Exists() {
+			name := strings.TrimSpace(tool.Get("name").String())
+			if !tool.IsObject() || name == "" || tool.Get("function").Exists() {
 				return body, nil
 			}
 			hasFunction = true
+			functionNames[name] = true
 		case "web_search", "x_search":
 			// Native tools may already be present when this helper is retried.
 		default:
@@ -333,7 +336,9 @@ func appendMissingGrokFreeCacheNativeTools(body []byte) ([]byte, error) {
 		return body, nil
 	}
 	for _, toolType := range []string{"web_search", "x_search"} {
-		if present[toolType] {
+		// xAI assigns native search tools their type as an implicit name. Keep a
+		// client function with that name and omit only the colliding route marker.
+		if present[toolType] || functionNames[toolType] {
 			continue
 		}
 		raw, err := json.Marshal(map[string]string{"type": toolType})

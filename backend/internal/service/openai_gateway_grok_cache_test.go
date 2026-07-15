@@ -5,6 +5,7 @@ package service
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -237,6 +238,53 @@ func TestApplyGrokCacheIdentityAppendsNativeToolsToResponseFunctions(t *testing.
 			require.NoError(t, err)
 			require.JSONEq(t, string(body), string(second), "native tools must not be duplicated")
 			require.Len(t, gjson.GetBytes(second, "tools").Array(), 4)
+		})
+	}
+}
+
+func TestApplyGrokCacheIdentityAvoidsNativeToolNameCollisions(t *testing.T) {
+	tests := []struct {
+		name      string
+		functions string
+		wantTools []string
+	}{
+		{
+			name:      "web search function keeps x search marker",
+			functions: `[{"type":"function","name":"web_search","parameters":{"type":"object"}},{"type":"function","name":"Read","parameters":{"type":"object"}}]`,
+			wantTools: []string{"function:web_search", "function:Read", "x_search"},
+		},
+		{
+			name:      "x search function keeps web search marker",
+			functions: `[{"type":"function","name":"x_search","parameters":{"type":"object"}}]`,
+			wantTools: []string{"function:x_search", "web_search"},
+		},
+		{
+			name:      "both reserved names remain functions",
+			functions: `[{"type":"function","name":"web_search","parameters":{"type":"object"}},{"type":"function","name":"x_search","parameters":{"type":"object"}}]`,
+			wantTools: []string{"function:web_search", "function:x_search"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			intentBody := []byte(`{"model":"grok","tools":` + tt.functions + `,"tool_choice":"auto"}`)
+			body, err := applyGrokResponsesCacheIdentity(intentBody, intentBody, "isolated-id", true)
+			require.NoError(t, err)
+
+			tools := gjson.GetBytes(body, "tools").Array()
+			require.Len(t, tools, len(tt.wantTools))
+			for i, want := range tt.wantTools {
+				if strings.HasPrefix(want, "function:") {
+					require.Equal(t, "function", tools[i].Get("type").String())
+					require.Equal(t, strings.TrimPrefix(want, "function:"), tools[i].Get("name").String())
+					continue
+				}
+				require.Equal(t, want, tools[i].Get("type").String())
+			}
+
+			second, err := applyGrokResponsesCacheIdentity(body, intentBody, "isolated-id", true)
+			require.NoError(t, err)
+			require.JSONEq(t, string(body), string(second))
 		})
 	}
 }

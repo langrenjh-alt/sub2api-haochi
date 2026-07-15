@@ -1764,7 +1764,10 @@ func TestForwardAsAnthropicForGrokClaudeCodeTurnsKeepCachePrefix(t *testing.T) {
 		"model":"grok","max_tokens":32,"stream":false,
 		"system":"You are Claude Code. Keep the project prefix stable.",
 		"messages":[{"role":"user","content":"Inspect the repository."}],
-		"tools":[{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}}],
+		"tools":[
+			{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}},
+			{"name":"web_search","description":"Search from the client","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}
+		],
 		"tool_choice":{"type":"auto"}
 	}`)
 	secondTurn := []byte(`{
@@ -1775,7 +1778,10 @@ func TestForwardAsAnthropicForGrokClaudeCodeTurnsKeepCachePrefix(t *testing.T) {
 			{"role":"assistant","content":"The repository is ready."},
 			{"role":"user","content":"Now run the focused tests."}
 		],
-		"tools":[{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}}],
+		"tools":[
+			{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}},"required":["file_path"]}},
+			{"name":"web_search","description":"Search from the client","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}
+		],
 		"tool_choice":{"type":"auto"}
 	}`)
 
@@ -1823,7 +1829,9 @@ func TestForwardAsAnthropicForGrokClaudeCodeTurnsKeepCachePrefix(t *testing.T) {
 	require.Equal(t, secondIdentity, upstream.requests[1].Header.Get(grokConversationIDHeader))
 	require.JSONEq(t, gjson.GetBytes(firstBody, "tools").Raw, gjson.GetBytes(secondBody, "tools").Raw)
 	require.Equal(t, "function", gjson.GetBytes(firstBody, "tools.0.type").String())
-	require.Equal(t, "web_search", gjson.GetBytes(firstBody, "tools.1.type").String())
+	require.Equal(t, "Read", gjson.GetBytes(firstBody, "tools.0.name").String())
+	require.Equal(t, "function", gjson.GetBytes(firstBody, "tools.1.type").String())
+	require.Equal(t, "web_search", gjson.GetBytes(firstBody, "tools.1.name").String())
 	require.Equal(t, "x_search", gjson.GetBytes(firstBody, "tools.2.type").String())
 
 	firstInput := gjson.GetBytes(firstBody, "input").Array()
