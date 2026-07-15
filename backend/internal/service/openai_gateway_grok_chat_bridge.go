@@ -59,7 +59,7 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 			return false, "invalid_reasoning_effort"
 		}
 		switch strings.ToLower(strings.TrimSpace(effort)) {
-		case "none", "minimal", "low", "medium", "high", "xhigh":
+		case "none", "minimal", "low", "medium", "high", "xhigh", "x-high", "max", "ultra":
 		default:
 			return false, "invalid_reasoning_effort"
 		}
@@ -558,7 +558,8 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	// xAI's Grok CLI Responses endpoint consumes the Chat-compatible top-level
 	// reasoning_effort field. The generic OpenAI converter emits
 	// reasoning.effort instead, which the endpoint accepts but does not apply.
-	// Re-add the original field after marshaling and omit the nested variant.
+	// Re-add the Chat field after marshaling and omit the nested variant. The
+	// shared Grok body patch below clamps it to the selected model's levels.
 	reasoningEffort := strings.ToLower(strings.TrimSpace(chatReq.ReasoningEffort))
 	responsesReq.Reasoning = nil
 	// These fields are useful to Codex but are not needed by the Grok CLI
@@ -663,7 +664,7 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 		if result.RequestID == "" {
 			result.RequestID = firstNonEmpty(resp.Header.Get("x-request-id"), resp.Header.Get("xai-request-id"))
 		}
-		result.ReasoningEffort = extractOpenAIReasoningEffortFromBody(originalBody, upstreamModel, billingModel, originalModel)
+		result.ReasoningEffort = extractOpenAIReasoningEffortFromBody(responsesBody, upstreamModel, billingModel, originalModel)
 	}
 	return result, err
 }

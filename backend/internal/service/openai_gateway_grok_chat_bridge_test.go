@@ -204,7 +204,7 @@ func TestGrokChatResponsesBridgeRejectsMalformedStandardToolHistory(t *testing.T
 func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	body := []byte(`{"model":"grok","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"hi"}],"stream":false,"temperature":0.2,"top_p":0.9,"presence_penalty":0,"frequency_penalty":0,"prompt_cache_key":"stable-session","tools":[],"functions":null,"tool_choice":"auto"}`)
+	body := []byte(`{"model":"grok","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"hi"}],"stream":false,"temperature":0.2,"top_p":0.9,"presence_penalty":0,"frequency_penalty":0,"reasoning_effort":"xhigh","prompt_cache_key":"stable-session","tools":[],"functions":null,"tool_choice":"auto"}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
@@ -227,6 +227,8 @@ func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.
 	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
 	require.Equal(t, grokChatResponsesEndpoint, result.UpstreamEndpoint)
 	require.Equal(t, "grok-4.5", result.UpstreamModel)
+	require.NotNil(t, result.ReasoningEffort)
+	require.Equal(t, "high", *result.ReasoningEffort)
 	require.Equal(t, 9908, result.Usage.InputTokens)
 	require.Equal(t, 12, result.Usage.OutputTokens)
 	require.Equal(t, 9856, result.Usage.CacheReadInputTokens)
@@ -239,6 +241,7 @@ func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.
 	require.Equal(t, "x_search", gjson.GetBytes(upstream.lastBody, "tools.1.type").String())
 	require.Equal(t, grokFreeCacheDisabledToolChoice, gjson.GetBytes(upstream.lastBody, "tool_choice").String())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+	require.Equal(t, "high", gjson.GetBytes(upstream.lastBody, "reasoning_effort").String())
 	require.Equal(t, 0.2, gjson.GetBytes(upstream.lastBody, "temperature").Float())
 	require.Equal(t, 0.9, gjson.GetBytes(upstream.lastBody, "top_p").Float())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "presence_penalty").Exists())

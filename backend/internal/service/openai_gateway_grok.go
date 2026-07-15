@@ -231,34 +231,107 @@ func sanitizeGrokPenaltyFields(body []byte) ([]byte, error) {
 }
 
 func sanitizeGrokResponsesModelCapabilities(body []byte, upstreamModel string) ([]byte, error) {
-	if !grokModelRejectsReasoningEffort(upstreamModel) {
-		return body, nil
+	out := body
+	model := normalizeGrokCapabilityModel(upstreamModel)
+	if grokModelRejectsReasoningConfig(model) {
+		for _, field := range []string{"reasoning", "reasoning_effort", "reasoningEffort"} {
+			if !gjson.GetBytes(out, field).Exists() {
+				continue
+			}
+			var err error
+			out, err = sjson.DeleteBytes(out, field)
+			if err != nil {
+				return nil, fmt.Errorf("remove unsupported Grok Composer %s: %w", field, err)
+			}
+		}
+		return out, nil
 	}
 
-	out := body
-	for _, field := range []string{"reasoning", "reasoning_effort", "reasoningEffort"} {
+	supportsEffort, supportsNone := grokReasoningEffortCapability(model)
+	for _, field := range []string{"reasoning.effort", "reasoning_effort", "reasoningEffort"} {
 		if !gjson.GetBytes(out, field).Exists() {
 			continue
 		}
+
 		var err error
-		out, err = sjson.DeleteBytes(out, field)
+		if supportsEffort {
+			effort, ok := normalizeGrokReasoningEffort(gjson.GetBytes(out, field), supportsNone)
+			if ok {
+				out, err = sjson.SetBytes(out, field, effort)
+			} else {
+				out, err = sjson.DeleteBytes(out, field)
+			}
+		} else {
+			out, err = sjson.DeleteBytes(out, field)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("remove unsupported Grok Composer %s: %w", field, err)
+			return nil, fmt.Errorf("sanitize Grok reasoning effort %s: %w", field, err)
+		}
+	}
+	if reasoning := gjson.GetBytes(out, "reasoning"); reasoning.IsObject() && len(reasoning.Map()) == 0 {
+		var err error
+		out, err = sjson.DeleteBytes(out, "reasoning")
+		if err != nil {
+			return nil, fmt.Errorf("remove empty Grok reasoning config: %w", err)
 		}
 	}
 	return out, nil
 }
 
-func grokModelRejectsReasoningEffort(model string) bool {
+func normalizeGrokCapabilityModel(model string) string {
 	model = strings.TrimSpace(strings.ToLower(model))
 	if slash := strings.LastIndex(model, "/"); slash >= 0 {
 		model = strings.TrimSpace(model[slash+1:])
 	}
+	return model
+}
+
+func grokModelRejectsReasoningConfig(model string) bool {
 	switch model {
 	case "grok-composer", "grok-composer-2.5-fast", "composer-2.5":
 		return true
 	default:
 		return false
+	}
+}
+
+func grokReasoningEffortCapability(model string) (supportsEffort, supportsNone bool) {
+	// Keep this aligned with the Grok CLI model registry. Grok 4.5 and the
+	// controllable-effort families accept low/medium/high; Grok 4.3 also
+	// accepts none. Fixed-reasoning and unknown models omit the effort field.
+	switch {
+	case model == "grok" || model == "grok-latest" || model == "grok-4.5" || model == "grok-4.5-latest":
+		return true, false
+	case model == "grok-4.3" || strings.HasPrefix(model, "grok-4.3-"):
+		return true, true
+	case strings.HasPrefix(model, "grok-4.20-multi-agent"):
+		return true, false
+	case strings.HasPrefix(model, "grok-3-mini"):
+		return true, false
+	default:
+		return false, false
+	}
+}
+
+func normalizeGrokReasoningEffort(value gjson.Result, supportsNone bool) (string, bool) {
+	if value.Type != gjson.String {
+		return "", false
+	}
+	effort := strings.ToLower(strings.TrimSpace(value.String()))
+	switch effort {
+	case "none":
+		if supportsNone {
+			return "none", true
+		}
+		return "low", true
+	case "minimal":
+		return "low", true
+	case "low", "medium", "high":
+		return effort, true
+	case "xhigh", "x-high", "max", "ultra":
+		return "high", true
+	default:
+		return "", false
 	}
 }
 

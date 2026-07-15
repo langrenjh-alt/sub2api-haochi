@@ -109,11 +109,10 @@ func isGrokRequestContext(c *gin.Context) bool {
 // xAI Responses request. Existing client values are deliberately replaced by
 // the tenant-isolated value to prevent collisions on shared OAuth accounts.
 //
-// Free OAuth requests without native search tools are routed by xAI to the
-// non-cacheable build-free model. For otherwise tool-free requests, add the
-// native tools with tool_choice=none: this selects the cache-capable tier
-// without allowing an actual search. Explicit client tools are handled by the
-// narrower Messages-only mixed-tools policy below.
+// OAuth requests without native search tools can be routed by xAI to a
+// non-cacheable model. Tool-free requests get disabled native tools. Requests
+// containing only valid function tools with automatic selection retain those
+// tools and gain the native route markers used by the cache-capable model.
 func applyGrokResponsesCacheIdentity(body, intentSourceBody []byte, identity string, injectFreeTierTools bool) ([]byte, error) {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
@@ -134,8 +133,14 @@ func applyGrokResponsesCacheIdentity(body, intentSourceBody []byte, identity str
 
 func applyGrokFreeCacheNativeTools(body, intentSourceBody []byte) ([]byte, error) {
 	tools := gjson.GetBytes(body, "tools")
+	intentTools := gjson.GetBytes(intentSourceBody, "tools")
+	intentToolChoice := gjson.GetBytes(intentSourceBody, "tool_choice")
+	if tools.IsArray() && len(tools.Array()) > 0 && isGrokFreeCacheFunctionToolIntent(intentTools, intentToolChoice) {
+		return appendMissingGrokFreeCacheNativeTools(body)
+	}
+
 	// Preserve every explicitly supplied tools value, including null and an
-	// empty array. Only a truly tool-free request is eligible for route shaping.
+	// empty array. Other explicit tool shapes are not eligible for route shaping.
 	if tools.Exists() {
 		return body, nil
 	}

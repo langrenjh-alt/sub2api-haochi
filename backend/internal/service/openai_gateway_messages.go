@@ -396,7 +396,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			st := responsesReq.ServiceTier
 			result.ServiceTier = &st
 		}
-		if responsesReq.Reasoning != nil && responsesReq.Reasoning.Effort != "" {
+		if account.Platform == PlatformGrok {
+			result.ReasoningEffort = extractOpenAIReasoningEffortFromBody(responsesBody, upstreamModel, billingModel, originalModel)
+		} else if responsesReq.Reasoning != nil && responsesReq.Reasoning.Effort != "" {
 			re := responsesReq.Reasoning.Effort
 			result.ReasoningEffort = &re
 		}
