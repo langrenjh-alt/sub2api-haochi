@@ -1,11 +1,6 @@
 package service
 
-import (
-	"context"
-	"strings"
-
-	"github.com/Wei-Shaw/sub2api/internal/config"
-)
+import "context"
 
 // HTTPUpstreamProfile marks HTTP upstream requests that need provider-specific
 // transport policy.
@@ -17,7 +12,7 @@ const (
 )
 
 type httpUpstreamProfileContextKey struct{}
-type openAILatencyModeContextKey struct{}
+type httpUpstreamDisableRedirectsContextKey struct{}
 
 // WithHTTPUpstreamProfile injects an upstream transport profile into ctx.
 func WithHTTPUpstreamProfile(ctx context.Context, profile HTTPUpstreamProfile) context.Context {
@@ -47,31 +42,15 @@ func HTTPUpstreamProfileFromContext(ctx context.Context) HTTPUpstreamProfile {
 	}
 }
 
-// WithOpenAILatencyMode binds one immutable mode snapshot to a request.
-func WithOpenAILatencyMode(ctx context.Context, mode string) context.Context {
+// WithHTTPUpstreamRedirectsDisabled prevents credential-bearing probes from
+// following redirects through the shared upstream client.
+func WithHTTPUpstreamRedirectsDisabled(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode != config.OpenAILatencyModeLowLatency {
-		mode = config.OpenAILatencyModeCompatible
-	}
-	return context.WithValue(ctx, openAILatencyModeContextKey{}, mode)
+	return context.WithValue(ctx, httpUpstreamDisableRedirectsContextKey{}, true)
 }
 
-// OpenAILatencyModeFromContext returns the request-scoped mode snapshot.
-func OpenAILatencyModeFromContext(ctx context.Context) (string, bool) {
-	if ctx == nil {
-		return "", false
-	}
-	mode, ok := ctx.Value(openAILatencyModeContextKey{}).(string)
-	if !ok {
-		return "", false
-	}
-	switch mode {
-	case config.OpenAILatencyModeCompatible, config.OpenAILatencyModeLowLatency:
-		return mode, true
-	default:
-		return "", false
-	}
+func HTTPUpstreamRedirectsDisabled(ctx context.Context) bool {
+	return ctx != nil && ctx.Value(httpUpstreamDisableRedirectsContextKey{}) == true
 }

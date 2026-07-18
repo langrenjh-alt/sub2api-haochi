@@ -192,11 +192,10 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 		if err := json.Unmarshal(responsesBody, &reqBody); err != nil {
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
 		}
-		skipDefaultInstructions := !isResponsesShape || s.useEmptyOpenAIMissingInstructions(ctx)
 		codexResult := applyCodexOAuthTransformWithOptions(reqBody, codexOAuthTransformOptions{
-			SkipDefaultInstructions: skipDefaultInstructions,
+			SkipDefaultInstructions: !isResponsesShape,
 		})
-		if skipDefaultInstructions {
+		if !isResponsesShape {
 			ensureCodexOAuthInstructionsField(reqBody)
 		}
 		if codexResult.NormalizedModel != "" {

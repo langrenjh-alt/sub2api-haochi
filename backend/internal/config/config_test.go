@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,6 +216,9 @@ func TestLoadDefaultOpenAIWSConfig(t *testing.T) {
 	if cfg.Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom != 0 {
 		t.Fatalf("Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom = %v, want 0", cfg.Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom)
 	}
+	if cfg.Gateway.OpenAIWS.SchedulerScoreWeights.UpstreamCost != 0 {
+		t.Fatalf("Gateway.OpenAIWS.SchedulerScoreWeights.UpstreamCost = %v, want 0", cfg.Gateway.OpenAIWS.SchedulerScoreWeights.UpstreamCost)
+	}
 	if !cfg.Gateway.OpenAIWS.StoreDisabledForceNewConn {
 		t.Fatalf("Gateway.OpenAIWS.StoreDisabledForceNewConn = false, want true")
 	}
@@ -301,32 +305,6 @@ func TestLoadOpenAIResponseHeaderTimeoutFromEnv(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, 1800, cfg.Gateway.OpenAIResponseHeaderTimeout)
-}
-
-func TestLoadDefaultOpenAIConnectionAndStreamConfig(t *testing.T) {
-	resetViperWithJWTSecret(t)
-
-	cfg, err := Load()
-	require.NoError(t, err)
-	require.Equal(t, OpenAILatencyModeCompatible, cfg.Gateway.OpenAILatencyMode)
-	require.Empty(t, cfg.Gateway.OpenAIConnectionPoolIsolation)
-	require.False(t, cfg.Gateway.OpenAIStreamFlushPreamble)
-	require.Equal(t, OpenAIMissingInstructionsPolicyCodex, cfg.Gateway.OpenAIMissingInstructionsPolicy)
-}
-
-func TestLoadOpenAIConnectionAndStreamConfigFromEnv(t *testing.T) {
-	resetViperWithJWTSecret(t)
-	t.Setenv("GATEWAY_OPENAI_LATENCY_MODE", OpenAILatencyModeLowLatency)
-	t.Setenv("GATEWAY_OPENAI_CONNECTION_POOL_ISOLATION", ConnectionPoolIsolationAccount)
-	t.Setenv("GATEWAY_OPENAI_STREAM_FLUSH_PREAMBLE", "true")
-	t.Setenv("GATEWAY_OPENAI_MISSING_INSTRUCTIONS_POLICY", OpenAIMissingInstructionsPolicyEmpty)
-
-	cfg, err := Load()
-	require.NoError(t, err)
-	require.Equal(t, OpenAILatencyModeLowLatency, cfg.Gateway.OpenAILatencyMode)
-	require.Equal(t, ConnectionPoolIsolationAccount, cfg.Gateway.OpenAIConnectionPoolIsolation)
-	require.True(t, cfg.Gateway.OpenAIStreamFlushPreamble)
-	require.Equal(t, OpenAIMissingInstructionsPolicyEmpty, cfg.Gateway.OpenAIMissingInstructionsPolicy)
 }
 
 func TestLoadImageNonstreamKeepaliveFromEnv(t *testing.T) {
@@ -1469,21 +1447,6 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.connection_pool_isolation",
 		},
 		{
-			name:    "gateway openai latency mode",
-			mutate:  func(c *Config) { c.Gateway.OpenAILatencyMode = "invalid" },
-			wantErr: "gateway.openai_latency_mode",
-		},
-		{
-			name:    "gateway openai connection isolation",
-			mutate:  func(c *Config) { c.Gateway.OpenAIConnectionPoolIsolation = "invalid" },
-			wantErr: "gateway.openai_connection_pool_isolation",
-		},
-		{
-			name:    "gateway openai missing instructions policy",
-			mutate:  func(c *Config) { c.Gateway.OpenAIMissingInstructionsPolicy = "invalid" },
-			wantErr: "gateway.openai_missing_instructions_policy",
-		},
-		{
 			name:    "gateway stream keepalive range",
 			mutate:  func(c *Config) { c.Gateway.StreamKeepaliveInterval = 4 },
 			wantErr: "gateway.stream_keepalive_interval",
@@ -1908,6 +1871,42 @@ func TestValidateConfig_OpenAIWSRules(t *testing.T) {
 			wantErr: "gateway.openai_ws.scheduler_score_weights.* must be non-negative",
 		},
 		{
+			name:    "scheduler_score_weights upstream_cost 不能为负数",
+			mutate:  func(c *Config) { c.Gateway.OpenAIWS.SchedulerScoreWeights.UpstreamCost = -0.1 },
+			wantErr: "gateway.openai_ws.scheduler_score_weights.* must be non-negative",
+		},
+		{
+			name:    "scheduler_score_weights reset 不能为负数",
+			mutate:  func(c *Config) { c.Gateway.OpenAIWS.SchedulerScoreWeights.Reset = -0.1 },
+			wantErr: "gateway.openai_ws.scheduler_score_weights.* must be non-negative",
+		},
+		{
+			name:    "scheduler_score_weights 不能为 NaN",
+			mutate:  func(c *Config) { c.Gateway.OpenAIWS.SchedulerScoreWeights.PreviousResponse = math.NaN() },
+			wantErr: "gateway.openai_ws.scheduler_score_weights.* must be non-negative and finite",
+		},
+		{
+			name:    "scheduler_score_weights 不能为 Inf",
+			mutate:  func(c *Config) { c.Gateway.OpenAIWS.SchedulerScoreWeights.UpstreamCost = math.Inf(1) },
+			wantErr: "gateway.openai_ws.scheduler_score_weights.* must be non-negative and finite",
+		},
+		{
+			name: "scheduler_score_weights 总和不能溢出",
+			mutate: func(c *Config) {
+				c.Gateway.OpenAIWS.SchedulerScoreWeights.Priority = math.MaxFloat64
+				c.Gateway.OpenAIWS.SchedulerScoreWeights.Load = math.MaxFloat64
+			},
+			wantErr: "gateway.openai_ws.scheduler_score_weights base-weight sum must be finite",
+		},
+		{
+			name: "scheduler_score_weights 含 sticky 总和不能溢出",
+			mutate: func(c *Config) {
+				c.Gateway.OpenAIWS.SchedulerScoreWeights.Priority = math.MaxFloat64
+				c.Gateway.OpenAIWS.SchedulerScoreWeights.PreviousResponse = math.MaxFloat64
+			},
+			wantErr: "gateway.openai_ws.scheduler_score_weights total-weight sum must be finite",
+		},
+		{
 			name: "scheduler_score_weights 不能全为 0",
 			mutate: func(c *Config) {
 				c.Gateway.OpenAIWS.SchedulerScoreWeights.Priority = 0
@@ -1955,6 +1954,30 @@ func TestValidateConfig_OpenAIWSRules(t *testing.T) {
 		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate = 0
 		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT = 0
 		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.QuotaHeadroom = 0.1
+
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("upstream_cost 可作为唯一有效调度权重", func(t *testing.T) {
+		cfg := buildValid(t)
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Priority = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Load = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Queue = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.UpstreamCost = 0.1
+
+		require.NoError(t, cfg.Validate())
+	})
+
+	t.Run("reset 可作为唯一有效调度权重", func(t *testing.T) {
+		cfg := buildValid(t)
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Priority = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Load = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Queue = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.ErrorRate = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.TTFT = 0
+		cfg.Gateway.OpenAIWS.SchedulerScoreWeights.Reset = 0.1
 
 		require.NoError(t, cfg.Validate())
 	})

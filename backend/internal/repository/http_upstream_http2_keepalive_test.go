@@ -1,9 +1,7 @@
 package repository
 
 import (
-	"crypto/x509"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -52,28 +50,7 @@ func TestBuildUpstreamTransport_OpenAIH2_EnablesPingHealthCheck(t *testing.T) {
 func TestBuildUpstreamTransport_NonOpenAIH2_NotEagerlyConfigured(t *testing.T) {
 	tr, err := buildUpstreamTransport(http2KeepAliveTestPoolSettings(), nil, upstreamProtocolModeDefault)
 	require.NoError(t, err)
-	require.True(t, tr.ForceAttemptHTTP2, "default transport with a custom TLS config must retain automatic HTTP/2")
 	require.Nil(t, tr.TLSNextProto["h2"], "default 模式不应在构建期主动配置 http2 keepalive")
-}
-
-func TestBuildUpstreamTransport_DefaultNegotiatesHTTP2(t *testing.T) {
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	server.EnableHTTP2 = true
-	server.StartTLS()
-	defer server.Close()
-
-	tr, err := buildUpstreamTransport(http2KeepAliveTestPoolSettings(), nil, upstreamProtocolModeDefault)
-	require.NoError(t, err)
-	roots := x509.NewCertPool()
-	roots.AddCert(server.Certificate())
-	tr.TLSClientConfig.RootCAs = roots
-
-	resp, err := (&http.Client{Transport: tr}).Get(server.URL)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, 2, resp.ProtoMajor)
 }
 
 // 死连接在经 HTTP 代理（CONNECT 隧道）时最高发，这是带 proxy 账号的真实生产路径：

@@ -159,60 +159,6 @@ func TestSettingHandler_GetSettings_InjectsAuthSourceDefaults(t *testing.T) {
 	require.Len(t, subscriptions, 1)
 }
 
-func TestSettingHandler_OpenAILatencyModeAPIContract(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	repo := &settingHandlerRepoStub{values: map[string]string{
-		service.SettingKeyOpenAILatencyMode: config.OpenAILatencyModeCompatible,
-	}}
-	svc := service.NewSettingService(repo, &config.Config{Gateway: config.GatewayConfig{
-		OpenAILatencyMode: config.OpenAILatencyModeCompatible,
-	}})
-	handler := NewSettingHandler(svc, nil, nil, nil, nil, nil, nil)
-
-	getRecorder := httptest.NewRecorder()
-	getContext, _ := gin.CreateTestContext(getRecorder)
-	getContext.Request = httptest.NewRequest(http.MethodGet, "/api/v1/admin/settings", nil)
-	handler.GetSettings(getContext)
-	require.Equal(t, http.StatusOK, getRecorder.Code)
-	var getResponse response.Response
-	require.NoError(t, json.Unmarshal(getRecorder.Body.Bytes(), &getResponse))
-	getData, ok := getResponse.Data.(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, config.OpenAILatencyModeCompatible, getData["openai_latency_mode"])
-
-	putBody := bytes.NewBufferString(`{"openai_latency_mode":"low_latency"}`)
-	putRecorder := httptest.NewRecorder()
-	putContext, _ := gin.CreateTestContext(putRecorder)
-	putContext.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings", putBody)
-	putContext.Request.Header.Set("Content-Type", "application/json")
-	handler.UpdateSettings(putContext)
-	require.Equal(t, http.StatusOK, putRecorder.Code)
-	require.Equal(t, config.OpenAILatencyModeLowLatency, repo.values[service.SettingKeyOpenAILatencyMode])
-	require.Equal(t, config.OpenAILatencyModeLowLatency, svc.GetOpenAILatencyMode())
-	var putResponse response.Response
-	require.NoError(t, json.Unmarshal(putRecorder.Body.Bytes(), &putResponse))
-	putData, ok := putResponse.Data.(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, config.OpenAILatencyModeLowLatency, putData["openai_latency_mode"])
-
-	invalidRecorder := httptest.NewRecorder()
-	invalidContext, _ := gin.CreateTestContext(invalidRecorder)
-	invalidContext.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings", bytes.NewBufferString(`{"openai_latency_mode":"turbo"}`))
-	invalidContext.Request.Header.Set("Content-Type", "application/json")
-	handler.UpdateSettings(invalidContext)
-	require.Equal(t, http.StatusBadRequest, invalidRecorder.Code)
-	require.Equal(t, config.OpenAILatencyModeLowLatency, repo.values[service.SettingKeyOpenAILatencyMode])
-}
-
-func TestDiffSettingsDetectsOpenAILatencyMode(t *testing.T) {
-	before := &service.SystemSettings{OpenAILatencyMode: config.OpenAILatencyModeCompatible}
-	after := &service.SystemSettings{OpenAILatencyMode: config.OpenAILatencyModeLowLatency}
-
-	changed := diffSettings(before, after, nil, nil, UpdateSettingsRequest{})
-
-	require.Contains(t, changed, "openai_latency_mode")
-}
-
 func TestSettingHandler_UpdateSettings_PreservesOmittedAuthSourceDefaults(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	repo := &settingHandlerRepoStub{
@@ -277,6 +223,7 @@ func TestSettingHandler_UpdateSettings_PersistsPaymentVisibleMethodsAndAdvancedS
 		"payment_visible_method_alipay_enabled":                   true,
 		"payment_visible_method_wxpay_enabled":                    false,
 		"openai_advanced_scheduler_enabled":                       true,
+		"openai_oauth_scheduling_rate_multiplier":                 0.05,
 		"openai_advanced_scheduler_subscription_priority_enabled": true,
 	}
 	rawBody, err := json.Marshal(body)
@@ -295,6 +242,7 @@ func TestSettingHandler_UpdateSettings_PersistsPaymentVisibleMethodsAndAdvancedS
 	require.Equal(t, "true", repo.values[service.SettingPaymentVisibleMethodAlipayEnabled])
 	require.Equal(t, "false", repo.values[service.SettingPaymentVisibleMethodWxpayEnabled])
 	require.Equal(t, "true", repo.values["openai_advanced_scheduler_enabled"])
+	require.Equal(t, "0.05", repo.values[service.SettingKeyOpenAIOAuthSchedulingRateMultiplier])
 	require.Equal(t, "true", repo.values[service.SettingKeyOpenAIAdvancedSchedulerSubscriptionPriorityEnabled])
 
 	var resp response.Response
@@ -306,6 +254,7 @@ func TestSettingHandler_UpdateSettings_PersistsPaymentVisibleMethodsAndAdvancedS
 	require.Equal(t, true, data["payment_visible_method_alipay_enabled"])
 	require.Equal(t, false, data["payment_visible_method_wxpay_enabled"])
 	require.Equal(t, true, data["openai_advanced_scheduler_enabled"])
+	require.Equal(t, 0.05, data["openai_oauth_scheduling_rate_multiplier"])
 	require.Equal(t, true, data["openai_advanced_scheduler_subscription_priority_enabled"])
 }
 

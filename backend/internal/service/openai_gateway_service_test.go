@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -26,60 +25,6 @@ import (
 // 编译期接口断言
 var _ AccountRepository = (*stubOpenAIAccountRepo)(nil)
 var _ GatewayCache = (*stubGatewayCache)(nil)
-
-type openAIFlushSignalWriter struct {
-	header  http.Header
-	mu      sync.Mutex
-	body    bytes.Buffer
-	status  int
-	flushCh chan struct{}
-}
-
-func newOpenAIFlushSignalWriter() *openAIFlushSignalWriter {
-	return &openAIFlushSignalWriter{
-		header:  make(http.Header),
-		flushCh: make(chan struct{}, 1),
-	}
-}
-
-func (w *openAIFlushSignalWriter) Header() http.Header {
-	return w.header
-}
-
-func (w *openAIFlushSignalWriter) WriteHeader(status int) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.status == 0 {
-		w.status = status
-	}
-}
-
-func (w *openAIFlushSignalWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	return w.body.Write(p)
-}
-
-func (w *openAIFlushSignalWriter) Flush() {
-	w.mu.Lock()
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	w.mu.Unlock()
-	select {
-	case w.flushCh <- struct{}{}:
-	default:
-	}
-}
-
-func (w *openAIFlushSignalWriter) BodyString() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.body.String()
-}
 
 type stubOpenAIAccountRepo struct {
 	AccountRepository
@@ -312,6 +257,31 @@ func TestExtractOpenAIResponseIDFromJSONBytes(t *testing.T) {
 	require.Equal(t, "resp_sse", extractOpenAIResponseIDFromJSONBytes([]byte(`{"type":"response.completed","response":{"id":"resp_sse"}}`)))
 	require.Empty(t, extractOpenAIResponseIDFromJSONBytes([]byte(`{"response":{}}`)))
 	require.Empty(t, extractOpenAIResponseIDFromJSONBytes([]byte(`not-json`)))
+}
+
+// 复现 #4386：gpt-image-2 /v1/images/edits 的 usage 携带 input_tokens_details.image_tokens，
+// 提取器须将图片输入 token 单独填入 ImageInputTokens（此前被丢弃并入 InputTokens 按文本价计费）。
+func TestExtractOpenAIUsage_CapturesImageInputTokens(t *testing.T) {
+	body := []byte(`{"usage":{"input_tokens":371,"input_tokens_details":{"image_tokens":352,"text_tokens":19},"output_tokens":439,"output_tokens_details":{"image_tokens":439,"text_tokens":0},"total_tokens":810}}`)
+	usage, ok := extractOpenAIUsageFromJSONBytes(body)
+	require.True(t, ok)
+	require.Equal(t, 371, usage.InputTokens)
+	require.Equal(t, 352, usage.ImageInputTokens)
+	require.Equal(t, 439, usage.OutputTokens)
+	require.Equal(t, 439, usage.ImageOutputTokens)
+
+	// prompt_tokens_details 回退路径（部分上游用 prompt_tokens 口径）。
+	promptStyle := []byte(`{"usage":{"prompt_tokens":100,"prompt_tokens_details":{"image_tokens":80}}}`)
+	pu, ok := extractOpenAIUsageFromJSONBytes(promptStyle)
+	require.True(t, ok)
+	require.Equal(t, 100, pu.InputTokens)
+	require.Equal(t, 80, pu.ImageInputTokens)
+
+	// 纯文本请求：无 image_tokens 时 ImageInputTokens 为 0，行为不变。
+	textOnly := []byte(`{"usage":{"input_tokens":50,"output_tokens":10}}`)
+	tu, ok := extractOpenAIUsageFromJSONBytes(textOnly)
+	require.True(t, ok)
+	require.Zero(t, tu.ImageInputTokens)
 }
 
 func TestOpenAIGatewayService_BindHTTPResponseAccount(t *testing.T) {
@@ -1602,76 +1572,6 @@ func TestOpenAIStreamingPreambleOnlyMissingTerminalReturnsFailover(t *testing.T)
 	require.Empty(t, rec.Body.String())
 }
 
-func TestOpenAIStreamingEventOnlyPreambleFlushesAfterFrameDelimiter(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	cfg := &config.Config{
-		Gateway: config.GatewayConfig{
-			OpenAILatencyMode: config.OpenAILatencyModeLowLatency,
-			MaxLineSize:       defaultMaxLineSize,
-		},
-	}
-	svc := &OpenAIGatewayService{cfg: cfg}
-
-	w := newOpenAIFlushSignalWriter()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
-
-	pr, pw := io.Pipe()
-	defer func() { _ = pr.Close() }()
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       pr,
-		Header:     http.Header{"X-Request-Id": []string{"rid-flush-preamble"}},
-	}
-	type streamResult struct {
-		result *openaiStreamingResult
-		err    error
-	}
-	done := make(chan streamResult, 1)
-	go func() {
-		result, err := svc.handleStreamingResponse(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "model", "model")
-		done <- streamResult{result: result, err: err}
-	}()
-
-	preambleWithoutDelimiter := "event: response.created\n" +
-		`data: {"response":{"id":"resp_1"}}` + "\n"
-	_, err := io.WriteString(pw, preambleWithoutDelimiter)
-	require.NoError(t, err)
-
-	select {
-	case <-w.flushCh:
-		require.Fail(t, "preamble flushed before the SSE frame delimiter")
-	case result := <-done:
-		require.Failf(t, "handler returned before preamble flush", "err=%v", result.err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	require.Empty(t, w.BodyString())
-
-	_, err = io.WriteString(pw, "\n")
-	require.NoError(t, err)
-	preamble := preambleWithoutDelimiter + "\n"
-	select {
-	case <-w.flushCh:
-		require.Equal(t, preamble, w.BodyString())
-	case result := <-done:
-		require.Failf(t, "handler returned before preamble flush", "err=%v", result.err)
-	case <-time.After(time.Second):
-		require.Fail(t, "timed out waiting for preamble flush")
-	}
-
-	require.NoError(t, pw.Close())
-	select {
-	case got := <-done:
-		require.ErrorContains(t, got.err, "missing terminal event")
-		var failoverErr *UpstreamFailoverError
-		require.False(t, errors.As(got.err, &failoverErr))
-		require.NotNil(t, got.result)
-		require.Nil(t, got.result.firstTokenMs)
-	case <-time.After(time.Second):
-		require.Fail(t, "timed out waiting for stream handler")
-	}
-}
-
 func TestOpenAIStreamingPreambleKeepaliveUsesDownstreamIdle(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
@@ -1973,76 +1873,6 @@ func TestOpenAIStreamingPassthroughResponseFailedBeforeOutputReturnsFailover(t *
 	require.Contains(t, string(failoverErr.ResponseBody), "upstream processing failed")
 	require.False(t, c.Writer.Written())
 	require.Empty(t, rec.Body.String())
-}
-
-func TestOpenAIStreamingPassthroughEventOnlyPreambleFlushesAfterFrameDelimiter(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	cfg := &config.Config{
-		Gateway: config.GatewayConfig{
-			OpenAIStreamFlushPreamble: true,
-			MaxLineSize:               defaultMaxLineSize,
-		},
-	}
-	svc := &OpenAIGatewayService{cfg: cfg}
-
-	w := newOpenAIFlushSignalWriter()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
-
-	pr, pw := io.Pipe()
-	defer func() { _ = pr.Close() }()
-	resp := &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       pr,
-		Header:     http.Header{"X-Request-Id": []string{"rid-passthrough-flush-preamble"}},
-	}
-	type passthroughStreamResult struct {
-		result *openaiStreamingResultPassthrough
-		err    error
-	}
-	done := make(chan passthroughStreamResult, 1)
-	go func() {
-		result, err := svc.handleStreamingResponsePassthrough(c.Request.Context(), resp, c, &Account{ID: 1, Platform: PlatformOpenAI, Name: "acc"}, time.Now(), "", "")
-		done <- passthroughStreamResult{result: result, err: err}
-	}()
-
-	preambleWithoutDelimiter := "event: response.created\n" +
-		`data: {"response":{"id":"resp_1"}}` + "\n"
-	_, err := io.WriteString(pw, preambleWithoutDelimiter)
-	require.NoError(t, err)
-
-	select {
-	case <-w.flushCh:
-		require.Fail(t, "passthrough preamble flushed before the SSE frame delimiter")
-	case result := <-done:
-		require.Failf(t, "handler returned before preamble flush", "err=%v", result.err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	require.Empty(t, w.BodyString())
-
-	_, err = io.WriteString(pw, "\n")
-	require.NoError(t, err)
-	preamble := preambleWithoutDelimiter + "\n"
-	select {
-	case <-w.flushCh:
-		require.Equal(t, preamble, w.BodyString())
-	case result := <-done:
-		require.Failf(t, "handler returned before preamble flush", "err=%v", result.err)
-	case <-time.After(time.Second):
-		require.Fail(t, "timed out waiting for passthrough preamble flush")
-	}
-
-	require.NoError(t, pw.Close())
-	select {
-	case got := <-done:
-		require.ErrorContains(t, got.err, "missing terminal event")
-		var failoverErr *UpstreamFailoverError
-		require.False(t, errors.As(got.err, &failoverErr))
-		require.NotNil(t, got.result)
-		require.Nil(t, got.result.firstTokenMs)
-	case <-time.After(time.Second):
-		require.Fail(t, "timed out waiting for passthrough stream handler")
-	}
 }
 
 func TestOpenAIStreamingPassthroughContextWindowResponseFailedBeforeOutputAppliesPassthroughRule(t *testing.T) {

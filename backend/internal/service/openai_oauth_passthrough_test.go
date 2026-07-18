@@ -418,8 +418,7 @@ func TestOpenAIGatewayService_OAuthPassthrough_StreamKeepsToolNameAndBodyNormali
 	require.Empty(t, upstream.lastReq.Header.Get("Cookie"))
 	require.Empty(t, upstream.lastReq.Header.Get("X-Api-Key"))
 	require.Empty(t, upstream.lastReq.Header.Get("X-Goog-Api-Key"))
-	// 客户端的 gzip 不透传；流式上游统一请求 identity，避免压缩攒块抬高 TTFT。
-	require.Equal(t, "identity", upstream.lastReq.Header.Get("Accept-Encoding"))
+	require.Empty(t, upstream.lastReq.Header.Get("Accept-Encoding"))
 	require.Empty(t, upstream.lastReq.Header.Get("Proxy-Authorization"))
 	require.Empty(t, upstream.lastReq.Header.Get("X-Test"))
 	require.Equal(t, "remote_compaction_v2", upstream.lastReq.Header.Get("x-codex-beta-features"))
@@ -773,53 +772,6 @@ func TestOpenAIGatewayService_OAuthPassthrough_CodexMissingInstructionsRejectedB
 	require.True(t, logSink.ContainsMessage("OpenAI passthrough 本地拦截：Codex 请求缺少有效 instructions"))
 	require.True(t, logSink.ContainsFieldValue("request_user_agent", "codex_cli_rs/0.98.0 (Windows 10.0.19045; x86_64) unknown"))
 	require.True(t, logSink.ContainsFieldValue("reject_reason", "instructions_missing"))
-}
-
-func TestOpenAIGatewayService_OAuthPassthrough_LowLatencyAddsEmptyInstructions(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
-	c.Request.Header.Set("User-Agent", "codex_cli_rs/0.98.0")
-
-	body := []byte(`{"model":"gpt-5.1-codex-max","stream":true,"input":[{"type":"text","text":"hi"}]}`)
-	upstream := &httpUpstreamRecorder{resp: &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-		Body: io.NopCloser(strings.NewReader(strings.Join([]string{
-			`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
-			"",
-			"data: [DONE]",
-			"",
-		}, "\n"))),
-	}}
-	cfg := &config.Config{Gateway: config.GatewayConfig{
-		OpenAILatencyMode:               config.OpenAILatencyModeCompatible,
-		OpenAIMissingInstructionsPolicy: config.OpenAIMissingInstructionsPolicyCodex,
-	}}
-	svc := &OpenAIGatewayService{cfg: cfg, httpUpstream: upstream}
-	account := &Account{
-		ID:             123,
-		Name:           "acc",
-		Platform:       PlatformOpenAI,
-		Type:           AccountTypeOAuth,
-		Concurrency:    1,
-		Credentials:    map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
-		Extra:          map[string]any{"openai_passthrough": true},
-		Status:         StatusActive,
-		Schedulable:    true,
-		RateMultiplier: f64p(1),
-	}
-	ctx := WithOpenAILatencyMode(context.Background(), config.OpenAILatencyModeLowLatency)
-
-	result, err := svc.Forward(ctx, c, account, body)
-
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.NotNil(t, upstream.lastReq)
-	require.True(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())
-	require.Empty(t, gjson.GetBytes(upstream.lastBody, "instructions").String())
-	require.Equal(t, config.OpenAILatencyModeCompatible, cfg.Gateway.OpenAILatencyMode)
 }
 
 func TestOpenAIGatewayService_OAuthPassthrough_DisabledUsesLegacyTransform(t *testing.T) {

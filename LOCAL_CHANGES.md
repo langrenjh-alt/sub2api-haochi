@@ -1,13 +1,15 @@
-# Local Changes Against Official sub2api v0.1.156
+# Local Changes Against Official sub2api v0.1.160
 
-This repository is based on official `Wei-Shaw/sub2api` release `v0.1.156`.
+This repository includes official `Wei-Shaw/sub2api` through `origin/main` commit
+`b1a6b8026` (version `v0.1.160`).
 
-- Base commit: `12f991dd` (`v0.1.156`)
-- Working branch: `merge-user-changes-v0.1.156`
+- Upstream release commit: `8bfbc5ca9` (`v0.1.160`)
+- Upstream merge target: `b1a6b8026`
+- Working branch: `merge-user-changes-v0.1.160`
 - Original local change bundle: `E:\号池sub2api\改动`
 - Original local commits: `f1a65550`, `66701c1c`, `46781d3a`
-- Last upstream merge: 2026-07-15 (`v0.1.155` -> `v0.1.156`)
-- Fork build version: `backend/cmd/server/VERSION` is pinned to `0.1.156` because the upstream `v0.1.156` tag still contains `0.1.155`.
+- Last upstream merge: 2026-07-18 (`v0.1.156` -> `origin/main@b1a6b8026`)
+- Fork build version: `backend/cmd/server/VERSION` follows upstream at `0.1.160`.
 - Purpose: preserve local behavior when upgrading to a newer official release.
 
 ## Kiro and Compatibility File List
@@ -242,10 +244,23 @@ Upgrade notes:
 - Official `v0.1.149` split Antigravity code across multiple files; this structure remains in `v0.1.150`, so preserve the behavior in the new retry file rather than restoring the old monolithic service file.
 - Keep `RetryableOnSameAccount` enabled so the bounded in-request retry/failover loop still runs.
 
+## v0.1.160 Merge Decisions
+
+- Adopted the official Grok account scheduler, snapshot cache, sticky escape,
+  endpoint selection, CLI `403 Access denied` fallback, and media eligibility
+  routing.
+- Preserved the local Grok Responses cache route and Claude Code function-tool
+  names, including the local conflict policy for `web_search` and `x_search`.
+- Removed the local `openai_latency_mode` feature and restored the official
+  OpenAI transport, connection-pool, preamble, and instruction behavior.
+- Preserved the remaining local Kiro, capacity, billing, moderation, Grok quota,
+  frontend batching, and compatibility changes.
+
 ## v0.1.156 Merge Decisions
 
 - Kept the official complete-JSON scanner, first-output timeout, error sanitization, and event-boundary flushing fixes in the OpenAI forwarding paths.
-- Preserved the local low-latency preamble flush, but only flush complete SSE events.
+- The local low-latency preamble flush retained at this stage was removed by the
+  later `v0.1.160` merge.
 - Combined official Read-tool argument sanitization with the local closed-block and duplicate-event guards.
 - Combined official adaptive Grok 429 backoff and recovery clearing with the local 24-hour Free quota detection and immediate scheduler block.
 - Limited mixed function/native cache routing to known-Free, lossless Messages-style bridges (Anthropic Messages and the local Chat tool-history bridge); tool-free Free requests retain the disabled-native-tool cache route.

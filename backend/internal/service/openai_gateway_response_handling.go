@@ -214,8 +214,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	sawFailedEvent := false
 	failedMessage := ""
 	clientOutputStarted := false
-	flushPreamble := s.shouldFlushOpenAIStreamPreamble(ctx)
-	frameEventType := ""
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	var streamEarlyErr error
 	eventInProgress := false
@@ -395,16 +393,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if streamEarlyErr != nil {
 			return
 		}
-		if eventType, ok := extractOpenAISSEEventLine(line); ok {
-			frameEventType = eventType
-		}
 		// Extract data from SSE line (supports both "data: " and "data:" formats)
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
-			eventType := resolveOpenAIStreamEventType(dataBytes, frameEventType)
-			if openAIStreamEventIsTerminal(data) || openAIStreamEventTypeIsTerminal(eventType) {
+			if openAIStreamEventIsTerminal(data) {
 				sawTerminalEvent = true
 			}
+			eventType := strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
 			if responseID == "" {
 				responseID = extractOpenAIResponseIDFromJSONBytes(dataBytes)
 			}
@@ -463,7 +458,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				dataBytes = correctedData
 				data = string(correctedData)
 				line = "data: " + data
-				eventType = resolveOpenAIStreamEventType(dataBytes, frameEventType)
+				eventType = strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
 			}
 			if imageOutput, ok := extractImageGenerationOutputFromSSEData(dataBytes, streamSeenImages); ok {
 				streamImageOutputs = append(streamImageOutputs, imageOutput)
@@ -478,7 +473,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				dataBytes = normalizedData
 				data = string(normalizedData)
 				line = "data: " + data
-				eventType = resolveOpenAIStreamEventType(dataBytes, frameEventType)
+				eventType = strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
 			}
 			restoredData, restoreErr := restoreOpenAIResponsesNamespacePayload(c, dataBytes)
 			if restoreErr != nil {
@@ -489,7 +484,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				dataBytes = restoredData
 				data = string(restoredData)
 				line = "data: " + data
-				eventType = resolveOpenAIStreamEventType(dataBytes, frameEventType)
+				eventType = strings.TrimSpace(gjson.GetBytes(dataBytes, "type").String())
 			}
 			if sanitizedData, sanitized := sanitizeOpenAIResponseFailedEventForClient(
 				dataBytes,
@@ -506,9 +501,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
-			if flushPreamble && !clientOutputStarted && openAIStreamEventIsPreamble(eventType) {
-				eventShouldFlush = true
-			}
 			if guardFirstOutput {
 				eventStartsClientOutput = eventStartsClientOutput || startsClientOutput
 			}
@@ -576,9 +568,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					}
 				}
 			}
-		}
-		if line == "" {
-			frameEventType = ""
 		}
 	}
 
@@ -1026,8 +1015,16 @@ func openAIUsageFromGJSON(value gjson.Result) (OpenAIUsage, bool) {
 	if imageOutputTokens == 0 {
 		imageOutputTokens = value.Get("completion_tokens_details.image_tokens").Int()
 	}
+	// 图片输入 token（如 gpt-image-2 的 /v1/images/edits 带图请求），
+	// 上游在 input_tokens_details.image_tokens 单独回传，用于图/文输入分价计费。
+	// 普通文本请求该字段为 0，走原路径行为不变。
+	imageInputTokens := firstPositiveGJSONInt(
+		value.Get("input_tokens_details.image_tokens"),
+		value.Get("prompt_tokens_details.image_tokens"),
+	)
 	return OpenAIUsage{
 		InputTokens:              int(inputTokens),
+		ImageInputTokens:         imageInputTokens,
 		OutputTokens:             int(outputTokens),
 		CacheCreationInputTokens: cacheCreationTokens,
 		CacheReadInputTokens:     cacheReadTokens,

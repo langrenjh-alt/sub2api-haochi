@@ -109,10 +109,12 @@ func isGrokRequestContext(c *gin.Context) bool {
 // xAI Responses request. Existing client values are deliberately replaced by
 // the tenant-isolated value to prevent collisions on shared OAuth accounts.
 //
-// OAuth requests without native search tools can be routed by xAI to a
-// non-cacheable model. Tool-free requests get disabled native tools. Requests
-// containing only valid function tools with automatic selection retain those
-// tools and gain the native route markers used by the cache-capable model.
+// Free OAuth requests without native search tools are routed by xAI to the
+// non-cacheable build-free model. For otherwise tool-free requests, add the
+// native tools with tool_choice=none: this selects the cache-capable tier
+// without allowing an actual search. Requests containing only valid function
+// tools with automatic selection retain those tools and gain non-conflicting
+// native route markers used by the cache-capable model.
 func applyGrokResponsesCacheIdentity(body, intentSourceBody []byte, identity string, injectFreeTierTools bool) ([]byte, error) {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
@@ -324,13 +326,16 @@ func appendMissingGrokFreeCacheNativeTools(body []byte) ([]byte, error) {
 			}
 			hasFunction = true
 			functionNames[name] = true
+			merged = append(merged, json.RawMessage(tool.Raw))
 		case "web_search", "x_search":
-			// Native tools may already be present when this helper is retried.
+			if present[toolType] {
+				continue
+			}
+			merged = append(merged, json.RawMessage(tool.Raw))
+			present[toolType] = true
 		default:
 			return body, nil
 		}
-		merged = append(merged, json.RawMessage(tool.Raw))
-		present[toolType] = true
 	}
 	if !hasFunction {
 		return body, nil
