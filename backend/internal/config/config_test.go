@@ -281,6 +281,31 @@ func TestLoadDefaultOpenAIHTTP2Enabled(t *testing.T) {
 	require.True(t, cfg.Gateway.OpenAIHTTP2.AllowProxyFallbackToHTTP1)
 }
 
+func TestLoadDefaultDynamicReadyPool(t *testing.T) {
+	resetViperWithJWTSecret(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 8192, cfg.Gateway.MaxIdleConns)
+	require.Equal(t, 512, cfg.Gateway.MaxIdleConnsPerHost)
+	require.Equal(t, 2048, cfg.Gateway.MaxConnsPerHost)
+	require.Equal(t, 300, cfg.Gateway.IdleConnTimeoutSeconds)
+	require.Equal(t, 8192, cfg.Gateway.MaxUpstreamClients)
+	require.Equal(t, 1800, cfg.Gateway.ClientIdleTTLSeconds)
+	ready := cfg.Gateway.DynamicReadyPool
+	require.True(t, ready.Enabled)
+	require.Equal(t, 5, ready.SampleIntervalSeconds)
+	require.Equal(t, 300, ready.RecentWindowSeconds)
+	require.Equal(t, 1.00, ready.ReserveRatio)
+	require.Equal(t, 512, ready.MinReserve)
+	require.Equal(t, 0.25, ready.HighReserveRatio)
+	require.Equal(t, 128, ready.HighMinReserve)
+	require.Equal(t, 0.85, ready.HighWatermark)
+	require.Equal(t, 0.72, ready.HighExitWatermark)
+	require.Equal(t, 0.92, ready.CriticalWatermark)
+	require.Equal(t, 0.84, ready.CriticalExitWatermark)
+}
+
 func TestLoadOpenAIHTTP2DisabledFromEnv(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	t.Setenv("GATEWAY_OPENAI_HTTP2_ENABLED", "false")
@@ -1430,6 +1455,27 @@ func TestValidateConfigErrors(t *testing.T) {
 			name:    "gateway client idle ttl",
 			mutate:  func(c *Config) { c.Gateway.ClientIdleTTLSeconds = 0 },
 			wantErr: "gateway.client_idle_ttl_seconds",
+		},
+		{
+			name: "gateway dynamic ready interval",
+			mutate: func(c *Config) {
+				c.Gateway.DynamicReadyPool.SampleIntervalSeconds = 0
+			},
+			wantErr: "gateway.dynamic_ready_pool.sample_interval_seconds",
+		},
+		{
+			name: "gateway dynamic ready reserve relationship",
+			mutate: func(c *Config) {
+				c.Gateway.DynamicReadyPool.HighReserveRatio = c.Gateway.DynamicReadyPool.ReserveRatio + 0.1
+			},
+			wantErr: "gateway.dynamic_ready_pool.high_reserve_ratio",
+		},
+		{
+			name: "gateway dynamic ready watermark relationship",
+			mutate: func(c *Config) {
+				c.Gateway.DynamicReadyPool.CriticalWatermark = c.Gateway.DynamicReadyPool.HighWatermark
+			},
+			wantErr: "gateway.dynamic_ready_pool.high_watermark",
 		},
 		{
 			name:    "gateway concurrency slot ttl",

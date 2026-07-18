@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/resourcepressure"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -25,10 +26,61 @@ const (
 	openAIWSAcquireCleanupInterval = 3 * time.Second
 	openAIWSBackgroundPingInterval = 30 * time.Second
 	openAIWSBackgroundSweepTicker  = 30 * time.Second
+	openAIWSPressureSampleInterval = 5 * time.Second
+	openAIWSPressureSampleTimeout  = 2 * time.Second
 
 	openAIWSPrewarmFailureWindow   = 30 * time.Second
 	openAIWSPrewarmFailureSuppress = 2
 )
+
+type openAIWSResourcePressureLevel uint32
+
+const (
+	openAIWSResourcePressureNormal openAIWSResourcePressureLevel = iota
+	openAIWSResourcePressureHigh
+	openAIWSResourcePressureCritical
+)
+
+type openAIWSResourcePressureSampler interface {
+	Sample(context.Context) resourcepressure.Snapshot
+}
+
+// openAIWSResourcePressurePolicy maps the shared dynamic_ready_pool settings
+// to WebSocket-specific reclamation behavior.
+type openAIWSResourcePressurePolicy struct {
+	HighEnter        float64
+	HighExit         float64
+	CriticalEnter    float64
+	CriticalExit     float64
+	HighReserveRatio float64
+	HighMinReserve   int
+}
+
+func defaultOpenAIWSResourcePressurePolicy() openAIWSResourcePressurePolicy {
+	return openAIWSResourcePressurePolicy{
+		HighEnter:        0.85,
+		HighExit:         0.72,
+		CriticalEnter:    0.92,
+		CriticalExit:     0.84,
+		HighReserveRatio: 0.25,
+		HighMinReserve:   128,
+	}
+}
+
+func openAIWSResourcePressurePolicyFromConfig(cfg *config.Config) openAIWSResourcePressurePolicy {
+	policy := defaultOpenAIWSResourcePressurePolicy()
+	if cfg == nil || !cfg.Gateway.DynamicReadyPool.Enabled {
+		return policy
+	}
+	ready := cfg.Gateway.DynamicReadyPool
+	policy.HighEnter = ready.HighWatermark
+	policy.HighExit = ready.HighExitWatermark
+	policy.CriticalEnter = ready.CriticalWatermark
+	policy.CriticalExit = ready.CriticalExitWatermark
+	policy.HighReserveRatio = ready.HighReserveRatio
+	policy.HighMinReserve = ready.HighMinReserve
+	return normalizeOpenAIWSResourcePressurePolicy(policy)
+}
 
 var (
 	errOpenAIWSConnClosed               = errors.New("openai ws connection closed")
@@ -604,21 +656,40 @@ type openAIWSConnPool struct {
 	// 通过接口解耦底层 WS 客户端实现，默认使用 coder/websocket。
 	clientDialer openAIWSClientDialer
 
+	resourcePressureMu      sync.RWMutex
+	resourcePressureSampler openAIWSResourcePressureSampler
+	resourcePressurePolicy  openAIWSResourcePressurePolicy
+	resourcePressureEnabled atomic.Bool
+	resourcePressureLevel   atomic.Uint32
+
 	accounts sync.Map // key: int64(accountID), value: *openAIWSAccountPool
 	seq      atomic.Uint64
 
 	metrics openAIWSPoolMetrics
 
-	workerStopCh chan struct{}
-	workerWg     sync.WaitGroup
-	closeOnce    sync.Once
+	workerStopCh  chan struct{}
+	workerWg      sync.WaitGroup
+	prewarmCtx    context.Context
+	prewarmCancel context.CancelFunc
+	prewarmMu     sync.Mutex
+	prewarmWg     sync.WaitGroup
+	closing       atomic.Bool
+	closeOnce     sync.Once
 }
 
 func newOpenAIWSConnPool(cfg *config.Config) *openAIWSConnPool {
+	prewarmCtx, prewarmCancel := context.WithCancel(context.Background())
 	pool := &openAIWSConnPool{
-		cfg:          cfg,
-		clientDialer: newDefaultOpenAIWSClientDialer(),
-		workerStopCh: make(chan struct{}),
+		cfg:                    cfg,
+		clientDialer:           newDefaultOpenAIWSClientDialer(),
+		resourcePressurePolicy: openAIWSResourcePressurePolicyFromConfig(cfg),
+		workerStopCh:           make(chan struct{}),
+		prewarmCtx:             prewarmCtx,
+		prewarmCancel:          prewarmCancel,
+	}
+	if cfg != nil && cfg.Gateway.DynamicReadyPool.Enabled {
+		pool.resourcePressureSampler = resourcepressure.NewSampler()
+		pool.resourcePressureEnabled.Store(true)
 	}
 	pool.startBackgroundWorkers()
 	return pool
@@ -658,16 +729,138 @@ func (p *openAIWSConnPool) setClientDialerForTest(dialer openAIWSClientDialer) {
 	p.clientDialer = dialer
 }
 
+func normalizeOpenAIWSResourcePressurePolicy(policy openAIWSResourcePressurePolicy) openAIWSResourcePressurePolicy {
+	defaults := defaultOpenAIWSResourcePressurePolicy()
+	validWatermarks := policy.HighExit > 0 &&
+		policy.HighExit < policy.HighEnter &&
+		policy.HighEnter < policy.CriticalEnter &&
+		policy.CriticalEnter <= 1 &&
+		policy.CriticalExit > policy.HighExit &&
+		policy.CriticalExit < policy.CriticalEnter
+	if !validWatermarks {
+		policy.HighEnter = defaults.HighEnter
+		policy.HighExit = defaults.HighExit
+		policy.CriticalEnter = defaults.CriticalEnter
+		policy.CriticalExit = defaults.CriticalExit
+	}
+	if policy.HighReserveRatio < 0 || policy.HighReserveRatio > 5 {
+		policy.HighReserveRatio = defaults.HighReserveRatio
+	}
+	if policy.HighMinReserve < 0 {
+		policy.HighMinReserve = defaults.HighMinReserve
+	}
+	return policy
+}
+
+func (p *openAIWSConnPool) setResourcePressureSamplerForTest(
+	sampler openAIWSResourcePressureSampler,
+	policy openAIWSResourcePressurePolicy,
+) {
+	if p == nil {
+		return
+	}
+	p.resourcePressureMu.Lock()
+	p.resourcePressureSampler = sampler
+	p.resourcePressurePolicy = normalizeOpenAIWSResourcePressurePolicy(policy)
+	p.resourcePressureMu.Unlock()
+	p.resourcePressureEnabled.Store(sampler != nil)
+	p.resourcePressureLevel.Store(uint32(openAIWSResourcePressureNormal))
+}
+
+func (p *openAIWSConnPool) resourcePressureControlEnabled() bool {
+	return p != nil && p.resourcePressureEnabled.Load()
+}
+
+func (p *openAIWSConnPool) resourcePressureSampleInterval() time.Duration {
+	if p == nil || !p.resourcePressureControlEnabled() {
+		return openAIWSBackgroundSweepTicker
+	}
+	if p.cfg != nil && p.cfg.Gateway.DynamicReadyPool.SampleIntervalSeconds > 0 {
+		return time.Duration(p.cfg.Gateway.DynamicReadyPool.SampleIntervalSeconds) * time.Second
+	}
+	return openAIWSPressureSampleInterval
+}
+
+func (p *openAIWSConnPool) currentResourcePressureLevel() openAIWSResourcePressureLevel {
+	if p == nil {
+		return openAIWSResourcePressureNormal
+	}
+	level := openAIWSResourcePressureLevel(p.resourcePressureLevel.Load())
+	if level > openAIWSResourcePressureCritical {
+		return openAIWSResourcePressureNormal
+	}
+	return level
+}
+
+func (p *openAIWSConnPool) refreshResourcePressure(ctx context.Context) openAIWSResourcePressureLevel {
+	if p == nil || !p.resourcePressureControlEnabled() {
+		return openAIWSResourcePressureNormal
+	}
+	p.resourcePressureMu.RLock()
+	sampler := p.resourcePressureSampler
+	policy := normalizeOpenAIWSResourcePressurePolicy(p.resourcePressurePolicy)
+	p.resourcePressureMu.RUnlock()
+	if sampler == nil {
+		return p.currentResourcePressureLevel()
+	}
+
+	snapshot := sampler.Sample(ctx)
+	if !snapshot.Pressure.Valid || math.IsNaN(snapshot.Pressure.Value) || math.IsInf(snapshot.Pressure.Value, 0) {
+		return p.currentResourcePressureLevel()
+	}
+	value := math.Min(math.Max(snapshot.Pressure.Value, 0), 1)
+	for {
+		current := p.currentResourcePressureLevel()
+		next := current
+		switch current {
+		case openAIWSResourcePressureNormal:
+			if value >= policy.CriticalEnter {
+				next = openAIWSResourcePressureCritical
+			} else if value >= policy.HighEnter {
+				next = openAIWSResourcePressureHigh
+			}
+		case openAIWSResourcePressureHigh:
+			if value >= policy.CriticalEnter {
+				next = openAIWSResourcePressureCritical
+			} else if value < policy.HighExit {
+				next = openAIWSResourcePressureNormal
+			}
+		case openAIWSResourcePressureCritical:
+			if value < policy.CriticalExit {
+				// Recover through high so one low sample cannot immediately
+				// re-enable reserve expansion after critical pressure.
+				next = openAIWSResourcePressureHigh
+			}
+		}
+		if next == current || p.resourcePressureLevel.CompareAndSwap(uint32(current), uint32(next)) {
+			return next
+		}
+	}
+}
+
+func (p *openAIWSConnPool) resourcePressureExpansionSuppressed() bool {
+	return p != nil && p.resourcePressureControlEnabled() && p.currentResourcePressureLevel() != openAIWSResourcePressureNormal
+}
+
 // Close 停止后台 worker 并关闭所有空闲连接，应在优雅关闭时调用。
 func (p *openAIWSConnPool) Close() {
 	if p == nil {
 		return
 	}
 	p.closeOnce.Do(func() {
+		p.closing.Store(true)
+		if p.prewarmCancel != nil {
+			p.prewarmCancel()
+		}
 		if p.workerStopCh != nil {
 			close(p.workerStopCh)
 		}
 		p.workerWg.Wait()
+		// Synchronize with the final possible Add before waiting. A new batch
+		// rechecks closing while holding prewarmMu.
+		p.prewarmMu.Lock()
+		p.prewarmMu.Unlock()
+		p.prewarmWg.Wait()
 		// 遍历所有账户池，关闭全部空闲连接。
 		p.accounts.Range(func(key, value any) bool {
 			ap, ok := value.(*openAIWSAccountPool)
@@ -778,12 +971,38 @@ func (p *openAIWSConnPool) runBackgroundCleanupWorker() {
 	if p == nil {
 		return
 	}
-	ticker := time.NewTicker(openAIWSBackgroundSweepTicker)
+	sampleInterval := p.resourcePressureSampleInterval()
+	tickInterval := sampleInterval
+	if tickInterval > openAIWSBackgroundSweepTicker {
+		tickInterval = openAIWSBackgroundSweepTicker
+	}
+	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
+	lastSample := time.Now()
+	lastSweep := lastSample
 	for {
 		select {
-		case <-ticker.C:
-			p.runBackgroundCleanupSweep(time.Now())
+		case now := <-ticker.C:
+			if !p.resourcePressureControlEnabled() {
+				p.runBackgroundCleanupSweepAtPressure(now, openAIWSResourcePressureNormal)
+				lastSweep = now
+				continue
+			}
+
+			level := p.currentResourcePressureLevel()
+			sampled := false
+			if now.Sub(lastSample) >= sampleInterval {
+				ctx, cancel := context.WithTimeout(context.Background(), openAIWSPressureSampleTimeout)
+				level = p.refreshResourcePressure(ctx)
+				cancel()
+				lastSample = now
+				sampled = true
+			}
+			if now.Sub(lastSweep) >= openAIWSBackgroundSweepTicker ||
+				(sampled && level != openAIWSResourcePressureNormal) {
+				p.runBackgroundCleanupSweepAtPressure(now, level)
+				lastSweep = now
+			}
 		case <-p.workerStopCh:
 			return
 		}
@@ -794,6 +1013,19 @@ func (p *openAIWSConnPool) runBackgroundCleanupSweep(now time.Time) {
 	if p == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), openAIWSPressureSampleTimeout)
+	level := p.refreshResourcePressure(ctx)
+	cancel()
+	p.runBackgroundCleanupSweepAtPressure(now, level)
+}
+
+func (p *openAIWSConnPool) runBackgroundCleanupSweepAtPressure(now time.Time, level openAIWSResourcePressureLevel) {
+	if p == nil {
+		return
+	}
+	p.resourcePressureMu.RLock()
+	policy := normalizeOpenAIWSResourcePressurePolicy(p.resourcePressurePolicy)
+	p.resourcePressureMu.RUnlock()
 	type cleanupResult struct {
 		evicted []*openAIWSConn
 	}
@@ -819,9 +1051,15 @@ func (p *openAIWSConnPool) runBackgroundCleanupSweep(now time.Time) {
 	for _, result := range results {
 		closeOpenAIWSConns(result.evicted)
 	}
+	if level != openAIWSResourcePressureNormal {
+		closeOpenAIWSConns(p.reclaimIdleForPressure(level, policy))
+	}
 }
 
 func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireRequest) (*openAIWSConnLease, error) {
+	if p == nil || p.closing.Load() {
+		return nil, errOpenAIWSConnClosed
+	}
 	if p != nil {
 		p.metrics.acquireTotal.Add(1)
 	}
@@ -829,7 +1067,10 @@ func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireReque
 }
 
 func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireRequest, retry int) (*openAIWSConnLease, error) {
-	if p == nil || req.Account == nil || req.Account.ID <= 0 {
+	if p == nil || p.closing.Load() {
+		return nil, errOpenAIWSConnClosed
+	}
+	if req.Account == nil || req.Account.ID <= 0 {
 		return nil, errors.New("invalid ws acquire request")
 	}
 	if stringsTrim(req.WSURL) == "" {
@@ -1075,6 +1316,12 @@ retryAcquire:
 			ap.mu.Unlock()
 			return nil, dialErr
 		}
+		if p.closing.Load() {
+			ap.signalChangedLocked()
+			ap.mu.Unlock()
+			conn.close()
+			return nil, errOpenAIWSConnClosed
+		}
 		ap.conns[conn.id] = conn
 		ap.prewarmFails = 0
 		ap.prewarmFailAt = time.Time{}
@@ -1272,7 +1519,7 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 		if p.isConnPinnedLocked(ap, id) {
 			continue
 		}
-		if maxAge > 0 && !conn.isLeased() && conn.age(now) > maxAge {
+		if maxAge > 0 && !conn.isLeased() && conn.waiters.Load() == 0 && conn.age(now) > maxAge {
 			delete(ap.conns, id)
 			if len(ap.pinnedConns) > 0 {
 				delete(ap.pinnedConns, id)
@@ -1327,6 +1574,94 @@ func (p *openAIWSConnPool) cleanupAccountLocked(ap *openAIWSAccountPool, now tim
 		ap.signalChangedLocked()
 	}
 
+	return evicted
+}
+
+type openAIWSResourcePressureCandidate struct {
+	accountPool *openAIWSAccountPool
+	conn        *openAIWSConn
+	lastUsed    int64
+}
+
+// reclaimIdleForPressure applies one global reserve target across account
+// pools. A per-account percentage would repeatedly drain every small pool
+// during sustained pressure and ignore the configured global spare budget.
+func (p *openAIWSConnPool) reclaimIdleForPressure(
+	level openAIWSResourcePressureLevel,
+	policy openAIWSResourcePressurePolicy,
+) []*openAIWSConn {
+	if p == nil || level == openAIWSResourcePressureNormal {
+		return nil
+	}
+	policy = normalizeOpenAIWSResourcePressurePolicy(policy)
+
+	active := 0
+	candidates := make([]openAIWSResourcePressureCandidate, 0)
+	p.accounts.Range(func(_ any, value any) bool {
+		ap, ok := value.(*openAIWSAccountPool)
+		if !ok || ap == nil {
+			return true
+		}
+		ap.mu.Lock()
+		for _, conn := range ap.conns {
+			if conn == nil {
+				continue
+			}
+			if conn.isLeased() {
+				active++
+				continue
+			}
+			if conn.waiters.Load() > 0 || p.isConnPinnedLocked(ap, conn.id) {
+				continue
+			}
+			candidates = append(candidates, openAIWSResourcePressureCandidate{
+				accountPool: ap,
+				conn:        conn,
+				lastUsed:    conn.lastUsedNano.Load(),
+			})
+		}
+		ap.mu.Unlock()
+		return true
+	})
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	keepIdle := 0
+	if level == openAIWSResourcePressureHigh {
+		keepIdle = max(policy.HighMinReserve, int(math.Ceil(float64(active)*policy.HighReserveRatio)))
+	}
+	reclaimCount := max(0, len(candidates)-keepIdle)
+	if reclaimCount == 0 {
+		return nil
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].lastUsed == candidates[j].lastUsed {
+			return candidates[i].conn.id < candidates[j].conn.id
+		}
+		return candidates[i].lastUsed < candidates[j].lastUsed
+	})
+
+	evicted := make([]*openAIWSConn, 0, reclaimCount)
+	for _, candidate := range candidates[:reclaimCount] {
+		ap := candidate.accountPool
+		conn := candidate.conn
+		ap.mu.Lock()
+		current, ok := ap.conns[conn.id]
+		if !ok || current != conn || conn.isLeased() || conn.waiters.Load() > 0 ||
+			p.isConnPinnedLocked(ap, conn.id) || conn.lastUsedNano.Load() != candidate.lastUsed {
+			ap.mu.Unlock()
+			continue
+		}
+		delete(ap.conns, conn.id)
+		delete(ap.pinnedConns, conn.id)
+		ap.signalChangedLocked()
+		ap.mu.Unlock()
+		evicted = append(evicted, conn)
+	}
+	if len(evicted) > 0 {
+		p.metrics.scaleDownTotal.Add(int64(len(evicted)))
+	}
 	return evicted
 }
 
@@ -1395,6 +1730,9 @@ func (p *openAIWSConnPool) ensureTargetIdleAsync(accountID int64) {
 	if p == nil || accountID <= 0 {
 		return
 	}
+	if p.resourcePressureExpansionSuppressed() {
+		return
+	}
 
 	var req openAIWSAcquireRequest
 	generation := uint64(0)
@@ -1416,6 +1754,9 @@ func (p *openAIWSConnPool) ensureTargetIdleAsync(accountID int64) {
 		return
 	}
 	if p.shouldSuppressPrewarmLocked(ap, now) {
+		return
+	}
+	if p.resourcePressureExpansionSuppressed() {
 		return
 	}
 	effectiveMaxConns := p.maxConnsHardCap()
@@ -1440,7 +1781,29 @@ func (p *openAIWSConnPool) ensureTargetIdleAsync(accountID int64) {
 	ap.creating += need
 	p.metrics.scaleUpTotal.Add(int64(need))
 
-	go p.prewarmConns(accountID, req, need, generation)
+	if !p.startPrewarmBatch(accountID, req, need, generation) {
+		ap.creating -= need
+		ap.prewarmActive = false
+		ap.signalChangedLocked()
+	}
+}
+
+func (p *openAIWSConnPool) startPrewarmBatch(accountID int64, req openAIWSAcquireRequest, need int, generation uint64) bool {
+	if p == nil || need <= 0 {
+		return false
+	}
+	p.prewarmMu.Lock()
+	if p.closing.Load() {
+		p.prewarmMu.Unlock()
+		return false
+	}
+	p.prewarmWg.Add(1)
+	p.prewarmMu.Unlock()
+	go func() {
+		defer p.prewarmWg.Done()
+		p.prewarmConns(accountID, req, need, generation)
+	}()
+	return true
 }
 
 func (p *openAIWSConnPool) targetConnCountLocked(ap *openAIWSAccountPool, maxConns int) int {
@@ -1488,16 +1851,31 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 	if len(generations) > 0 {
 		generation = generations[0]
 	}
+	remaining := total
 	defer func() {
 		if ap, ok := p.getAccountPool(accountID); ok && ap != nil {
 			ap.mu.Lock()
+			if remaining > 0 {
+				cancelled := min(remaining, ap.creating)
+				ap.creating -= cancelled
+				if cancelled > 0 {
+					ap.signalChangedLocked()
+				}
+			}
 			ap.prewarmActive = false
 			ap.mu.Unlock()
 		}
 	}()
 
 	for i := 0; i < total; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), p.dialTimeout()+openAIWSConnPrewarmExtraDelay)
+		if p.closing.Load() || p.resourcePressureExpansionSuppressed() {
+			return
+		}
+		parent := p.prewarmCtx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, p.dialTimeout()+openAIWSConnPrewarmExtraDelay)
 		conn, err := p.dialConn(ctx, req)
 		cancel()
 
@@ -1512,12 +1890,21 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 		if ap.creating > 0 {
 			ap.creating--
 		}
+		if remaining > 0 {
+			remaining--
+		}
 		if err != nil {
 			ap.prewarmFails++
 			ap.prewarmFailAt = time.Now()
 			ap.signalChangedLocked()
 			ap.mu.Unlock()
 			continue
+		}
+		if p.closing.Load() || p.resourcePressureExpansionSuppressed() {
+			ap.signalChangedLocked()
+			ap.mu.Unlock()
+			conn.close()
+			return
 		}
 		if ap.generation != generation || ap.lastAcquire == nil {
 			ap.mu.Unlock()

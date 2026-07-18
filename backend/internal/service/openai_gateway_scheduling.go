@@ -827,6 +827,53 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if err == nil && result != nil && result.Acquired {
 			return s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
 		}
+		busyStickyAccountID := stickyAccountID
+		if shouldBypassGrokStickyWaitForRequest(platform, requiredCapability) &&
+			busyStickyAccountID <= 0 && sessionHash != "" && err == nil && result != nil && !result.Acquired {
+			if currentStickyID, lookupErr := s.getStickySessionAccountID(ctx, groupID, sessionHash); lookupErr == nil {
+				busyStickyAccountID = currentStickyID
+			}
+		}
+		if shouldBypassGrokStickyWaitForRequest(platform, requiredCapability) &&
+			busyStickyAccountID > 0 && busyStickyAccountID == account.ID && err == nil && result != nil && !result.Acquired {
+			excludedIDs = withExcludedAccountID(excludedIDs, busyStickyAccountID)
+			slog.Info("sticky_escape_triggered",
+				"account_id", busyStickyAccountID,
+				"platform", platform,
+				"reason", "concurrency_full",
+			)
+			var fallbackAccount *Account
+			for probeCount := 0; probeCount < openAIAccountSelectionProbeLimit; probeCount++ {
+				nextAccount, selectErr := s.selectAccountForModelWithExclusions(ctx, groupID, platform, "", requestedModel, excludedIDs, requireCompact, 0, requiredCapability, preferLowUpstreamRate)
+				if selectErr != nil {
+					if fallbackAccount == nil {
+						return nil, selectErr
+					}
+					account = fallbackAccount
+					break
+				}
+
+				nextResult, acquireErr := s.tryAcquireAccountSlot(ctx, nextAccount.ID, nextAccount.Concurrency)
+				if acquireErr != nil {
+					return nil, acquireErr
+				}
+				if nextResult != nil && nextResult.Acquired {
+					selection, hydrateErr := s.newAcquiredSelectionResult(ctx, nextAccount, nextResult.ReleaseFunc)
+					if hydrateErr != nil {
+						return nil, hydrateErr
+					}
+					_ = s.BindStickySession(ctx, groupID, sessionHash, nextAccount.ID)
+					return selection, nil
+				}
+				if fallbackAccount == nil {
+					fallbackAccount = nextAccount
+				}
+				excludedIDs = withExcludedAccountID(excludedIDs, nextAccount.ID)
+			}
+			if fallbackAccount != nil {
+				account = fallbackAccount
+			}
+		}
 		if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
 			waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
 			if waitingCount < cfg.StickySessionMaxWaiting {
@@ -895,14 +942,23 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 							return selection, nil
 						}
 
-						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-						if waitingCount < cfg.StickySessionMaxWaiting {
-							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-								AccountID:      accountID,
-								MaxConcurrency: account.Concurrency,
-								Timeout:        cfg.StickySessionWaitTimeout,
-								MaxWaiting:     cfg.StickySessionMaxWaiting,
-							})
+						if shouldBypassGrokStickyWaitForRequest(platform, requiredCapability) && err == nil && result != nil && !result.Acquired {
+							excludedIDs = withExcludedAccountID(excludedIDs, accountID)
+							slog.Info("sticky_escape_triggered",
+								"account_id", accountID,
+								"platform", platform,
+								"reason", "concurrency_full",
+							)
+						} else {
+							waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
+							if waitingCount < cfg.StickySessionMaxWaiting {
+								return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
+									AccountID:      accountID,
+									MaxConcurrency: account.Concurrency,
+									Timeout:        cfg.StickySessionWaitTimeout,
+									MaxWaiting:     cfg.StickySessionMaxWaiting,
+								})
+							}
 						}
 					}
 				}
@@ -965,6 +1021,31 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			ID:             acc.ID,
 			MaxConcurrency: acc.EffectiveLoadFactor(),
 		})
+	}
+	resolveLateGrokSticky := func() {
+		if !shouldBypassGrokStickyWaitForRequest(platform, requiredCapability) || stickyAccountID > 0 || sessionHash == "" {
+			return
+		}
+		currentStickyID, lookupErr := s.getStickySessionAccountID(ctx, groupID, sessionHash)
+		if lookupErr != nil || currentStickyID <= 0 {
+			return
+		}
+		stickyAccountID = currentStickyID
+		excludedIDs = withExcludedAccountID(excludedIDs, currentStickyID)
+		remaining := make([]*Account, 0, len(candidates))
+		for _, candidate := range candidates {
+			if candidate.ID != currentStickyID {
+				remaining = append(remaining, candidate)
+			}
+		}
+		candidates = remaining
+		accountLoads = accountLoads[:0]
+		for _, candidate := range candidates {
+			accountLoads = append(accountLoads, AccountWithConcurrency{
+				ID:             candidate.ID,
+				MaxConcurrency: candidate.EffectiveLoadFactor(),
+			})
+		}
 	}
 
 	tryAcquireFromLoadMap := func(loadMap map[int64]*AccountLoadInfo) (*AccountSelectionResult, bool, error) {
@@ -1100,6 +1181,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		} else if selection != nil {
 			return selection, nil
 		} else if attempted {
+			resolveLateGrokSticky()
 			if freshLoadMap, loadErr := s.concurrencyService.GetAccountsLoadBatchFresh(ctx, accountLoads); loadErr == nil {
 				if selection, _, selectErr := tryAcquireFromLoadMap(freshLoadMap); selectErr != nil {
 					return nil, selectErr
@@ -1109,6 +1191,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			}
 		}
 	}
+
+	resolveLateGrokSticky()
 
 	// ============ Layer 3: Fallback wait ============
 	sortAccountsByPriorityAndLastUsed(candidates, false)
@@ -1121,6 +1205,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		candidates = prioritizeOpenAICompactAccounts(candidates)
 	}
 	for _, acc := range candidates {
+		if isExcluded(acc.ID) {
+			continue
+		}
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 		if fresh == nil {
 			continue

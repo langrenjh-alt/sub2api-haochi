@@ -370,24 +370,49 @@ gateway:
   # HTTP 上游连接池配置（HTTP/2 + 多代理场景默认值）
   # Max idle connections across all hosts
   # 所有主机的最大空闲连接数
-  max_idle_conns: 2560
+  max_idle_conns: 8192
   # Max idle connections per host
   # 每个主机的最大空闲连接数
-  max_idle_conns_per_host: 120
+  max_idle_conns_per_host: 512
   # Max connections per host
   # 每个主机的最大连接数
-  max_conns_per_host: 1024
+  max_conns_per_host: 2048
   # Idle connection timeout (seconds)
   # 空闲连接超时时间（秒）
-  idle_conn_timeout_seconds: 90
+  idle_conn_timeout_seconds: 300
   # Upstream client cache settings
   # 上游连接池客户端缓存配置
   # max_upstream_clients: Max cached clients, evicts least recently used when exceeded
   # max_upstream_clients: 最大缓存客户端数量，超出后淘汰最久未使用的
-  max_upstream_clients: 5000
-  # client_idle_ttl_seconds: Client idle reclaim threshold (seconds), reclaimed when idle and no active requests
-  # client_idle_ttl_seconds: 客户端空闲回收阈值（秒），超时且无活跃请求时回收
-  client_idle_ttl_seconds: 900
+  max_upstream_clients: 8192
+  # client_idle_ttl_seconds: Hard idle reclaim threshold when dynamic_ready_pool is disabled
+  # client_idle_ttl_seconds: dynamic_ready_pool 关闭时的客户端空闲硬回收阈值
+  client_idle_ttl_seconds: 1800
+  # Dynamic ready pool for all account platforms. Scheduler metadata stays hot in Redis;
+  # HTTP transports retain connections created by real traffic, and idle resources shrink
+  # only under local memory/FD pressure. HTTP/1.1 never sends synthetic keepalive requests.
+  # 全平台动态就绪池。调度元数据由 Redis 快照保持热态；HTTP transport 只保留真实业务
+  # 建立的连接，并仅在本机内存/FD 压力下收缩空闲资源。HTTP/1.1 不发送合成保活请求。
+  dynamic_ready_pool:
+    enabled: true
+    sample_interval_seconds: 5
+    # Entries used in this window form the normal-load active baseline.
+    # 此窗口内使用过的条目计入常态活跃基数。
+    recent_window_seconds: 300
+    # Normal target: recent + max(min_reserve, recent * reserve_ratio).
+    # 常态目标：近期活跃 + max(最小备用数, 近期活跃 * 备用比例)。
+    reserve_ratio: 1.00
+    min_reserve: 512
+    # High-pressure target uses only currently in-flight entries as its baseline.
+    # 高压时只以当前进行中条目为基数，并显著收缩备用量。
+    high_reserve_ratio: 0.25
+    high_min_reserve: 128
+    # Ratios are local memory/FD utilization in [0,1], with hysteresis on recovery.
+    # 比例为本机内存/FD 使用率 [0,1]，恢复时使用迟滞水位避免反复抖动。
+    high_watermark: 0.85
+    high_exit_watermark: 0.72
+    critical_watermark: 0.92
+    critical_exit_watermark: 0.84
   # Concurrency slot expiration time (minutes)
   # 并发槽位过期时间（分钟）
   concurrency_slot_ttl_minutes: 30
