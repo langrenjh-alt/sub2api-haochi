@@ -1,15 +1,15 @@
-# Local Changes Against Official sub2api v0.1.160
+# Local Changes Against Official sub2api v0.1.161
 
-This repository includes official `Wei-Shaw/sub2api` through `origin/main` commit
-`b1a6b8026` (version `v0.1.160`).
+This repository includes official `Wei-Shaw/sub2api` through release tag
+`v0.1.161` at commit `19149ca19`.
 
-- Upstream release commit: `8bfbc5ca9` (`v0.1.160`)
-- Upstream merge target: `b1a6b8026`
-- Working branch: `merge-user-changes-v0.1.160`
+- Upstream release commit: `19149ca19` (`v0.1.161`)
+- Upstream merge target: `v0.1.161^{}` (`19149ca19`)
+- Working branch: `merge-user-changes-v0.1.161`
 - Original local change bundle: `E:\号池sub2api\改动`
 - Original local commits: `f1a65550`, `66701c1c`, `46781d3a`
-- Last upstream merge: 2026-07-18 (`v0.1.156` -> `origin/main@b1a6b8026`)
-- Fork build version: `backend/cmd/server/VERSION` follows upstream at `0.1.160`.
+- Last upstream merge: 2026-07-18 (`origin/main@b1a6b8026` -> `v0.1.161@19149ca19`)
+- Fork build version: `backend/cmd/server/VERSION` is `0.1.161`; the release tag still contains `0.1.160`, so the fork advances it explicitly.
 - Purpose: preserve local behavior when upgrading to a newer official release.
 
 ## Kiro and Compatibility File List
@@ -243,6 +243,27 @@ Upgrade notes:
 
 - Official `v0.1.149` split Antigravity code across multiple files; this structure remains in `v0.1.150`, so preserve the behavior in the new retry file rather than restoring the old monolithic service file.
 - Keep `RetryableOnSameAccount` enabled so the bounded in-request retry/failover loop still runs.
+
+## v0.1.161 Merge Decisions
+
+- Adopted the official ingress-rejection aggregation, distributed API-key auth
+  cache invalidation, protected Grok video proxying, account model mapping,
+  encrypted-content recovery, OpenAI WebSocket turn lifecycle, transient 503
+  classification, subscription renewal, billing probe, and related migrations/UI.
+- Preserved the local dynamic HTTP upstream readiness pool and combined its
+  shutdown lifecycle with the new official ops/auth-cache background workers.
+- Combined official model-scoped temporary cooldowns with the local OpenAI 403
+  policy: deterministic inactive-workspace credential failures still bypass
+  temporary rules and disable the owner, while generic 403 responses remain
+  retryable without disabling or cooling down the account.
+- Preserved the local Grok Chat Completions-to-Responses route and client
+  function names. Adopted the official fix that pure client function tools must
+  not gain native search tools; explicit `web_search`/`x_search` functions stay
+  functions and receive only non-conflicting route markers.
+- Migrated the official Grok video sticky-wait scheduler test to the local
+  user/API-key-scoped video request hash, retaining request-owner isolation.
+- Advanced `backend/cmd/server/VERSION` to `0.1.161` because the official release
+  tag did not update the source fallback version.
 
 ## v0.1.160 Merge Decisions
 

@@ -2724,7 +2724,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_GrokVideoStatusBusyKeep
 
 	ctx := context.Background()
 	groupID := int64(101009)
-	sessionHash := GrokMediaVideoRequestSessionHash("video-request-busy")
+	sessionHash := GrokMediaVideoRequestSessionHash("video-request-busy", 101, 202)
 	cacheKey := "openai:" + sessionHash
 	accounts := []Account{
 		{ID: 39081, Platform: PlatformGrok, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1, Priority: 0, GroupIDs: []int64{groupID}},

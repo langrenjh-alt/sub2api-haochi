@@ -382,11 +382,9 @@ func TestForwardGrokOpenCodeToolChatViaResponsesKeepsCachePrefix(t *testing.T) {
 
 	for _, body := range [][]byte{firstBody, secondBody} {
 		tools := gjson.GetBytes(body, "tools").Array()
-		require.Len(t, tools, 3)
+		require.Len(t, tools, 1, "pure client functions must not gain native search tools")
 		require.Equal(t, "function", tools[0].Get("type").String())
 		require.Equal(t, "read_file", tools[0].Get("name").String())
-		require.Equal(t, "web_search", tools[1].Get("type").String())
-		require.Equal(t, "x_search", tools[2].Get("type").String())
 		require.Equal(t, "auto", gjson.GetBytes(body, "tool_choice").String())
 		require.Equal(t, "high", gjson.GetBytes(body, "reasoning_effort").String())
 		require.False(t, gjson.GetBytes(body, "reasoning").Exists())
