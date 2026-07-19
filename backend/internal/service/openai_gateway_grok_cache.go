@@ -340,14 +340,9 @@ func appendMissingGrokFreeCacheNativeTools(body []byte) ([]byte, error) {
 	if !hasFunction {
 		return body, nil
 	}
-	// Only complement missing native search tools when the request already contains
-	// at least one search tool (native or function-form). Pure client function tools
-	// (e.g. view_image) must not trigger injection to avoid biasing model tool
-	// selection (#4486).
-	if !present["web_search"] && !present["x_search"] &&
-		!functionNames["web_search"] && !functionNames["x_search"] {
-		return body, nil
-	}
+	// Do not require client search intent here. These native entries are route
+	// markers; omitting both sends pure function-tool requests to xAI's
+	// non-cacheable Free model.
 	for _, toolType := range []string{"web_search", "x_search"} {
 		// xAI assigns native search tools their type as an implicit name. Keep a
 		// client function with that name and omit only the colliding route marker.

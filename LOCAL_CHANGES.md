@@ -257,9 +257,11 @@ Upgrade notes:
   temporary rules and disable the owner, while generic 403 responses remain
   retryable without disabling or cooling down the account.
 - Preserved the local Grok Chat Completions-to-Responses route and client
-  function names. Adopted the official fix that pure client function tools must
-  not gain native search tools; explicit `web_search`/`x_search` functions stay
-  functions and receive only non-conflicting route markers.
+  function names. Restored the `v0.1.160` cache routing behavior: known-Free
+  OAuth requests with pure client function tools retain those functions and gain
+  non-conflicting native `web_search`/`x_search` route markers. This intentionally
+  overrides the official `v0.1.161` change from #4486 because omitting both native
+  markers routes agent requests to Grok's non-cacheable Free model.
 - Migrated the official Grok video sticky-wait scheduler test to the local
   user/API-key-scoped video request hash, retaining request-owner isolation.
 - Advanced `backend/cmd/server/VERSION` to `0.1.161` because the official release

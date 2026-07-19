@@ -1757,7 +1757,7 @@ func TestForwardAsChatCompletionsForGrokStreamingUsesXAIResponses(t *testing.T) 
 	require.NotNil(t, repo.updates[53][grokQuotaSnapshotExtraKey])
 }
 
-func TestForwardGrokResponsesFunctionToolsStayOnResponsesWithoutNativeSearchInjection(t *testing.T) {
+func TestForwardGrokResponsesFunctionToolsStayOnCacheCapableMixedRoute(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
@@ -1795,9 +1795,11 @@ func TestForwardGrokResponsesFunctionToolsStayOnResponsesWithoutNativeSearchInje
 	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
 	require.NotContains(t, upstream.lastReq.URL.Path, "chat/completions")
 	tools := gjson.GetBytes(upstream.lastBody, "tools").Array()
-	require.Len(t, tools, 1, "pure client functions must not gain native search tools")
+	require.Len(t, tools, 3, "pure client functions use Grok's mixed cache route")
 	require.Equal(t, "function", tools[0].Get("type").String())
 	require.Equal(t, "lookup", tools[0].Get("name").String())
+	require.Equal(t, "web_search", tools[1].Get("type").String())
+	require.Equal(t, "x_search", tools[2].Get("type").String())
 	identity := gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String()
 	require.NotEmpty(t, identity)
 	require.NotEqual(t, "downstream-claude-session", identity)
@@ -1966,9 +1968,11 @@ func TestForwardGrokResponsesToolHistoryPreservesWirePrefixAndCacheIdentity(t *t
 	require.JSONEq(t, `{"value":42}`, secondInput[2].Get("output").String())
 
 	tools := gjson.GetBytes(secondBody, "tools").Array()
-	require.Len(t, tools, 1, "pure client functions must preserve client intent without native search")
+	require.Len(t, tools, 3, "OAuth auto function-tool requests use the stable mixed cache route")
 	require.Equal(t, "function", tools[0].Get("type").String())
 	require.Equal(t, "lookup", tools[0].Get("name").String())
+	require.Equal(t, "web_search", tools[1].Get("type").String())
+	require.Equal(t, "x_search", tools[2].Get("type").String())
 	require.Equal(t, "auto", gjson.GetBytes(secondBody, "tool_choice").String())
 	require.False(t, gjson.GetBytes(secondBody, "previous_response_id").Exists())
 }
