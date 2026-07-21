@@ -615,6 +615,12 @@ type TokenRefreshConfig struct {
 	ProviderConcurrency int `mapstructure:"provider_concurrency"`
 	// 每个平台、每个进程允许的刷新请求速率
 	ProviderQPS int `mapstructure:"provider_qps"`
+	// Grok 每个后台刷新 leader 允许的并发刷新数；0 表示继承 ProviderConcurrency
+	GrokProviderConcurrency int `mapstructure:"grok_provider_concurrency"`
+	// Grok 每个后台刷新 leader 允许的刷新请求速率；0 表示继承 ProviderQPS
+	GrokProviderQPS int `mapstructure:"grok_provider_qps"`
+	// Grok 刷新窗口的确定性错峰范围（分钟）
+	GrokRefreshJitterMinutes int `mapstructure:"grok_refresh_jitter_minutes"`
 	// 一个周期内连续临时失败达到此值后停止该平台
 	ProviderFailureThreshold int `mapstructure:"provider_failure_threshold"`
 	// 单次上游刷新尝试的超时（秒）
@@ -2242,12 +2248,15 @@ func setDefaults() {
 	viper.SetDefault("token_refresh.refresh_before_expiry_hours", 0.5) // 提前30分钟刷新（适配Google 1小时token）
 	viper.SetDefault("token_refresh.max_retries", 3)                   // 最多重试3次
 	viper.SetDefault("token_refresh.retry_backoff_seconds", 2)         // 重试退避基础2秒
-	viper.SetDefault("token_refresh.candidate_page_size", 200)
+	viper.SetDefault("token_refresh.candidate_page_size", 1000)
 	viper.SetDefault("token_refresh.provider_concurrency", 4)
 	viper.SetDefault("token_refresh.provider_qps", 2)
+	viper.SetDefault("token_refresh.grok_provider_concurrency", 32)
+	viper.SetDefault("token_refresh.grok_provider_qps", 25)
+	viper.SetDefault("token_refresh.grok_refresh_jitter_minutes", 60)
 	viper.SetDefault("token_refresh.provider_failure_threshold", 3)
 	viper.SetDefault("token_refresh.attempt_timeout_seconds", 15)
-	viper.SetDefault("token_refresh.cycle_timeout_seconds", 240)
+	viper.SetDefault("token_refresh.cycle_timeout_seconds", 3600)
 
 	// Gemini OAuth - configure via environment variables or config file
 	// GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET

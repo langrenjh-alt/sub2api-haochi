@@ -47,6 +47,20 @@ func TestLoadHTTPIngressSafetyDefaults(t *testing.T) {
 	require.Equal(t, 16384, cfg.APIKeyAuth.InvalidAbuse.Capacity)
 }
 
+func TestLoadTokenRefreshLargeGrokPoolDefaults(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.Equal(t, 1000, cfg.TokenRefresh.CandidatePageSize)
+	require.Equal(t, 4, cfg.TokenRefresh.ProviderConcurrency)
+	require.Equal(t, 2, cfg.TokenRefresh.ProviderQPS)
+	require.Equal(t, 32, cfg.TokenRefresh.GrokProviderConcurrency)
+	require.Equal(t, 25, cfg.TokenRefresh.GrokProviderQPS)
+	require.Equal(t, 60, cfg.TokenRefresh.GrokRefreshJitterMinutes)
+	require.Equal(t, 3600, cfg.TokenRefresh.CycleTimeoutSeconds)
+}
+
 func TestLoadForBootstrapAllowsMissingJWTSecret(t *testing.T) {
 	viper.Reset()
 	t.Setenv("JWT_SECRET", "")

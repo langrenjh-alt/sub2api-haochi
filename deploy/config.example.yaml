@@ -701,18 +701,43 @@ sora:
 # Token refresh behavior
 # token 刷新行为控制
 token_refresh:
+  # Enable the periodic OAuth refresh scanner. A distributed leader lock ensures
+  # only one server instance scans candidates in each cycle.
+  # 启用 OAuth 定时刷新；分布式 leader lock 保证每轮只有一个实例扫描候选账号
+  enabled: true
+  # Scanner interval in minutes
+  # 扫描间隔（分钟）
+  check_interval_minutes: 5
+  # Global refresh window in hours. Grok always uses at least one hour, plus jitter.
+  # 全局提前刷新窗口（小时）；Grok 至少使用 1 小时，并叠加错峰时间
+  refresh_before_expiry_hours: 0.5
+  # Maximum attempts per account, including the first attempt
+  # 每个账号的最大尝试次数（包含首次尝试）
+  max_retries: 3
+  # Base retry backoff in seconds
+  # 重试退避基础时间（秒）
+  retry_backoff_seconds: 2
   # Whether OpenAI refresh flow is allowed to sync linked Sora accounts
   # 是否允许 OpenAI 刷新流程同步覆盖 linked_openai_account_id 关联的 Sora 账号 token
   sync_linked_sora_accounts: false
   # Candidate accounts loaded per cursor page (maximum 1000)
   # 每个游标分页加载的候选账号数量（最大 1000）
-  candidate_page_size: 200
+  candidate_page_size: 1000
   # Maximum concurrent refresh attempts per provider (maximum 32)
   # 每个平台的最大并发刷新数（最大 32）
   provider_concurrency: 4
   # Per-provider refresh requests per second in each server process (maximum 100)
   # 每个服务进程中每个平台每秒允许的刷新请求数（最大 100）
   provider_qps: 2
+  # Grok-specific concurrency override for large pools (maximum 32, 0=inherits provider_concurrency)
+  # Grok 大号池并发覆盖值（最大 32，0 表示继承 provider_concurrency）
+  grok_provider_concurrency: 32
+  # Grok-specific QPS override. 25 QPS leaves retry headroom for 60k synchronized accounts.
+  # Grok QPS 覆盖值；25 QPS 可覆盖 6 万个同批过期账号并为重试预留余量
+  grok_provider_qps: 25
+  # Deterministic per-account refresh-window jitter in minutes (maximum 120)
+  # 每账号确定性刷新错峰范围（分钟，最大 120）
+  grok_refresh_jitter_minutes: 60
   # Consecutive transient failures that contain a provider for the current cycle (maximum 100)
   # 当前周期内触发平台级熔断的连续临时失败次数（最大 100）
   provider_failure_threshold: 3
@@ -721,7 +746,7 @@ token_refresh:
   attempt_timeout_seconds: 15
   # Total timeout for one background refresh cycle, in seconds (maximum 3600)
   # 单个后台刷新周期的总超时时间（秒，最大 3600）
-  cycle_timeout_seconds: 240
+  cycle_timeout_seconds: 3600
 
 # =============================================================================
 # API Key Auth Cache Configuration

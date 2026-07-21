@@ -244,6 +244,43 @@ Upgrade notes:
 - Official `v0.1.149` split Antigravity code across multiple files; this structure remains in `v0.1.150`, so preserve the behavior in the new retry file rather than restoring the old monolithic service file.
 - Keep `RetryableOnSameAccount` enabled so the bounded in-request retry/failover loop still runs.
 
+### 8. Grok OAuth Refresh Scaling
+
+The background OAuth refresh service is sized and coordinated for Grok pools up
+to 60,000 accounts.
+
+Behavior:
+
+- Elects one refresh scanner per cycle with the shared Redis owner-token leader
+  lock and PostgreSQL advisory-lock fallback.
+- Non-leader instances skip before querying candidate accounts, preventing
+  duplicate full-pool scans and account-lock contention.
+- Uses Grok-specific defaults of 32 concurrent refreshes and 25 QPS while other
+  OAuth providers retain the global defaults of 4 concurrent refreshes and 2 QPS.
+- Loads up to 1,000 candidates per cursor page and allows a 3,600-second cycle.
+- Adds a deterministic 0-60 minute Grok refresh-window offset per account to
+  spread synchronized expirations consistently across restarts and leader
+  handoffs.
+- Logs the effective high-capacity settings at service startup and cycle
+  duration on completion.
+
+Affected files:
+
+- `backend/internal/config/config.go`
+- `backend/internal/service/grok_token_refresher.go`
+- `backend/internal/service/token_refresh_service.go`
+- `backend/internal/service/wire.go`
+- `backend/cmd/server/wire_gen.go`
+- `deploy/config.example.yaml`
+- `GROK_TOKEN_REFRESH.md`
+
+Upgrade notes:
+
+- Preserve the `LeaderLockCache`/DB injection in `ProvideTokenRefreshService`.
+- Preserve the Grok-specific QPS/concurrency overrides so scaling Grok does not
+  increase refresh traffic for every OAuth provider.
+- Re-run Wire generation after changing the provider signature.
+
 ## v0.1.161 Merge Decisions
 
 - Adopted the official ingress-rejection aggregation, distributed API-key auth
