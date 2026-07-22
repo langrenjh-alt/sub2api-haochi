@@ -1,15 +1,15 @@
-# Local Changes Against Official sub2api v0.1.161
+# Local Changes Against Official sub2api v0.1.162
 
 This repository includes official `Wei-Shaw/sub2api` through release tag
-`v0.1.161` at commit `19149ca19`.
+`v0.1.162` at commit `34b7a5ad7`.
 
-- Upstream release commit: `19149ca19` (`v0.1.161`)
-- Upstream merge target: `v0.1.161^{}` (`19149ca19`)
+- Upstream release commit: `34b7a5ad7` (`v0.1.162`)
+- Upstream merge target: `v0.1.162^{}` (`34b7a5ad7`)
 - Working branch: `merge-user-changes-v0.1.161`
 - Original local change bundle: `E:\号池sub2api\改动`
 - Original local commits: `f1a65550`, `66701c1c`, `46781d3a`
-- Last upstream merge: 2026-07-18 (`origin/main@b1a6b8026` -> `v0.1.161@19149ca19`)
-- Fork build version: `backend/cmd/server/VERSION` is `0.1.161`; the release tag still contains `0.1.160`, so the fork advances it explicitly.
+- Last upstream merge: 2026-07-22 (`v0.1.162@34b7a5ad7`)
+- Fork build version: `backend/cmd/server/VERSION` is `0.1.162`.
 - Purpose: preserve local behavior when upgrading to a newer official release.
 
 ## Kiro and Compatibility File List
@@ -280,6 +280,30 @@ Upgrade notes:
 - Preserve the Grok-specific QPS/concurrency overrides so scaling Grok does not
   increase refresh traffic for every OAuth provider.
 - Re-run Wire generation after changing the provider signature.
+
+## v0.1.162 Merge Decisions
+
+- Adopted official forwarded-client-IP/trusted-proxy hardening, image storage
+  settings, admin backup integration, and the remaining release changes.
+- Combined official Anthropic `stop_reason: null`, encrypted reasoning
+  `signature_delta`, and non-streaming JSON response fixes with the local
+  missing-`response.created`, multi-part reasoning, late tool-event, and
+  internal web-search lifecycle guards.
+- Kept every Grok Chat Completions ingress request on `/v1/responses`, including
+  API-key accounts and requests without a cache identity; retained the local
+  top-level `reasoning_effort` compatibility path.
+- Adopted official Trae fields, service-tier normalization, stricter function
+  schemas/tool history checks, converted Responses cache intent, Codex Lite
+  `additional_tools` promotion, and unified request-level cache routing.
+- Preserved client function declarations and added only non-conflicting native
+  `web_search`/`x_search` route markers for known-Free OAuth accounts. This
+  retains the local cache-capable Free model routing without rewriting client
+  tool semantics.
+- Preserved the local Grok token-refresh capacity defaults, OpenAI `403`
+  scheduling policy, empty-response retry behavior, Kiro balance/redaction,
+  public capacity pools, and frontend lifecycle/batch-processing protections.
+- Advanced `backend/cmd/server/VERSION` to `0.1.162` because the official tag
+  still contains the previous source fallback version.
 
 ## v0.1.161 Merge Decisions
 

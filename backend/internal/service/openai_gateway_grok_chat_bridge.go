@@ -11,6 +11,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -22,6 +23,7 @@ const (
 var grokStandardChatResponsesBridgeTopLevelFields = map[string]struct{}{
 	"model":                 {},
 	"messages":              {},
+	"instructions":          {},
 	"stream":                {},
 	"stream_options":        {},
 	"max_tokens":            {},
@@ -32,6 +34,7 @@ var grokStandardChatResponsesBridgeTopLevelFields = map[string]struct{}{
 	"presencePenalty":       {},
 	"frequency_penalty":     {},
 	"frequencyPenalty":      {},
+	"stop":                  {},
 	"prompt_cache_key":      {},
 	"tools":                 {},
 	"tool_choice":           {},
@@ -39,6 +42,8 @@ var grokStandardChatResponsesBridgeTopLevelFields = map[string]struct{}{
 	"function_call":         {},
 	"parallel_tool_calls":   {},
 	"reasoning_effort":      {},
+	"response_format":       {},
+	"service_tier":          {},
 }
 
 // grokChatResponsesBridgeEligibility reports how closely a Chat Completions
@@ -50,10 +55,10 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 		return false, "invalid_json"
 	}
 
-	if _, exists := root["stop"]; exists {
+	if raw, exists := root["stop"]; exists && !grokChatJSONNull(raw) {
 		return false, "unsupported_stop"
 	}
-	if raw, exists := root["reasoning_effort"]; exists {
+	if raw, exists := root["reasoning_effort"]; exists && !grokChatJSONNull(raw) {
 		var effort string
 		if json.Unmarshal(raw, &effort) != nil {
 			return false, "invalid_reasoning_effort"
@@ -69,6 +74,24 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 			return false, reason
 		}
 	}
+	if raw, exists := root["instructions"]; exists && !grokChatJSONNull(raw) {
+		var instructions string
+		if json.Unmarshal(raw, &instructions) != nil {
+			return false, "invalid_instructions"
+		}
+	}
+	if raw, exists := root["response_format"]; exists && !grokChatJSONNull(raw) {
+		var responseFormat map[string]json.RawMessage
+		if json.Unmarshal(raw, &responseFormat) != nil || responseFormat == nil {
+			return false, "invalid_response_format"
+		}
+	}
+	if raw, exists := root["service_tier"]; exists && !grokChatJSONNull(raw) {
+		var serviceTier string
+		if json.Unmarshal(raw, &serviceTier) != nil {
+			return false, "invalid_service_tier"
+		}
+	}
 	if raw, exists := root["functions"]; exists && !grokChatNullOrEmptyArray(raw) {
 		return false, "unsupported_functions"
 	}
@@ -79,7 +102,7 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 		if grokStandardChatToolChoiceRequiresTools(raw) {
 			tools, exists := root["tools"]
 			if !exists || grokChatNullOrEmptyArray(tools) {
-				return false, "unsupported_tool_choice"
+				return false, "required_tool_choice_without_tools"
 			}
 		}
 	}
@@ -206,15 +229,13 @@ func grokStandardChatFunctionToolsEligible(raw json.RawMessage) (bool, string) {
 				return false, "invalid_tool_function_description"
 			}
 		}
-		if value, exists := function["parameters"]; exists {
-			var parameters map[string]any
-			if json.Unmarshal(value, &parameters) != nil || parameters == nil {
-				return false, "invalid_tool_function_parameters"
-			}
+		var parameters map[string]json.RawMessage
+		if value, exists := function["parameters"]; !exists || json.Unmarshal(value, &parameters) != nil || parameters == nil {
+			return false, "invalid_tool_function_parameters"
 		}
 		if value, exists := function["strict"]; exists {
-			var strict *bool
-			if json.Unmarshal(value, &strict) != nil || strict == nil {
+			var strict bool
+			if json.Unmarshal(value, &strict) != nil {
 				return false, "invalid_tool_function_strict"
 			}
 		}
@@ -398,9 +419,18 @@ func grokStandardChatToolCallsEligible(raw json.RawMessage) (bool, string) {
 		return false, ""
 	}
 	for _, call := range calls {
+		if call == nil {
+			return false, "invalid_tool_call"
+		}
 		for field := range call {
-			if field != "id" && field != "type" && field != "function" {
+			if field != "id" && field != "type" && field != "function" && field != "index" {
 				return false, "unsafe_tool_call_field_" + field
+			}
+		}
+		if value, exists := call["index"]; exists {
+			var index *int
+			if json.Unmarshal(value, &index) != nil || (index != nil && *index < 0) {
+				return false, "invalid_tool_call_index"
 			}
 		}
 		var id, callType string
@@ -423,7 +453,7 @@ func grokStandardChatToolCallsEligible(raw json.RawMessage) (bool, string) {
 		if value, exists := function["name"]; !exists || json.Unmarshal(value, &name) != nil || strings.TrimSpace(name) == "" {
 			return false, "invalid_tool_call_function_name"
 		}
-		if value, exists := function["arguments"]; !exists || json.Unmarshal(value, &arguments) != nil {
+		if value, exists := function["arguments"]; !exists || json.Unmarshal(value, &arguments) != nil || !json.Valid([]byte(arguments)) {
 			return false, "invalid_tool_call_arguments"
 		}
 	}
@@ -481,6 +511,10 @@ func grokChatNullOrNone(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &value) == nil && strings.EqualFold(strings.TrimSpace(value), "none")
 }
 
+func grokChatJSONNull(raw json.RawMessage) bool {
+	return strings.TrimSpace(string(raw)) == "null"
+}
+
 func grokChatCacheIntentBody(body []byte) ([]byte, error) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil {
@@ -489,6 +523,25 @@ func grokChatCacheIntentBody(body []byte) ([]byte, error) {
 	for _, field := range []string{"tools", "tool_choice", "functions", "function_call"} {
 		delete(root, field)
 	}
+	return json.Marshal(root)
+}
+
+func grokChatResponsesCacheIntentBody(body []byte) ([]byte, error) {
+	// Empty Chat tools are omitted by the converter. In that case auto/none is
+	// a semantic no-op and must not suppress the normal tool-free cache route.
+	// Non-empty converted Responses tools remain intact for routing decisions.
+	if gjson.GetBytes(body, "tools").Exists() {
+		return append([]byte(nil), body...), nil
+	}
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.Exists() || choice.Type != gjson.String || (choice.String() != "auto" && choice.String() != "none") {
+		return append([]byte(nil), body...), nil
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(body, &root); err != nil {
+		return nil, err
+	}
+	delete(root, "tool_choice")
 	return json.Marshal(root)
 }
 
@@ -555,6 +608,9 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	}
 	responsesReq.Model = upstreamModel
 	responsesReq.Stream = true
+	// Keep Chat and native Responses paths aligned for service_tier aliases
+	// such as "fast" -> "priority"; unknown values are omitted.
+	normalizeResponsesRequestServiceTier(responsesReq)
 	// xAI's Grok CLI Responses endpoint consumes the Chat-compatible top-level
 	// reasoning_effort field. The generic OpenAI converter emits
 	// reasoning.effort instead, which the endpoint accepts but does not apply.
@@ -577,19 +633,21 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 			return nil, fmt.Errorf("preserve grok chat reasoning effort: %w", err)
 		}
 	}
+	// Preserve the converted Responses intent before Grok capability
+	// sanitization so cache routing sees actual converted function tools.
+	intentBody, err := grokChatResponsesCacheIntentBody(responsesBody)
+	if err != nil {
+		return nil, fmt.Errorf("normalize grok responses bridge cache intent: %w", err)
+	}
 	responsesBody, err = patchGrokResponsesBody(responsesBody, upstreamModel)
 	if err != nil {
 		return nil, fmt.Errorf("patch grok responses bridge request: %w", err)
-	}
-	intentBody, err := grokChatCacheIntentBody(body)
-	if err != nil {
-		return nil, fmt.Errorf("normalize grok responses bridge tool intent: %w", err)
 	}
 	responsesBody, err = applyGrokResponsesCacheIdentity(responsesBody, intentBody, cacheIdentity, account.IsGrokOAuth())
 	if err != nil {
 		return nil, fmt.Errorf("apply grok responses bridge cache identity: %w", err)
 	}
-	responsesBody, err = applyGrokFreeMessagesFunctionToolCacheRoute(responsesBody, responsesBody, account, cacheIdentity)
+	responsesBody, err = applyGrokFreeRequestToolCacheRoute(c, responsesBody, intentBody, account, cacheIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("apply grok responses bridge function-tool cache route: %w", err)
 	}
