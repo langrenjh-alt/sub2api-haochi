@@ -2552,7 +2552,7 @@ func TestForwardAsAnthropicForGrokClaudeCodeTurnsKeepCachePrefix(t *testing.T) {
 		"system":"You are Claude Code. Keep the project prefix stable.",
 		"messages":[
 			{"role":"user","content":"Inspect the repository."},
-			{"role":"assistant","content":"The repository is ready."},
+			{"role":"assistant","content":[{"type":"thinking","thinking":"I inspected the repository.","signature":"foreign-grok-signature"},{"type":"text","text":"The repository is ready."}]},
 			{"role":"user","content":"Now run the focused tests."}
 		],
 		"tools":[
@@ -2599,6 +2599,7 @@ func TestForwardAsAnthropicForGrokClaudeCodeTurnsKeepCachePrefix(t *testing.T) {
 	}
 
 	firstBody, secondBody := upstream.bodies[0], upstream.bodies[1]
+	require.NotContains(t, string(secondBody), "foreign-grok-signature")
 	firstIdentity := gjson.GetBytes(firstBody, "prompt_cache_key").String()
 	secondIdentity := gjson.GetBytes(secondBody, "prompt_cache_key").String()
 	require.NotEmpty(t, firstIdentity)
@@ -2614,6 +2615,9 @@ func TestForwardAsAnthropicForGrokClaudeCodeTurnsKeepCachePrefix(t *testing.T) {
 
 	firstInput := gjson.GetBytes(firstBody, "input").Array()
 	secondInput := gjson.GetBytes(secondBody, "input").Array()
+	for _, item := range secondInput {
+		require.False(t, item.Get("encrypted_content").Exists(), "historical Grok input must not replay encrypted reasoning")
+	}
 	require.Len(t, firstInput, 2)
 	require.Greater(t, len(secondInput), len(firstInput))
 	for index := range firstInput {

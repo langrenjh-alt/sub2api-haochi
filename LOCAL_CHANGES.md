@@ -48,6 +48,9 @@ Added files:
 - Raw Chat passthrough forwards upstream SSE comments immediately instead of
   staging them with semantic output.
 - Silent-refusal failover remains allowed after heartbeat-only writes.
+- Claude Code thinking signatures remain available in client responses, but
+  historical signatures are removed before rebuilding Grok input because xAI
+  encrypted reasoning is not portable across accounts/cache identities.
 
 This prevents cascaded `sub2api -> sub2api -> Cloudflare` requests from idling
 past Cloudflare's 120-second proxy read timeout during long Grok generations.
