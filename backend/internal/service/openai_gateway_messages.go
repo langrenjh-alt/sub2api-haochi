@@ -42,6 +42,16 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	}
 
 	startTime := time.Now()
+	// v0.1.162 began replaying Anthropic thinking signatures as Responses
+	// reasoning.encrypted_content. Those signatures are scoped to the upstream
+	// response/cache identity and are not portable across Grok accounts. Keep
+	// the signature in the client-facing response, but omit it when rebuilding
+	// Grok input so a later Claude Code turn cannot stall on foreign ciphertext.
+	if account.Platform == PlatformGrok {
+		if strippedBody, stripped := stripAnthropicThinkingSignatures(body); stripped {
+			body = strippedBody
+		}
+	}
 
 	// 1. Parse Anthropic request
 	var anthropicReq apicompat.AnthropicRequest
@@ -470,7 +480,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			st := responsesReq.ServiceTier
 			result.ServiceTier = &st
 		}
-		if responsesReq.Reasoning != nil && responsesReq.Reasoning.Effort != "" {
+		if account.Platform == PlatformGrok {
+			result.ReasoningEffort = extractOpenAIReasoningEffortFromBody(responsesBody, upstreamModel, billingModel, originalModel)
+		} else if responsesReq.Reasoning != nil && responsesReq.Reasoning.Effort != "" {
 			re := responsesReq.Reasoning.Effort
 			result.ReasoningEffort = &re
 		}
@@ -816,6 +828,11 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	firstChunk := true
 	clientDisconnected := false
 	clientOutputStarted := false
+	lastDownstreamWriteAt := time.Now()
+	flushDownstream := func() {
+		c.Writer.Flush()
+		lastDownstreamWriteAt = time.Now()
+	}
 	var streamFailoverErr error
 	var streamNonFailoverErr error
 
@@ -903,7 +920,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 							clientMsg = "Request blocked by upstream cyber-security policy"
 						}
 						if _, err := fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE("invalid_request_error", clientMsg)); err == nil {
-							c.Writer.Flush()
+							flushDownstream()
 						}
 						clientDisconnected = true
 					}
@@ -937,7 +954,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 					} else {
 						writeStreamHeaders()
 						if _, err := fmt.Fprint(c.Writer, buildAnthropicStreamErrorSSE(errType, errMsg)); err == nil {
-							c.Writer.Flush()
+							flushDownstream()
 						}
 					}
 				}
@@ -970,7 +987,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			}
 		}
 		if len(events) > 0 && !clientDisconnected {
-			c.Writer.Flush()
+			flushDownstream()
 		}
 		return isTerminalEvent
 	}
@@ -1000,7 +1017,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				clientOutputStarted = true
 			}
 			if !clientDisconnected {
-				c.Writer.Flush()
+				flushDownstream()
 			}
 		}
 		return resultWithUsage(), nil
@@ -1109,7 +1126,6 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	if keepaliveTicker != nil {
 		keepaliveCh = keepaliveTicker.C
 	}
-	lastDataAt := time.Now()
 	var parser openAICompatSSEFrameParser
 
 	for {
@@ -1131,7 +1147,6 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				handleScanErr(ev.err)
 				return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", ev.err)
 			}
-			lastDataAt = time.Now()
 			line := ev.line
 			if isOpenAICompatDoneSentinelLine(line) {
 				return missingTerminalErr()
@@ -1163,7 +1178,10 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 			if clientDisconnected {
 				continue
 			}
-			if time.Since(lastDataAt) < keepaliveInterval {
+			// Cascaded gateways commonly consume upstream SSE comments instead of
+			// forwarding them. Heartbeats must follow downstream idle time so an
+			// upstream ping cannot starve the client-facing Anthropic ping.
+			if time.Since(lastDownstreamWriteAt) < keepaliveInterval {
 				continue
 			}
 			// Send Anthropic-format ping event
@@ -1177,7 +1195,7 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 				continue
 			}
 			clientOutputStarted = true
-			c.Writer.Flush()
+			flushDownstream()
 		}
 	}
 }

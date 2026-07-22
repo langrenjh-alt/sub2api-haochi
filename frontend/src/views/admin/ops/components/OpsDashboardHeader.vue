@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Select from '@/components/common/Select.vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
@@ -24,6 +24,7 @@ interface Props {
   thresholds?: OpsMetricThresholds | null // 阈值配置
   autoRefreshEnabled?: boolean
   autoRefreshCountdown?: number
+  refreshToken?: number
   fullscreen?: boolean
   customStartTime?: string | null
   customEndTime?: string | null
@@ -51,6 +52,8 @@ const { t } = useI18n()
 const adminSettingsStore = useAdminSettingsStore()
 
 const realtimeWindow = ref<RealtimeWindow>('1min')
+let suppressNextRealtimeWindowLoad = false
+let dashboardHeaderActive = true
 
 const overview = computed(() => props.overview ?? null)
 const systemMetrics = computed(() => overview.value?.system_metrics ?? null)
@@ -79,10 +82,12 @@ watch(
   () => props.timeRange,
   () => {
     // The realtime window must be inside the toolbar window; reset to keep UX predictable.
+    if (realtimeWindow.value === '1min') return
+    suppressNextRealtimeWindowLoad = true
     realtimeWindow.value = '1min'
-    // Keep realtime traffic consistent with toolbar changes even when the window is already 1min.
-    loadRealtimeTrafficSummary()
-  }
+    invalidateRealtimeTrafficRequest()
+  },
+  { flush: 'sync' }
 )
 
 // --- Filters ---
@@ -154,8 +159,10 @@ watch(
 onMounted(async () => {
   try {
     const list = await adminAPI.groups.getAll()
+    if (!dashboardHeaderActive) return
     groups.value = list.map((g) => ({ id: g.id, name: g.name, platform: g.platform }))
   } catch (e) {
+    if (!dashboardHeaderActive) return
     console.error('[OpsDashboardHeader] Failed to load groups', e)
     groups.value = []
   }
@@ -280,6 +287,21 @@ const totalTokensLabel = computed(() => formatNumber(overview.value?.token_consu
 
 const realtimeTrafficSummary = ref<OpsRealtimeTrafficSummary | null>(null)
 const realtimeTrafficLoading = ref(false)
+let realtimeTrafficRequestSequence = 0
+type RealtimeTrafficResponse = Awaited<ReturnType<typeof opsAPI.getRealtimeTrafficSummary>>
+const realtimeTrafficRequests = new Map<string, Promise<RealtimeTrafficResponse>>()
+
+function invalidateRealtimeTrafficRequest(clearSummary = true) {
+  realtimeTrafficRequestSequence += 1
+  realtimeTrafficLoading.value = false
+  if (clearSummary) realtimeTrafficSummary.value = null
+}
+
+onUnmounted(() => {
+  dashboardHeaderActive = false
+  invalidateRealtimeTrafficRequest(false)
+  realtimeTrafficRequests.clear()
+})
 
 function makeZeroRealtimeTrafficSummary(): OpsRealtimeTrafficSummary {
   const now = new Date().toISOString()
@@ -294,58 +316,97 @@ function makeZeroRealtimeTrafficSummary(): OpsRealtimeTrafficSummary {
   }
 }
 
+function getRealtimeTrafficRequest(
+  requestKey: string,
+  requestWindow: RealtimeWindow,
+  requestPlatform: string,
+  requestGroupId: number | null,
+): Promise<RealtimeTrafficResponse> {
+  const existingRequest = realtimeTrafficRequests.get(requestKey)
+  if (existingRequest) return existingRequest
+
+  const request = opsAPI.getRealtimeTrafficSummary(requestWindow, requestPlatform, requestGroupId)
+  let trackedRequest!: Promise<RealtimeTrafficResponse>
+  trackedRequest = request.finally(() => {
+    if (realtimeTrafficRequests.get(requestKey) === trackedRequest) {
+      realtimeTrafficRequests.delete(requestKey)
+    }
+  })
+  realtimeTrafficRequests.set(requestKey, trackedRequest)
+  return trackedRequest
+}
+
 async function loadRealtimeTrafficSummary() {
-  if (realtimeTrafficLoading.value) return
+  const requestWindow = realtimeWindow.value
+  const requestPlatform = props.platform
+  const requestGroupId = props.groupId
+  const requestKey = `${requestWindow}\n${requestPlatform}\n${requestGroupId ?? ''}`
   if (!adminSettingsStore.opsRealtimeMonitoringEnabled) {
+    invalidateRealtimeTrafficRequest()
     realtimeTrafficSummary.value = makeZeroRealtimeTrafficSummary()
     return
   }
+
+  const requestSequence = ++realtimeTrafficRequestSequence
+  const isCurrentRequest = () =>
+    dashboardHeaderActive &&
+    requestSequence === realtimeTrafficRequestSequence &&
+    requestWindow === realtimeWindow.value &&
+    requestPlatform === props.platform &&
+    requestGroupId === props.groupId
+
   realtimeTrafficLoading.value = true
   try {
-    const res = await opsAPI.getRealtimeTrafficSummary(realtimeWindow.value, props.platform, props.groupId)
+    const res = await getRealtimeTrafficRequest(requestKey, requestWindow, requestPlatform, requestGroupId)
+    if (!isCurrentRequest()) return
     if (res && res.enabled === false) {
       adminSettingsStore.setOpsRealtimeMonitoringEnabledLocal(false)
     }
     realtimeTrafficSummary.value = res?.summary ?? null
   } catch (err) {
+    if (!isCurrentRequest()) return
     console.error('[OpsDashboardHeader] Failed to load realtime traffic summary', err)
     realtimeTrafficSummary.value = null
   } finally {
-    realtimeTrafficLoading.value = false
+    if (isCurrentRequest()) {
+      realtimeTrafficLoading.value = false
+    }
   }
 }
 
 watch(
-  () => [realtimeWindow.value, props.platform, props.groupId] as const,
+  () => realtimeWindow.value,
   () => {
-    loadRealtimeTrafficSummary()
+    if (suppressNextRealtimeWindowLoad) {
+      suppressNextRealtimeWindowLoad = false
+      return
+    }
+    void loadRealtimeTrafficSummary()
   },
-  { immediate: true }
+  { immediate: true, flush: 'sync' }
+)
+
+watch(
+  () => [props.platform, props.groupId] as const,
+  () => {
+    invalidateRealtimeTrafficRequest()
+  },
+  { flush: 'sync' }
 )
 
 watch(
   () => adminSettingsStore.opsRealtimeMonitoringEnabled,
-  (enabled) => {
-    if (!enabled) {
-      // Keep UI stable when realtime monitoring is turned off.
-      realtimeTrafficSummary.value = makeZeroRealtimeTrafficSummary()
-    } else {
-      loadRealtimeTrafficSummary()
-    }
-  },
-  { immediate: true }
+  () => {
+    void loadRealtimeTrafficSummary()
+  }
 )
 
-// Realtime traffic refresh follows the parent (OpsDashboard) refresh cadence.
+// Realtime traffic refresh follows completed parent dashboard refreshes.
 watch(
-  () => [props.autoRefreshEnabled, props.autoRefreshCountdown, props.loading] as const,
-  ([enabled, countdown, loading]) => {
-    if (!enabled) return
-    if (loading) return
-    // Treat countdown reset (or reaching 0) as a refresh boundary.
-    if (countdown === 0) {
-      loadRealtimeTrafficSummary()
-    }
+  () => props.refreshToken,
+  (refreshToken, previousRefreshToken) => {
+    if (refreshToken === previousRefreshToken) return
+    void loadRealtimeTrafficSummary()
   }
 )
 
@@ -854,7 +915,6 @@ function openJobsDetails() {
 }
 
 function handleToolbarRefresh() {
-  loadRealtimeTrafficSummary()
   emit('refresh')
 }
 </script>

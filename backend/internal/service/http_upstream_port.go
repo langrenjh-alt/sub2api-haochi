@@ -22,3 +22,10 @@ type HTTPUpstream interface {
 	// 支持按账号绑定的数据库 profile 或内置默认 profile。
 	DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error)
 }
+
+// HTTPUpstreamLifecycle is an optional lifecycle implemented by the concrete
+// pooled upstream. Keeping it separate avoids forcing every HTTPUpstream test
+// double to implement shutdown behavior.
+type HTTPUpstreamLifecycle interface {
+	Stop()
+}

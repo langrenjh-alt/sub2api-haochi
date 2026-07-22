@@ -8,7 +8,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestAppendMissingGrokFreeCacheNativeTools_PureClientFunctionNoInject(t *testing.T) {
+func TestAppendMissingGrokFreeCacheNativeTools_PureClientFunctionInjectsRouteMarkers(t *testing.T) {
 	body := []byte(`{
 		"model": "grok-4.5",
 		"tools": [
@@ -21,14 +21,18 @@ func TestAppendMissingGrokFreeCacheNativeTools_PureClientFunctionNoInject(t *tes
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(result, "tools").Array()
+	require.Len(t, tools, 3)
+	require.Equal(t, "function", tools[0].Get("type").String())
+	require.Equal(t, "view_image", tools[0].Get("name").String())
+	types := make(map[string]bool)
 	for _, tool := range tools {
-		toolType := tool.Get("type").String()
-		assert.NotEqual(t, "web_search", toolType, "should not inject web_search for pure client functions")
-		assert.NotEqual(t, "x_search", toolType, "should not inject x_search for pure client functions")
+		types[tool.Get("type").String()] = true
 	}
+	assert.True(t, types["web_search"], "web_search should select Grok's cache-capable route")
+	assert.True(t, types["x_search"], "x_search should select Grok's cache-capable route")
 }
 
-func TestAppendMissingGrokFreeCacheNativeTools_FunctionPlusWebSearchInjects(t *testing.T) {
+func TestAppendMissingGrokFreeCacheNativeTools_FunctionWebSearchIsPreservedAndComplemented(t *testing.T) {
 	body := []byte(`{
 		"model": "grok-4.5",
 		"tools": [
@@ -41,12 +45,15 @@ func TestAppendMissingGrokFreeCacheNativeTools_FunctionPlusWebSearchInjects(t *t
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(result, "tools").Array()
+	require.Len(t, tools, 3)
+	assert.Equal(t, "function", tools[1].Get("type").String())
+	assert.Equal(t, "web_search", tools[1].Get("name").String())
 	types := make(map[string]bool)
 	for _, tool := range tools {
 		types[tool.Get("type").String()] = true
 	}
-	assert.True(t, types["web_search"], "web_search should be present (converted from function)")
-	assert.True(t, types["x_search"], "x_search should be injected when web_search is present alongside client functions")
+	assert.False(t, types["web_search"], "client web_search must not be rewritten as a native tool")
+	assert.True(t, types["x_search"], "x_search should complement the client web_search function")
 }
 
 func TestAppendMissingGrokFreeCacheNativeTools_NativeSearchAlreadyPresent(t *testing.T) {
@@ -70,7 +77,7 @@ func TestAppendMissingGrokFreeCacheNativeTools_NativeSearchAlreadyPresent(t *tes
 	assert.True(t, types["x_search"], "x_search should be injected when web_search is already present")
 }
 
-func TestAppendMissingGrokFreeCacheNativeTools_MultipleFunctionsNoSearch(t *testing.T) {
+func TestAppendMissingGrokFreeCacheNativeTools_MultipleFunctionsInjectRouteMarkers(t *testing.T) {
 	body := []byte(`{
 		"model": "grok-4.5",
 		"tools": [
@@ -83,5 +90,11 @@ func TestAppendMissingGrokFreeCacheNativeTools_MultipleFunctionsNoSearch(t *test
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(result, "tools").Array()
-	require.Len(t, tools, 2, "no tools should be injected for pure client functions")
+	require.Len(t, tools, 4)
+	require.Equal(t, "function", tools[0].Get("type").String())
+	require.Equal(t, "view_image", tools[0].Get("name").String())
+	require.Equal(t, "function", tools[1].Get("type").String())
+	require.Equal(t, "read_file", tools[1].Get("name").String())
+	require.Equal(t, "web_search", tools[2].Get("type").String())
+	require.Equal(t, "x_search", tools[3].Get("type").String())
 }

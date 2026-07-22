@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/util/logredact"
+	"github.com/google/uuid"
 )
 
 // tokenRefreshTempUnschedDuration token 刷新重试耗尽后临时不可调度的持续时间
@@ -35,6 +37,8 @@ const (
 	defaultTokenRefreshCycleTimeout             = 4 * time.Minute
 	maxTokenRefreshCycleTimeout                 = time.Hour
 	defaultTokenRefreshCleanupTimeout           = 2 * time.Second
+	tokenRefreshLeaderLockSafetyMargin          = time.Minute
+	tokenRefreshLeaderLockKey                   = "oauth_token_refresh_cycle"
 )
 
 type tokenRefreshRegistration struct {
@@ -65,6 +69,9 @@ type TokenRefreshService struct {
 	tempUnschedCache TempUnschedCache // 用于清除 Redis 中的临时不可调度缓存
 	refreshAPI       *OAuthRefreshAPI // 统一刷新 API
 	runtimeBlocker   AccountRuntimeBlocker
+	lockCache        LeaderLockCache
+	db               *sql.DB
+	instanceID       string
 
 	// OpenAI privacy: 刷新成功后检查并设置 training opt-out
 	privacyClientFactory PrivacyClientFactory
@@ -113,6 +120,7 @@ func NewTokenRefreshService(
 		stopCh:           make(chan struct{}),
 		runCtx:           runCtx,
 		runCancel:        runCancel,
+		instanceID:       uuid.NewString(),
 	}
 	if pager, ok := accountRepo.(OAuthRefreshCandidatePager); ok {
 		s.candidatePager = pager
@@ -127,7 +135,7 @@ func NewTokenRefreshService(
 	if len(grokOAuthServices) > 0 {
 		grokOAuthService = grokOAuthServices[0]
 	}
-	grokRefresher := NewGrokTokenRefresher(grokOAuthService)
+	grokRefresher := NewGrokTokenRefresher(grokOAuthService, s.grokRefreshJitter())
 
 	// Each provider is registered exactly once. The same registry supplies both
 	// execution and repository eligibility, preventing future platform drift.
@@ -140,6 +148,19 @@ func NewTokenRefreshService(
 	}
 
 	return s
+}
+
+// SetLeaderLock injects the shared Redis lock and PostgreSQL fallback used to
+// ensure only one application instance scans OAuth refresh candidates per cycle.
+func (s *TokenRefreshService) SetLeaderLock(lockCache LeaderLockCache, db *sql.DB) {
+	if s == nil {
+		return
+	}
+	s.lockCache = lockCache
+	s.db = db
+	if s.instanceID == "" {
+		s.instanceID = uuid.NewString()
+	}
 }
 
 func (s *TokenRefreshService) eligiblePlatforms() []string {
@@ -211,6 +232,11 @@ func (s *TokenRefreshService) Start() {
 	slog.Info("token_refresh.service_started",
 		"check_interval_minutes", s.cfg.CheckIntervalMinutes,
 		"refresh_before_expiry_hours", s.cfg.RefreshBeforeExpiryHours,
+		"candidate_page_size", s.candidatePageSize(),
+		"grok_provider_concurrency", s.providerConcurrency(PlatformGrok),
+		"grok_provider_qps", s.providerQPS(PlatformGrok),
+		"grok_refresh_jitter", s.grokRefreshJitter(),
+		"cycle_timeout", s.cycleTimeout(),
 	)
 }
 
@@ -488,8 +514,24 @@ func (s *TokenRefreshService) processRefreshContext(parent context.Context) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, s.cycleTimeout())
+	cycleTimeout := s.cycleTimeout()
+	ctx, cancel := context.WithTimeout(parent, cycleTimeout)
 	defer cancel()
+
+	releaseLeader, leader := tryAcquireSingletonLeaderLock(
+		ctx,
+		s.lockCache,
+		s.db,
+		tokenRefreshLeaderLockKey,
+		s.instanceID,
+		cycleTimeout+tokenRefreshLeaderLockSafetyMargin,
+	)
+	if !leader {
+		slog.Debug("token_refresh.cycle_skipped_not_leader")
+		return
+	}
+	defer releaseLeader()
+	cycleStarted := time.Now()
 
 	pager := s.candidatePager
 	if pager == nil {
@@ -581,12 +623,14 @@ func (s *TokenRefreshService) processRefreshContext(parent context.Context) {
 		slog.Debug("token_refresh.cycle_completed",
 			"total", stats.total, "oauth", stats.oauth,
 			"needs_refresh", stats.needsRefresh, "refreshed", stats.refreshed,
-			"skipped", stats.skipped, "failed", stats.failed)
+			"skipped", stats.skipped, "failed", stats.failed,
+			"duration", time.Since(cycleStarted))
 	} else {
 		slog.Info("token_refresh.cycle_completed",
 			"total", stats.total, "oauth", stats.oauth,
 			"needs_refresh", stats.needsRefresh, "refreshed", stats.refreshed,
-			"skipped", stats.skipped, "failed", stats.failed)
+			"skipped", stats.skipped, "failed", stats.failed,
+			"duration", time.Since(cycleStarted))
 	}
 }
 
@@ -664,7 +708,7 @@ func (s *TokenRefreshService) processProviderAccounts(
 	}
 	jobs := make(chan *Account, len(accounts))
 	results := make(chan refreshResult, len(accounts))
-	workerCount := s.providerConcurrency()
+	workerCount := s.providerConcurrency(state.registration.platform)
 	if workerCount > len(accounts) {
 		workerCount = len(accounts)
 	}
@@ -717,18 +761,39 @@ func (s *TokenRefreshService) candidatePageSize() int {
 	return defaultTokenRefreshCandidatePageSize
 }
 
-func (s *TokenRefreshService) providerConcurrency() int {
-	if s.cfg != nil && s.cfg.ProviderConcurrency > 0 {
-		return min(s.cfg.ProviderConcurrency, maxTokenRefreshProviderConcurrency)
+func (s *TokenRefreshService) providerConcurrency(platform string) int {
+	if s.cfg != nil {
+		configured := s.cfg.ProviderConcurrency
+		if platform == PlatformGrok && s.cfg.GrokProviderConcurrency > 0 {
+			configured = s.cfg.GrokProviderConcurrency
+		}
+		if configured > 0 {
+			return min(configured, maxTokenRefreshProviderConcurrency)
+		}
 	}
 	return defaultTokenRefreshProviderConcurrency
 }
 
-func (s *TokenRefreshService) providerQPS() int {
-	if s.cfg != nil && s.cfg.ProviderQPS > 0 {
-		return min(s.cfg.ProviderQPS, maxTokenRefreshProviderQPS)
+func (s *TokenRefreshService) providerQPS(platform string) int {
+	if s.cfg != nil {
+		configured := s.cfg.ProviderQPS
+		if platform == PlatformGrok && s.cfg.GrokProviderQPS > 0 {
+			configured = s.cfg.GrokProviderQPS
+		}
+		if configured > 0 {
+			return min(configured, maxTokenRefreshProviderQPS)
+		}
 	}
 	return defaultTokenRefreshProviderQPS
+}
+
+func (s *TokenRefreshService) grokRefreshJitter() time.Duration {
+	if s.cfg == nil || s.cfg.GrokRefreshJitterMinutes <= 0 {
+		return 0
+	}
+	maxMinutes := int(maxGrokTokenRefreshJitter / time.Minute)
+	minutes := min(s.cfg.GrokRefreshJitterMinutes, maxMinutes)
+	return time.Duration(minutes) * time.Minute
 }
 
 // providerRateGate returns the process-local limiter shared by background
@@ -743,7 +808,7 @@ func (s *TokenRefreshService) providerRateGate(platform string) *tokenRefreshRat
 	if gate := s.providerGates[platform]; gate != nil {
 		return gate
 	}
-	gate := newTokenRefreshRateGate(s.providerQPS())
+	gate := newTokenRefreshRateGate(s.providerQPS(platform))
 	s.providerGates[platform] = gate
 	return gate
 }
@@ -761,7 +826,7 @@ func (s *TokenRefreshService) providerConcurrencyGate(platform string) *tokenRef
 	if gate := s.providerPools[platform]; gate != nil {
 		return gate
 	}
-	gate := newTokenRefreshConcurrencyGate(s.providerConcurrency())
+	gate := newTokenRefreshConcurrencyGate(s.providerConcurrency(platform))
 	s.providerPools[platform] = gate
 	return gate
 }

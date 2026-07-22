@@ -4,6 +4,7 @@ package service
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -309,4 +310,114 @@ func TestDigestSessionStore_SaveSameChainNoDelete(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, "uuid-1", uuid)
 	assert.Equal(t, int64(100), accountID)
+}
+
+func TestDigestSessionStore_LongChainPrefixMatch(t *testing.T) {
+	t.Parallel()
+
+	store := NewDigestSessionStore()
+	savedChain := buildLargeDigestChain(4000)
+	queryChain := buildLargeDigestChain(8000)
+	store.Save(1, "large-prefix", savedChain, "large-uuid", 42, "")
+
+	uuid, accountID, matchedChain, found := store.Find(1, "large-prefix", queryChain)
+
+	require.True(t, found)
+	assert.Equal(t, "large-uuid", uuid)
+	assert.Equal(t, int64(42), accountID)
+	assert.Equal(t, savedChain, matchedChain)
+}
+
+func TestDigestSessionStore_DelimiterBoundaries(t *testing.T) {
+	t.Parallel()
+
+	t.Run("consecutive delimiter", func(t *testing.T) {
+		store := NewDigestSessionStore()
+		store.Save(1, "prefix", "u:a-", "uuid", 1, "")
+
+		_, _, matchedChain, found := store.Find(1, "prefix", "u:a--m:b")
+
+		require.True(t, found)
+		assert.Equal(t, "u:a-", matchedChain)
+	})
+
+	t.Run("partial segment is not a prefix", func(t *testing.T) {
+		store := NewDigestSessionStore()
+		store.Save(1, "prefix", "u:a-m:b", "uuid", 1, "")
+
+		_, _, _, found := store.Find(1, "prefix", "u:a-m:bc")
+
+		assert.False(t, found)
+	})
+}
+
+func TestDigestSessionStore_LongMissAllocationsStayConstant(t *testing.T) {
+	store := NewDigestSessionStore()
+	shortChain := buildLargeDigestChain(32)
+	longChain := buildLargeDigestChain(8000)
+
+	shortAllocs := testing.AllocsPerRun(50, func() {
+		_, _, _, _ = store.Find(1, "allocation-prefix", shortChain)
+	})
+	longAllocs := testing.AllocsPerRun(50, func() {
+		_, _, _, _ = store.Find(1, "allocation-prefix", longChain)
+	})
+
+	assert.LessOrEqual(t, longAllocs, shortAllocs+1, "candidate prefixes should not allocate: short=%v long=%v", shortAllocs, longAllocs)
+}
+
+func TestOpenAICompatAnthropicDigest_LongestPrefixLargeChain(t *testing.T) {
+	t.Parallel()
+
+	service := &OpenAIGatewayService{}
+	account := &Account{ID: 77}
+	shortChain := buildLargeDigestChain(2000)
+	longChain := buildLargeDigestChain(4000)
+	queryChain := buildLargeDigestChain(8000)
+	service.bindOpenAICompatAnthropicDigestPromptCacheKey(account, 9, shortChain, "short-key", "")
+	service.bindOpenAICompatAnthropicDigestPromptCacheKey(account, 9, longChain, "long-key", "")
+
+	key, matchedChain := service.findOpenAICompatAnthropicDigestPromptCacheKey(account, 9, queryChain)
+
+	assert.Equal(t, "long-key", key)
+	assert.Equal(t, longChain, matchedChain)
+}
+
+func TestOpenAICompatAnthropicDigest_ExpiredLongPrefixFallsBack(t *testing.T) {
+	t.Parallel()
+
+	service := &OpenAIGatewayService{}
+	account := &Account{ID: 88}
+	shortChain := "u:first-a:reply"
+	longChain := shortChain + "-u:second"
+	queryChain := longChain + "-a:second"
+	service.bindOpenAICompatAnthropicDigestPromptCacheKey(account, 10, shortChain, "short-key", "")
+
+	ns := openAICompatAnthropicDigestNamespace(account, 10)
+	service.openaiCompatAnthropicDigestSessions.Store(
+		ns+longChain,
+		openAICompatAnthropicDigestBinding{
+			PromptCacheKey: "expired-key",
+			ExpiresAt:      time.Now().Add(-time.Second),
+		},
+	)
+
+	key, matchedChain := service.findOpenAICompatAnthropicDigestPromptCacheKey(account, 10, queryChain)
+
+	assert.Equal(t, "short-key", key)
+	assert.Equal(t, shortChain, matchedChain)
+	_, exists := service.openaiCompatAnthropicDigestSessions.Load(ns + longChain)
+	assert.False(t, exists)
+}
+
+func buildLargeDigestChain(parts int) string {
+	var builder strings.Builder
+	builder.Grow(parts * 11)
+	for i := 0; i < parts; i++ {
+		if i > 0 {
+			builder.WriteByte('-')
+		}
+		_, _ = fmt.Fprintf(&builder, "u:%08x", i)
+	}
+	return builder.String()
 }

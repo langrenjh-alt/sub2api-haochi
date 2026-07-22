@@ -130,6 +130,10 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 			upstreamBody = bridgedBody
 			addOpenAIUsage(&bridgeUsage, usage)
 		}
+		upstreamBody, err = sanitizeGrokRawChatBody(upstreamBody)
+		if err != nil {
+			return nil, fmt.Errorf("sanitize Grok chat request: %w", err)
+		}
 	}
 
 	if clientStream {
@@ -174,21 +178,17 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
 		if account.Platform == PlatformGrok {
-			kind := "http_error"
-			if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
-				kind = "failover"
-			}
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 				Platform:           account.Platform,
 				AccountID:          account.ID,
 				AccountName:        account.Name,
 				UpstreamStatusCode: resp.StatusCode,
 				UpstreamRequestID:  firstNonEmpty(resp.Header.Get("x-request-id"), resp.Header.Get("xai-request-id")),
-				Kind:               kind,
+				Kind:               "failover",
 				Message:            upstreamMsg,
 			})
 			s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
-			if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
+			if s.shouldFailoverUpstreamError(resp.StatusCode) {
 				return nil, &UpstreamFailoverError{
 					StatusCode:             resp.StatusCode,
 					ResponseBody:           respBody,
@@ -221,6 +221,34 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		result.UpstreamEndpoint = grokChatRawEndpoint
 	}
 	return result, forwardErr
+}
+
+func sanitizeGrokRawChatBody(body []byte) ([]byte, error) {
+	out, err := sanitizeGrokPenaltyFields(body)
+	if err != nil {
+		return nil, err
+	}
+
+	tools := gjson.GetBytes(out, "tools")
+	if tools.Exists() && tools.Type != gjson.Null && (!tools.IsArray() || len(tools.Array()) > 0) {
+		return out, nil
+	}
+	choice := gjson.GetBytes(out, "tool_choice")
+	if !choice.Exists() {
+		return out, nil
+	}
+	if choice.Type == gjson.Null {
+		return sjson.DeleteBytes(out, "tool_choice")
+	}
+	if choice.Type != gjson.String {
+		return out, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(choice.String())) {
+	case "auto", "none":
+		return sjson.DeleteBytes(out, "tool_choice")
+	default:
+		return out, nil
+	}
 }
 
 func (s *OpenAIGatewayService) rawChatCompletionsURL(account *Account) (string, error) {
@@ -263,6 +291,25 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	clientOutputStarted := false
 	pendingLines := make([]string, 0, 8)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
+	upstreamCommentOpen := false
+
+	writeUpstreamCommentLine := func(line string) {
+		if clientDisconnected {
+			return
+		}
+		writeStreamHeaders()
+		if _, werr := c.Writer.WriteString(line + "\n"); werr != nil {
+			clientDisconnected = true
+			logger.L().Debug("openai chat_completions raw: client disconnected while forwarding upstream keepalive",
+				zap.Error(werr),
+				zap.String("request_id", requestID),
+			)
+			return
+		}
+		if line == "" {
+			c.Writer.Flush()
+		}
+	}
 
 	writeLine := func(line string) {
 		if clientDisconnected {
@@ -299,6 +346,21 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	for scanner.Scan() {
 		line := scanner.Text()
 		refusalDetector.ObserveSSELine(line)
+		// SSE comments carry no completion content. Forward them immediately
+		// instead of staging them with large-request silent-refusal candidates;
+		// otherwise a cascaded gateway can swallow every upstream heartbeat and
+		// leave its client-facing proxy idle until it returns a 524.
+		if strings.HasPrefix(line, ":") {
+			upstreamCommentOpen = true
+			writeUpstreamCommentLine(line)
+			continue
+		}
+		if upstreamCommentOpen && line == "" {
+			upstreamCommentOpen = false
+			writeUpstreamCommentLine(line)
+			continue
+		}
+		upstreamCommentOpen = false
 		if payload, ok := extractOpenAISSEDataLine(line); ok {
 			trimmedPayload := strings.TrimSpace(payload)
 			if trimmedPayload != "[DONE]" {

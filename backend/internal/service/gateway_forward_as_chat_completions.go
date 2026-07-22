@@ -237,22 +237,22 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 
 	var finalResp *apicompat.AnthropicResponse
 	var usage ClaudeUsage
+	var contentDeltas anthropicContentDeltaBuffers
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		// SSE 规范允许 `event:xxx`（冒号后无空格）：Kimi 等 Anthropic 兼容上游
-		// 返回紧凑格式，严格匹配 "event: " 会丢弃全部事件（#4653 同根因）。
-		if _, ok := extractOpenAISSEEventLine(line); !ok {
+		if !strings.HasPrefix(line, "event: ") {
 			continue
 		}
 
 		if !scanner.Scan() {
 			break
 		}
-		payload, ok := extractOpenAISSEDataLine(scanner.Text())
-		if !ok {
+		dataLine := scanner.Text()
+		if !strings.HasPrefix(dataLine, "data: ") {
 			continue
 		}
+		payload := dataLine[6:]
 
 		var event apicompat.AnthropicStreamEvent
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {
@@ -280,16 +280,12 @@ func (s *GatewayService) handleCCBufferedFromAnthropic(
 		if event.Type == "content_block_delta" && event.Delta != nil && finalResp != nil && event.Index != nil {
 			idx := *event.Index
 			if idx < len(finalResp.Content) {
-				switch event.Delta.Type {
-				case "text_delta":
-					finalResp.Content[idx].Text += event.Delta.Text
-				case "thinking_delta":
-					finalResp.Content[idx].Thinking += event.Delta.Thinking
-				case "input_json_delta":
-					finalResp.Content[idx].Input = appendRawJSON(finalResp.Content[idx].Input, event.Delta.PartialJSON)
-				}
+				contentDeltas.append(finalResp.Content, idx, event.Delta)
 			}
 		}
+	}
+	if finalResp != nil {
+		contentDeltas.flush(finalResp.Content)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -448,18 +444,18 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		// 与缓冲路径一致：接受 SSE 紧凑格式（冒号后无空格，#4653 同根因）。
-		if _, ok := extractOpenAISSEEventLine(line); !ok {
+		if !strings.HasPrefix(line, "event: ") {
 			continue
 		}
 
 		if !scanner.Scan() {
 			break
 		}
-		payload, ok := extractOpenAISSEDataLine(scanner.Text())
-		if !ok {
+		dataLine := scanner.Text()
+		if !strings.HasPrefix(dataLine, "data: ") {
 			continue
 		}
+		payload := dataLine[6:]
 
 		var event apicompat.AnthropicStreamEvent
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {

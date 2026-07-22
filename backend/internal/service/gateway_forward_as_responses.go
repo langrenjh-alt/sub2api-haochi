@@ -222,15 +222,78 @@ func mergeAnthropicUsage(dst *ClaudeUsage, src apicompat.AnthropicUsage) {
 	}
 }
 
-// parseAnthropicSSEField parses an SSE field line in the form "field:value" or "field: value".
-// According to the SSE spec (https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation),
-// the space after the colon is optional. This function handles both formats.
-func parseAnthropicSSEField(line, field string) (string, bool) {
-	prefix := field + ":"
-	if !strings.HasPrefix(line, prefix) {
-		return "", false
+// anthropicContentDeltaBuffers accumulates streamed content without copying
+// the complete block for every delta. Buffers are created only for fields that
+// actually receive deltas, then materialized once after the upstream closes.
+type anthropicContentDeltaBuffers struct {
+	text     map[int]*strings.Builder
+	thinking map[int]*strings.Builder
+	input    map[int]*bytes.Buffer
+}
+
+func (b *anthropicContentDeltaBuffers) append(blocks []apicompat.AnthropicContentBlock, idx int, delta *apicompat.AnthropicDelta) {
+	if b == nil || delta == nil || idx < 0 || idx >= len(blocks) {
+		return
 	}
-	return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+
+	switch delta.Type {
+	case "text_delta":
+		if b.text == nil {
+			b.text = make(map[int]*strings.Builder)
+		}
+		builder := b.text[idx]
+		if builder == nil {
+			builder = &strings.Builder{}
+			builder.Grow(len(blocks[idx].Text) + len(delta.Text))
+			_, _ = builder.WriteString(blocks[idx].Text)
+			b.text[idx] = builder
+		}
+		_, _ = builder.WriteString(delta.Text)
+	case "thinking_delta":
+		if b.thinking == nil {
+			b.thinking = make(map[int]*strings.Builder)
+		}
+		builder := b.thinking[idx]
+		if builder == nil {
+			builder = &strings.Builder{}
+			builder.Grow(len(blocks[idx].Thinking) + len(delta.Thinking))
+			_, _ = builder.WriteString(blocks[idx].Thinking)
+			b.thinking[idx] = builder
+		}
+		_, _ = builder.WriteString(delta.Thinking)
+	case "input_json_delta":
+		if b.input == nil {
+			b.input = make(map[int]*bytes.Buffer)
+		}
+		buffer := b.input[idx]
+		if buffer == nil {
+			buffer = bytes.NewBuffer(make([]byte, 0, len(blocks[idx].Input)+len(delta.PartialJSON)))
+			_, _ = buffer.Write(blocks[idx].Input)
+			b.input[idx] = buffer
+		}
+		_, _ = buffer.WriteString(delta.PartialJSON)
+	}
+}
+
+func (b *anthropicContentDeltaBuffers) flush(blocks []apicompat.AnthropicContentBlock) {
+	if b == nil {
+		return
+	}
+	for idx, builder := range b.text {
+		if idx >= 0 && idx < len(blocks) && builder != nil {
+			blocks[idx].Text = builder.String()
+		}
+	}
+	for idx, builder := range b.thinking {
+		if idx >= 0 && idx < len(blocks) && builder != nil {
+			blocks[idx].Thinking = builder.String()
+		}
+	}
+	for idx, buffer := range b.input {
+		if idx >= 0 && idx < len(blocks) && buffer != nil {
+			blocks[idx].Input = append(json.RawMessage(nil), buffer.Bytes()...)
+		}
+	}
 }
 
 // handleResponsesBufferedStreamingResponse reads all Anthropic SSE events from
@@ -256,23 +319,24 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 	// Accumulate the final Anthropic response from streaming events
 	var finalResp *apicompat.AnthropicResponse
 	var usage ClaudeUsage
+	var contentDeltas anthropicContentDeltaBuffers
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		eventType, ok := parseAnthropicSSEField(line, "event")
-		if !ok {
+		if !strings.HasPrefix(line, "event: ") {
 			continue
 		}
+		eventType := strings.TrimPrefix(line, "event: ")
 
 		// Read the data line
 		if !scanner.Scan() {
 			break
 		}
 		dataLine := scanner.Text()
-		payload, ok := parseAnthropicSSEField(dataLine, "data")
-		if !ok {
+		if !strings.HasPrefix(dataLine, "data: ") {
 			continue
 		}
+		payload := dataLine[6:]
 
 		var event apicompat.AnthropicStreamEvent
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {
@@ -307,16 +371,12 @@ func (s *GatewayService) handleResponsesBufferedStreamingResponse(
 		if event.Type == "content_block_delta" && event.Delta != nil && finalResp != nil && event.Index != nil {
 			idx := *event.Index
 			if idx < len(finalResp.Content) {
-				switch event.Delta.Type {
-				case "text_delta":
-					finalResp.Content[idx].Text += event.Delta.Text
-				case "thinking_delta":
-					finalResp.Content[idx].Thinking += event.Delta.Thinking
-				case "input_json_delta":
-					finalResp.Content[idx].Input = appendRawJSON(finalResp.Content[idx].Input, event.Delta.PartialJSON)
-				}
+				contentDeltas.append(finalResp.Content, idx, event.Delta)
 			}
 		}
+	}
+	if finalResp != nil {
+		contentDeltas.flush(finalResp.Content)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -481,20 +541,20 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	// Read Anthropic SSE events
 	for scanner.Scan() {
 		line := scanner.Text()
-		eventType, ok := parseAnthropicSSEField(line, "event")
-		if !ok {
+		if !strings.HasPrefix(line, "event: ") {
 			continue
 		}
+		eventType := strings.TrimPrefix(line, "event: ")
 
 		// Read data line
 		if !scanner.Scan() {
 			break
 		}
 		dataLine := scanner.Text()
-		payload, ok := parseAnthropicSSEField(dataLine, "data")
-		if !ok {
+		if !strings.HasPrefix(dataLine, "data: ") {
 			continue
 		}
+		payload := dataLine[6:]
 
 		var event apicompat.AnthropicStreamEvent
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {
@@ -521,14 +581,6 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	}
 
 	return finalizeStream()
-}
-
-// appendRawJSON appends a JSON fragment string to existing raw JSON.
-func appendRawJSON(existing json.RawMessage, fragment string) json.RawMessage {
-	if len(existing) == 0 {
-		return json.RawMessage(fragment)
-	}
-	return json.RawMessage(string(existing) + fragment)
 }
 
 // writeResponsesError writes an error response in OpenAI Responses API format.

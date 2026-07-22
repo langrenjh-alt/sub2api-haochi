@@ -119,6 +119,7 @@ type grokHybridUpstream struct {
 	monthlyLimitCents    *float64
 	activeStatus         int
 	activeHeaders        http.Header
+	activeBody           string
 	billingStarted       chan struct{}
 	billingRelease       <-chan struct{}
 	billingStartOnce     sync.Once
@@ -188,7 +189,11 @@ func (u *grokHybridUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*h
 				"X-Ratelimit-Remaining-Tokens": []string{"1500000"},
 			}
 		}
-		return &http.Response{StatusCode: status, Header: headers, Body: io.NopCloser(strings.NewReader(`{"id":"resp_probe"}`))}, nil
+		responseBody := u.activeBody
+		if responseBody == "" {
+			responseBody = `{"id":"resp_probe"}`
+		}
+		return &http.Response{StatusCode: status, Header: headers, Body: io.NopCloser(strings.NewReader(responseBody))}, nil
 	}
 	if u.billingStarted != nil {
 		u.billingStartOnce.Do(func() { close(u.billingStarted) })
@@ -1106,6 +1111,31 @@ func TestGrokQuotaServiceQueryQuotaFree429PersistsLimitAndKeepsBilling(t *testin
 	require.Equal(t, 1, repo.rateLimitedCalls)
 	require.Equal(t, account.ID, repo.lastRateLimitedID)
 	require.WithinDuration(t, time.Now().Add(45*time.Second), repo.lastRateLimitResetAt, time.Second)
+}
+
+func TestGrokQuotaServiceQueryQuotaFree429WithoutHeadersUses24HourFallback(t *testing.T) {
+	t.Parallel()
+
+	account := healthyGrokQuotaOAuthAccount(58)
+	repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+		accountsByID: map[int64]*Account{account.ID: account},
+	}}
+	upstream := &grokHybridUpstream{
+		activeStatus:  http.StatusTooManyRequests,
+		activeHeaders: make(http.Header),
+		activeBody:    grokFreeUsageExhaustedResponseForTest,
+	}
+	svc := NewGrokQuotaService(repo, nil, NewGrokTokenProvider(repo, nil), upstream, nil)
+	before := time.Now()
+
+	result, err := svc.QueryQuota(context.Background(), account.ID)
+
+	require.NoError(t, err)
+	require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+	require.NotNil(t, result.Snapshot)
+	require.False(t, result.Snapshot.HeadersObserved)
+	require.Equal(t, 1, repo.rateLimitedCalls)
+	require.WithinDuration(t, before.Add(grokFreeRateLimitFallbackCooldown), repo.lastRateLimitResetAt, time.Second)
 }
 
 func TestGrokQuotaServiceResetQuotaUnsupported(t *testing.T) {

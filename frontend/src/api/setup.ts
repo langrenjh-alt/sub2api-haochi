@@ -30,7 +30,6 @@ export interface DatabaseConfig {
 export interface RedisConfig {
   host: string
   port: number
-  username: string
   password: string
   db: number
   enable_tls: boolean

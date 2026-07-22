@@ -28,10 +28,12 @@ func expandAnthropicCompatTrimBoundary(messages []apicompat.AnthropicMessage, st
 		return start
 	}
 
+	refs := make([]anthropicCompatMessageToolRefs, len(messages))
 	toolUseIndex := make(map[string]int)
 	toolResultIndex := make(map[string]int)
 	for i, msg := range messages {
 		uses, results := anthropicCompatMessageToolIDs(msg)
+		refs[i] = anthropicCompatMessageToolRefs{uses: uses, results: results}
 		for _, id := range uses {
 			if _, exists := toolUseIndex[id]; !exists {
 				toolUseIndex[id] = i
@@ -44,26 +46,26 @@ func expandAnthropicCompatTrimBoundary(messages []apicompat.AnthropicMessage, st
 		}
 	}
 
-	for {
-		next := start
-		for i := start; i < len(messages); i++ {
-			uses, results := anthropicCompatMessageToolIDs(messages[i])
-			for _, id := range results {
-				if useIdx, ok := toolUseIndex[id]; ok && useIdx < next {
-					next = useIdx
-				}
-			}
-			for _, id := range uses {
-				if resultIdx, ok := toolResultIndex[id]; ok && resultIdx < next {
-					next = resultIdx
-				}
+	// Walk backwards so that lowering start naturally extends the same scan into
+	// the newly included prefix. Each message is visited at most once.
+	for i := len(messages) - 1; i >= start; i-- {
+		for _, id := range refs[i].results {
+			if useIdx, ok := toolUseIndex[id]; ok && useIdx < start {
+				start = useIdx
 			}
 		}
-		if next == start {
-			return start
+		for _, id := range refs[i].uses {
+			if resultIdx, ok := toolResultIndex[id]; ok && resultIdx < start {
+				start = resultIdx
+			}
 		}
-		start = next
 	}
+	return start
+}
+
+type anthropicCompatMessageToolRefs struct {
+	uses    []string
+	results []string
 }
 
 func anthropicCompatMessageToolIDs(msg apicompat.AnthropicMessage) ([]string, []string) {
@@ -72,8 +74,8 @@ func anthropicCompatMessageToolIDs(msg apicompat.AnthropicMessage) ([]string, []
 		return nil, nil
 	}
 
-	uses := make([]string, 0, 1)
-	results := make([]string, 0, 1)
+	var uses []string
+	var results []string
 	for _, block := range blocks {
 		switch block.Type {
 		case "tool_use":

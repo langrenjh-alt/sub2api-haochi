@@ -60,6 +60,7 @@ describe('useAuthStore', () => {
   })
 
   afterEach(() => {
+    vi.clearAllTimers()
     vi.useRealTimers()
   })
 
@@ -156,6 +157,24 @@ describe('useAuthStore', () => {
       expect(localStorage.getItem('refresh_token')).toBeNull()
       expect(localStorage.getItem('token_expires_at')).toBeNull()
     })
+
+    it('clears the local session before server revocation finishes', async () => {
+      let resolveLogout!: () => void
+      mockLogin.mockResolvedValue(fakeAuthResponse)
+      mockLogout.mockReturnValue(new Promise<void>((resolve) => {
+        resolveLogout = resolve
+      }))
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+
+      const logout = store.logout()
+      expect(store.isAuthenticated).toBe(false)
+      expect(localStorage.getItem('auth_token')).toBeNull()
+      expect(mockLogout).toHaveBeenCalledWith(fakeAuthResponse.refresh_token)
+
+      resolveLogout()
+      await logout
+    })
   })
 
   // --- checkAuth ---
@@ -233,6 +252,206 @@ describe('useAuthStore', () => {
         provider: 'wechat',
         redirect: '/profile',
       })
+    })
+  })
+
+  describe('token refresh scheduling', () => {
+    it('deduplicates immediate refreshes during repeated initialization', async () => {
+      localStorage.setItem('auth_token', 'expired-token')
+      localStorage.setItem('auth_user', JSON.stringify(fakeUser))
+      localStorage.setItem('refresh_token', 'saved-refresh')
+      localStorage.setItem('token_expires_at', String(Date.now() - 1))
+      mockGetCurrentUser.mockResolvedValue({ data: fakeUser })
+
+      let resolveRefresh!: (value: typeof fakeAuthResponse) => void
+      mockRefreshToken.mockReturnValue(new Promise((resolve) => {
+        resolveRefresh = resolve
+      }))
+
+      const store = useAuthStore()
+      store.checkAuth()
+      store.checkAuth()
+
+      expect(mockRefreshToken).toHaveBeenCalledTimes(1)
+
+      resolveRefresh({ ...fakeAuthResponse, expires_in: 60 })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    it('ignores an invalid persisted expiry instead of starting a refresh loop', async () => {
+      localStorage.setItem('auth_token', 'saved-token')
+      localStorage.setItem('auth_user', JSON.stringify(fakeUser))
+      localStorage.setItem('refresh_token', 'saved-refresh')
+      localStorage.setItem('token_expires_at', 'not-a-timestamp')
+      mockGetCurrentUser.mockResolvedValue({ data: fakeUser })
+
+      const store = useAuthStore()
+      store.checkAuth()
+      await Promise.resolve()
+
+      expect(mockRefreshToken).not.toHaveBeenCalled()
+      expect(localStorage.getItem('token_expires_at')).toBeNull()
+    })
+
+    it('does not immediately refresh again when the access token TTL is one minute', async () => {
+      const shortLivedAuthResponse = { ...fakeAuthResponse, expires_in: 60 }
+      mockLogin.mockResolvedValue(shortLivedAuthResponse)
+      mockRefreshToken.mockResolvedValue({
+        access_token: 'refreshed-token',
+        refresh_token: 'refreshed-refresh-token',
+        expires_in: 60,
+        token_type: 'Bearer',
+      })
+      mockGetCurrentUser.mockResolvedValue({ data: fakeUser })
+
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+
+      await vi.advanceTimersByTimeAsync(48_000)
+      expect(mockRefreshToken).toHaveBeenCalledTimes(1)
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(mockRefreshToken).toHaveBeenCalledTimes(1)
+    })
+
+    it('never schedules a short-lived token refresh after its expiry', async () => {
+      mockLogin.mockResolvedValue({ ...fakeAuthResponse, expires_in: 5 })
+      mockRefreshToken.mockResolvedValue({
+        access_token: 'refreshed-token',
+        refresh_token: 'refreshed-refresh-token',
+        expires_in: 5,
+        token_type: 'Bearer',
+      })
+
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(mockRefreshToken).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(mockRefreshToken).toHaveBeenCalledTimes(1)
+    })
+
+    it('ignores an in-flight refresh that completes after logout', async () => {
+      mockLogin.mockResolvedValue({ ...fakeAuthResponse, expires_in: 60 })
+      mockLogout.mockResolvedValue(undefined)
+      let resolveRefresh!: (value: {
+        access_token: string
+        refresh_token: string
+        expires_in: number
+        token_type: string
+      }) => void
+      const refreshResponse = new Promise<{
+        access_token: string
+        refresh_token: string
+        expires_in: number
+        token_type: string
+      }>((resolve) => {
+        resolveRefresh = resolve
+      }).then((response) => {
+        localStorage.setItem('auth_token', response.access_token)
+        localStorage.setItem('refresh_token', response.refresh_token)
+        return response
+      })
+      mockRefreshToken.mockReturnValue(refreshResponse)
+
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+      vi.advanceTimersByTime(48_000)
+      await Promise.resolve()
+      expect(mockRefreshToken).toHaveBeenCalledTimes(1)
+
+      await store.logout()
+      resolveRefresh({
+        access_token: 'stale-token',
+        refresh_token: 'stale-refresh-token',
+        expires_in: 60,
+        token_type: 'Bearer',
+      })
+      await refreshResponse
+      await Promise.resolve()
+
+      expect(store.token).toBeNull()
+      expect(localStorage.getItem('auth_token')).toBeNull()
+      expect(localStorage.getItem('refresh_token')).toBeNull()
+    })
+
+    it('does not restore old refresh credentials after an OAuth session without them replaces it', async () => {
+      mockLogin.mockResolvedValue({ ...fakeAuthResponse, expires_in: 60 })
+      mockGetCurrentUser.mockResolvedValue({ data: fakeAdminUser })
+      let resolveRefresh!: (value: {
+        access_token: string
+        refresh_token: string
+        expires_in: number
+        token_type: string
+      }) => void
+      const refreshResponse = new Promise<{
+        access_token: string
+        refresh_token: string
+        expires_in: number
+        token_type: string
+      }>((resolve) => {
+        resolveRefresh = resolve
+      }).then((response) => {
+        localStorage.setItem('auth_token', response.access_token)
+        localStorage.setItem('refresh_token', response.refresh_token)
+        return response
+      })
+      mockRefreshToken.mockReturnValue(refreshResponse)
+
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+      const previousGeneration = store.sessionGeneration
+      vi.advanceTimersByTime(48_000)
+      await Promise.resolve()
+      expect(mockRefreshToken).toHaveBeenCalledTimes(1)
+
+      localStorage.removeItem('refresh_token')
+      localStorage.removeItem('token_expires_at')
+      await store.setToken('oauth-access-token')
+      expect(store.sessionGeneration).toBe(previousGeneration + 1)
+
+      resolveRefresh({
+        access_token: 'stale-token',
+        refresh_token: 'stale-refresh-token',
+        expires_in: 60,
+        token_type: 'Bearer',
+      })
+      await refreshResponse
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(store.token).toBe('oauth-access-token')
+      expect(store.user).toEqual(fakeAdminUser)
+      expect(localStorage.getItem('auth_token')).toBe('oauth-access-token')
+      expect(localStorage.getItem('refresh_token')).toBeNull()
+      expect(localStorage.getItem('token_expires_at')).toBeNull()
+    })
+
+    it.each([-1, Number.POSITIVE_INFINITY])(
+      'does not schedule refresh for invalid expires_in=%s',
+      async (expiresIn) => {
+        mockLogin.mockResolvedValue({ ...fakeAuthResponse, expires_in: expiresIn })
+
+        const store = useAuthStore()
+        await store.login({ email: 'test@example.com', password: '123456' })
+        await vi.advanceTimersByTimeAsync(59_000)
+
+        expect(mockRefreshToken).not.toHaveBeenCalled()
+        expect(localStorage.getItem('token_expires_at')).toBeNull()
+      }
+    )
+
+    it('chunks refresh timers that exceed the browser timeout limit', async () => {
+      mockLogin.mockResolvedValue({ ...fakeAuthResponse, expires_in: 3_000_000 })
+      const timeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+
+      expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 2_147_483_647)
+      expect(mockRefreshToken).not.toHaveBeenCalled()
+      timeoutSpy.mockRestore()
     })
   })
 
@@ -363,6 +582,65 @@ describe('useAuthStore', () => {
     it('未认证时抛出错误', async () => {
       const store = useAuthStore()
       await expect(store.refreshUser()).rejects.toThrow('Not authenticated')
+    })
+
+    it('does not overwrite a newer session when an older user refresh succeeds', async () => {
+      const nextAuthResponse = {
+        ...fakeAuthResponse,
+        access_token: 'next-access-token',
+        refresh_token: 'next-refresh-token',
+        user: { ...fakeAdminUser },
+      }
+      mockLogin
+        .mockResolvedValueOnce(fakeAuthResponse)
+        .mockResolvedValueOnce(nextAuthResponse)
+      let resolveUserRefresh!: (value: { data: typeof fakeUser }) => void
+      mockGetCurrentUser.mockReturnValue(new Promise((resolve) => {
+        resolveUserRefresh = resolve
+      }))
+
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+      const staleRefresh = store.refreshUser()
+      await store.login({ email: 'admin@example.com', password: '123456' })
+
+      resolveUserRefresh({ data: { ...fakeUser, username: 'stale-user' } })
+      await staleRefresh
+
+      expect(store.token).toBe('next-access-token')
+      expect(store.user).toEqual(fakeAdminUser)
+      expect(JSON.parse(localStorage.getItem('auth_user')!)).toEqual(fakeAdminUser)
+    })
+
+    it('does not clear a newer session when an older user refresh returns 401', async () => {
+      const nextAuthResponse = {
+        ...fakeAuthResponse,
+        access_token: 'next-access-token',
+        refresh_token: 'next-refresh-token',
+        user: { ...fakeAdminUser },
+      }
+      mockLogin
+        .mockResolvedValueOnce(fakeAuthResponse)
+        .mockResolvedValueOnce(nextAuthResponse)
+      let rejectUserRefresh!: (reason: unknown) => void
+      mockGetCurrentUser.mockReturnValue(new Promise((_resolve, reject) => {
+        rejectUserRefresh = reject
+      }))
+
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+      const staleError = { status: 401, message: 'expired session' }
+      const staleRefresh = store.refreshUser()
+      const staleRejection = expect(staleRefresh).rejects.toBe(staleError)
+      await store.login({ email: 'admin@example.com', password: '123456' })
+
+      rejectUserRefresh(staleError)
+      await staleRejection
+
+      expect(store.token).toBe('next-access-token')
+      expect(store.user).toEqual(fakeAdminUser)
+      expect(store.isAuthenticated).toBe(true)
+      expect(localStorage.getItem('auth_token')).toBe('next-access-token')
     })
   })
 

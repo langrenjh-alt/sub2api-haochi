@@ -158,22 +158,20 @@ export async function getCurrentUser() {
 
 /**
  * User logout
- * Clears authentication token and user data from localStorage
- * Optionally revokes the refresh token on the server
+ * Optionally revokes the refresh token on the server.
+ * Local session state is owned by the auth store.
  */
-export async function logout(): Promise<void> {
-  const refreshToken = getRefreshToken()
+export async function logout(refreshTokenOverride?: string | null): Promise<void> {
+  const refreshToken = refreshTokenOverride === undefined ? getRefreshToken() : refreshTokenOverride
 
   // Try to revoke the refresh token on the server
   if (refreshToken) {
     try {
       await apiClient.post('/auth/logout', { refresh_token: refreshToken })
     } catch {
-      // Ignore errors - we still want to clear local state
+      // Local logout has already completed in the auth store.
     }
   }
-
-  clearAuthToken()
 }
 
 /**
@@ -301,11 +299,6 @@ export async function refreshToken(): Promise<RefreshTokenResponse> {
   const { data } = await apiClient.post<RefreshTokenResponse>('/auth/refresh', {
     refresh_token: currentRefreshToken
   })
-
-  // Update tokens in localStorage
-  setAuthToken(data.access_token)
-  setRefreshToken(data.refresh_token)
-  setTokenExpiresAt(data.expires_in)
 
   return data
 }

@@ -36,7 +36,7 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 		},
 		{
 			name: "safe generation options",
-			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true},"max_completion_tokens":256,"temperature":0.2,"top_p":0.9,"prompt_cache_key":"session","tools":[],"functions":null,"tool_choice":"none"}`,
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true},"max_completion_tokens":256,"temperature":0.2,"top_p":0.9,"presence_penalty":0,"frequency_penalty":0,"prompt_cache_key":"session","tools":[],"functions":null,"tool_choice":"none"}`,
 			want: true,
 		},
 		{
@@ -115,6 +115,16 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "automatic tool choice with missing tools bridges",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tool_choice":"auto"}`,
+			want: true,
+		},
+		{
+			name:   "legacy functions fall back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"functions":[{"name":"lookup","parameters":{"type":"object"}}]}`,
+			reason: "unsupported_functions",
+		},
+		{
 			name:   "required tool choice without tools falls back",
 			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[],"tool_choice":"required"}`,
 			reason: "required_tool_choice_without_tools",
@@ -175,9 +185,9 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			reason: "invalid_parallel_tool_calls",
 		},
 		{
-			name:   "reasoning effort falls back because conversion adds summary",
-			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
-			reason: "unsupported_reasoning_effort",
+			name: "reasoning effort bridges without summary",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`,
+			want: true,
 		},
 		{
 			name:   "both token limits fall back",
@@ -215,18 +225,76 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 	}
 }
 
-func TestGrokChatResponsesRuntimeEligibility(t *testing.T) {
+func TestGrokChatResponsesBridgeEligibilityForStandardTools(t *testing.T) {
 	t.Parallel()
-	require.True(t, grokChatResponsesRuntimeEligible("grok-4.5", "isolated-id"))
-	require.False(t, grokChatResponsesRuntimeEligible("grok-4.3", "isolated-id"))
-	require.False(t, grokChatResponsesRuntimeEligible("grok-4.5-build-free", "isolated-id"))
-	require.False(t, grokChatResponsesRuntimeEligible("grok-4.5", ""))
+
+	firstTurn := []byte(`{
+		"model":"grok",
+		"max_tokens":32768,
+		"temperature":0,
+		"messages":[
+			{"role":"system","content":"You are OpenCode."},
+			{"role":"user","content":"Read fixture.txt"}
+		],
+		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
+		"tool_choice":"auto"
+	}`)
+	historyTurn := []byte(`{
+		"model":"grok",
+		"max_tokens":32768,
+		"reasoning_effort":"high",
+		"messages":[
+			{"role":"system","content":"You are OpenCode."},
+			{"role":"user","content":[{"type":"text","text":"Read fixture.txt"}]},
+			{"role":"assistant","reasoning_content":"I should inspect the fixture.","content":"","tool_calls":[{"id":"call_read_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"fixture.txt\"}"}}]},
+			{"role":"tool","tool_call_id":"call_read_1","content":"fixture value"},
+			{"role":"user","content":"Summarize it"}
+		],
+		"parallel_tool_calls":true,
+		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},"strict":false}}],
+		"tool_choice":"required"
+	}`)
+
+	for _, body := range [][]byte{firstTurn, historyTurn} {
+		eligible, reason := grokChatResponsesBridgeEligibility(body)
+		require.True(t, eligible, reason)
+		require.Empty(t, reason)
+	}
+}
+
+func TestGrokChatResponsesBridgeRejectsMalformedStandardToolHistory(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		body   string
+		reason string
+	}{
+		{
+			name:   "unsupported tool type",
+			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"custom","function":{"name":"exec"}}]}`,
+			reason: "unsupported_tool_type",
+		},
+		{
+			name:   "missing tool call id",
+			body:   `{"model":"grok","messages":[{"role":"assistant","content":"","tool_calls":[{"type":"function","function":{"name":"exec","arguments":"{}"}}]}],"tools":[{"type":"function","function":{"name":"exec","parameters":{"type":"object"}}}]}`,
+			reason: "invalid_tool_call_id",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			eligible, reason := grokChatResponsesBridgeEligibility([]byte(tt.body))
+			require.False(t, eligible)
+			require.Equal(t, tt.reason, reason)
+		})
+	}
 }
 
 func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	body := []byte(`{"model":"grok","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"hi"}],"stream":false,"prompt_cache_key":"stable-session","tools":[],"functions":null,"tool_choice":"none"}`)
+	body := []byte(`{"model":"grok","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"hi"}],"stream":false,"temperature":0.2,"top_p":0.9,"presence_penalty":0,"frequency_penalty":0,"reasoning_effort":"xhigh","prompt_cache_key":"stable-session","tools":[],"functions":null,"tool_choice":"auto"}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
@@ -249,6 +317,8 @@ func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.
 	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
 	require.Equal(t, grokChatResponsesEndpoint, result.UpstreamEndpoint)
 	require.Equal(t, "grok-4.5", result.UpstreamModel)
+	require.NotNil(t, result.ReasoningEffort)
+	require.Equal(t, "high", *result.ReasoningEffort)
 	require.Equal(t, 9908, result.Usage.InputTokens)
 	require.Equal(t, 12, result.Usage.OutputTokens)
 	require.Equal(t, 9856, result.Usage.CacheReadInputTokens)
@@ -261,6 +331,11 @@ func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.
 	require.Equal(t, "x_search", gjson.GetBytes(upstream.lastBody, "tools.1.type").String())
 	require.Equal(t, grokFreeCacheDisabledToolChoice, gjson.GetBytes(upstream.lastBody, "tool_choice").String())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
+	require.Equal(t, "high", gjson.GetBytes(upstream.lastBody, "reasoning_effort").String())
+	require.Equal(t, 0.2, gjson.GetBytes(upstream.lastBody, "temperature").Float())
+	require.Equal(t, 0.9, gjson.GetBytes(upstream.lastBody, "top_p").Float())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "presence_penalty").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "frequency_penalty").Exists())
 	require.Equal(t, "system", gjson.GetBytes(upstream.lastBody, "input.0.role").String())
 	require.Equal(t, "user", gjson.GetBytes(upstream.lastBody, "input.1.role").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "instructions").Exists())
@@ -271,72 +346,6 @@ func TestForwardGrokChatViaResponsesNonStreamingCachesAndReturnsChat(t *testing.
 	require.Equal(t, "cached ok", gjson.Get(recorder.Body.String(), "choices.0.message.content").String())
 	require.Equal(t, int64(9856), gjson.Get(recorder.Body.String(), "usage.prompt_tokens_details.cached_tokens").Int())
 	require.NotNil(t, repo.updates[account.ID][grokQuotaSnapshotExtraKey])
-}
-
-func TestForwardGrokChatViaResponsesCodeBuddyUsesStableConversationHeader(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	const conversationID = "codebuddy-session-42"
-	tests := []struct {
-		name      string
-		requestID string
-		messageID string
-		body      []byte
-	}{
-		{
-			name:      "first turn",
-			requestID: "request-one",
-			messageID: "message-one",
-			body:      []byte(`{"model":"grok","messages":[{"role":"user","content":"first question"}],"stream":false,"tools":[]}`),
-		},
-		{
-			name:      "later turn with tools",
-			requestID: "request-two",
-			messageID: "message-two",
-			body:      []byte(`{"model":"grok","messages":[{"role":"system","content":"be concise"},{"role":"user","content":"different later question"}],"stream":false,"tools":[{"type":"function","function":{"name":"lookup","description":"Lookup a value","parameters":{"type":"object","properties":{"key":{"type":"string"}}}}}],"tool_choice":"auto"}`),
-		},
-	}
-
-	var stableIdentity string
-	for index, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(tt.body))
-			c.Request.Header.Set(codeBuddyConversationHeader, conversationID)
-			c.Request.Header.Set("X-Conversation-Request-ID", tt.requestID)
-			c.Request.Header.Set("X-Conversation-Message-ID", tt.messageID)
-			c.Request.Header.Set("X-Request-ID", "generic-"+tt.requestID)
-			c.Set("api_key", &APIKey{ID: 7111})
-
-			identity := resolveGrokCacheIdentity(c, tt.body, "", "grok-4.5")
-			require.NotEmpty(t, identity)
-			if index == 0 {
-				stableIdentity = identity
-			} else {
-				require.Equal(t, stableIdentity, identity)
-			}
-			require.NotContains(t, identity, conversationID)
-
-			account := grokChatBridgeTestAccount(int64(711 + index))
-			repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
-				accountsByID: map[int64]*Account{account.ID: account},
-			}}
-			upstream := &httpUpstreamRecorder{resp: grokChatBridgeCompletedResponse("resp_codebuddy_"+strconv.Itoa(index), 4096)}
-			svc := &OpenAIGatewayService{
-				httpUpstream:      upstream,
-				grokTokenProvider: NewGrokTokenProvider(repo, nil),
-				accountRepo:       repo,
-			}
-
-			result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, tt.body, "", "")
-			require.NoError(t, err)
-			require.NotNil(t, result)
-			require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
-			require.Equal(t, grokChatResponsesEndpoint, result.UpstreamEndpoint)
-			require.Equal(t, identity, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
-			require.Equal(t, identity, upstream.lastReq.Header.Get(grokConversationIDHeader))
-		})
-	}
 }
 
 func TestForwardGrokChatViaResponsesTraeToolHistoryKeepsCacheRoute(t *testing.T) {
@@ -481,7 +490,124 @@ func TestForwardGrokChatViaResponsesStreamingPropagatesCachedUsage(t *testing.T)
 	require.Contains(t, recorder.Body.String(), "data: [DONE]")
 }
 
-func TestForwardGrokChatRuntimeGateFallsBackToRaw(t *testing.T) {
+func TestForwardGrokOpenCodeToolChatViaResponsesKeepsCachePrefix(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	firstTurn := []byte(`{
+		"model":"grok",
+		"messages":[
+			{"role":"system","content":"Keep this OpenCode fixture prefix stable."},
+			{"role":"user","content":"Read fixture.txt"}
+		],
+		"stream":false,
+		"max_tokens":32768,
+		"reasoning_effort":"high",
+		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a fixture","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
+		"tool_choice":"auto"
+	}`)
+	secondTurn := []byte(`{
+		"model":"grok",
+		"messages":[
+			{"role":"system","content":"Keep this OpenCode fixture prefix stable."},
+			{"role":"user","content":"Read fixture.txt"},
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_read_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"fixture.txt\"}"}}]},
+			{"role":"tool","tool_call_id":"call_read_1","content":"fixture value"},
+			{"role":"user","content":"Summarize it"}
+		],
+		"stream":false,
+		"max_tokens":32768,
+		"reasoning_effort":"high",
+		"tools":[{"type":"function","function":{"name":"read_file","description":"Read a fixture","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
+		"tool_choice":"auto"
+	}`)
+
+	account := grokChatBridgeTestAccount(78)
+	account.Credentials["subscription_tier"] = "free"
+	repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+		accountsByID: map[int64]*Account{account.ID: account},
+	}}
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		grokChatBridgeCompletedResponse("resp_opencode_tool_1", 0),
+		grokChatBridgeCompletedResponse("resp_opencode_tool_2", 12288),
+	}}
+	svc := &OpenAIGatewayService{
+		httpUpstream:      upstream,
+		grokTokenProvider: NewGrokTokenProvider(repo, nil),
+		accountRepo:       repo,
+	}
+	newContext := func(body []byte, apiKeyID int64) (*gin.Context, *httptest.ResponseRecorder) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Request.Header.Set("User-Agent", "opencode/1.17.18 ai-sdk/provider-utils/4.0.23")
+		c.Request.Header.Set("X-Session-Id", "ses_opencode_cache_fixture")
+		c.Set("api_key", &APIKey{ID: apiKeyID})
+		return c, recorder
+	}
+
+	firstContext, firstRecorder := newContext(firstTurn, 7801)
+	firstResult, err := svc.ForwardAsChatCompletions(context.Background(), firstContext, account, firstTurn, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, firstResult)
+	require.Zero(t, firstResult.Usage.CacheReadInputTokens)
+	require.Equal(t, grokChatResponsesEndpoint, firstResult.UpstreamEndpoint)
+	require.NotNil(t, firstResult.ReasoningEffort)
+	require.Equal(t, "high", *firstResult.ReasoningEffort)
+	require.Equal(t, http.StatusOK, firstRecorder.Code)
+
+	secondContext, secondRecorder := newContext(secondTurn, 7801)
+	secondResult, err := svc.ForwardAsChatCompletions(context.Background(), secondContext, account, secondTurn, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, secondResult)
+	require.Equal(t, 12288, secondResult.Usage.CacheReadInputTokens)
+	require.Equal(t, grokChatResponsesEndpoint, secondResult.UpstreamEndpoint)
+	require.NotNil(t, secondResult.ReasoningEffort)
+	require.Equal(t, "high", *secondResult.ReasoningEffort)
+	require.Equal(t, http.StatusOK, secondRecorder.Code)
+
+	require.Len(t, upstream.requests, 2)
+	require.Len(t, upstream.bodies, 2)
+	for _, request := range upstream.requests {
+		require.Equal(t, xai.DefaultCLIBaseURL+"/responses", request.URL.String())
+	}
+
+	firstBody, secondBody := upstream.bodies[0], upstream.bodies[1]
+	firstIdentity := gjson.GetBytes(firstBody, "prompt_cache_key").String()
+	secondIdentity := gjson.GetBytes(secondBody, "prompt_cache_key").String()
+	require.NotEmpty(t, firstIdentity)
+	require.Equal(t, firstIdentity, secondIdentity)
+	require.Equal(t, firstIdentity, upstream.requests[0].Header.Get(grokConversationIDHeader))
+	require.Equal(t, secondIdentity, upstream.requests[1].Header.Get(grokConversationIDHeader))
+
+	for _, body := range [][]byte{firstBody, secondBody} {
+		tools := gjson.GetBytes(body, "tools").Array()
+		require.Len(t, tools, 3, "pure client functions use Grok's mixed cache route")
+		require.Equal(t, "function", tools[0].Get("type").String())
+		require.Equal(t, "read_file", tools[0].Get("name").String())
+		require.Equal(t, "web_search", tools[1].Get("type").String())
+		require.Equal(t, "x_search", tools[2].Get("type").String())
+		require.Equal(t, "auto", gjson.GetBytes(body, "tool_choice").String())
+		require.Equal(t, "high", gjson.GetBytes(body, "reasoning_effort").String())
+		require.False(t, gjson.GetBytes(body, "reasoning").Exists())
+	}
+
+	firstInput := gjson.GetBytes(firstBody, "input").Array()
+	secondInput := gjson.GetBytes(secondBody, "input").Array()
+	require.Len(t, firstInput, 2)
+	require.Len(t, secondInput, 5)
+	require.JSONEq(t, firstInput[0].Raw, secondInput[0].Raw)
+	require.JSONEq(t, firstInput[1].Raw, secondInput[1].Raw)
+	require.Equal(t, "function_call", secondInput[2].Get("type").String())
+	require.Equal(t, "call_read_1", secondInput[2].Get("call_id").String())
+	require.Equal(t, "read_file", secondInput[2].Get("name").String())
+	require.JSONEq(t, `{"path":"fixture.txt"}`, secondInput[2].Get("arguments").String())
+	require.Equal(t, "function_call_output", secondInput[3].Get("type").String())
+	require.Equal(t, "call_read_1", secondInput[3].Get("call_id").String())
+	require.Equal(t, "fixture value", secondInput[3].Get("output").String())
+}
+
+func TestForwardGrokChatAlwaysUsesResponsesWithoutRuntimeGate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
@@ -511,13 +637,7 @@ func TestForwardGrokChatRuntimeGateFallsBackToRaw(t *testing.T) {
 			repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
 				accountsByID: map[int64]*Account{account.ID: account},
 			}}
-			upstream := &httpUpstreamRecorder{resp: &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body: io.NopCloser(strings.NewReader(
-					`{"id":"chat_raw","object":"chat.completion","model":"` + tt.wantUpstream + `","choices":[{"index":0,"message":{"role":"assistant","content":"raw ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`,
-				)),
-			}}
+			upstream := &httpUpstreamRecorder{resp: grokChatBridgeCompletedResponse("resp_always_responses", 0)}
 			svc := &OpenAIGatewayService{
 				httpUpstream:      upstream,
 				grokTokenProvider: NewGrokTokenProvider(repo, nil),
@@ -527,11 +647,16 @@ func TestForwardGrokChatRuntimeGateFallsBackToRaw(t *testing.T) {
 			result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
 			require.NoError(t, err)
 			require.NotNil(t, result)
-			require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
-			require.Equal(t, grokChatRawEndpoint, result.UpstreamEndpoint)
+			require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
+			require.Equal(t, grokChatResponsesEndpoint, result.UpstreamEndpoint)
 			require.Equal(t, tt.wantUpstream, result.UpstreamModel)
-			require.False(t, gjson.GetBytes(upstream.lastBody, "tools").Exists())
-			require.Equal(t, "raw ok", gjson.Get(recorder.Body.String(), "choices.0.message.content").String())
+			if tt.setAPIKey {
+				require.Equal(t, "web_search", gjson.GetBytes(upstream.lastBody, "tools.0.type").String())
+				require.Equal(t, "x_search", gjson.GetBytes(upstream.lastBody, "tools.1.type").String())
+			} else {
+				require.False(t, gjson.GetBytes(upstream.lastBody, "tools").Exists())
+			}
+			require.Equal(t, "cached ok", gjson.Get(recorder.Body.String(), "choices.0.message.content").String())
 		})
 	}
 }
@@ -579,7 +704,7 @@ func TestForwardGrokChatViaResponses429UsesGrokRateLimitPolicy(t *testing.T) {
 	require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
-func TestForwardGrokRawChat429PreservesRetryAfter(t *testing.T) {
+func TestForwardGrokChatResponses429PreservesRetryAfter(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":false,"stop":"done"}`)
@@ -615,10 +740,10 @@ func TestForwardGrokRawChat429PreservesRetryAfter(t *testing.T) {
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
 	require.Equal(t, "45", failoverErr.ResponseHeaders.Get("Retry-After"))
-	require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
+	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
 }
 
-func TestForwardGrokRawChatErrorRecordsActualEndpoint(t *testing.T) {
+func TestForwardGrokChatResponsesErrorRecordsActualEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	body := []byte(`{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":false,"stop":"done"}`)
@@ -645,8 +770,8 @@ func TestForwardGrokRawChatErrorRecordsActualEndpoint(t *testing.T) {
 	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
 	require.Error(t, err)
 	require.Nil(t, result)
-	require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
-	require.Equal(t, grokChatRawEndpoint, GetActualOpenAIUpstreamEndpoint(c))
+	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
+	require.Equal(t, grokChatResponsesEndpoint, GetActualOpenAIUpstreamEndpoint(c))
 }
 
 func grokChatBridgeTestAccount(id int64) *Account {

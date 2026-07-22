@@ -73,11 +73,15 @@ const (
 // 3. 非阻塞写入，队列满时关键任务同步回退，非关键任务丢弃并告警
 // 4. 统一超时控制，避免慢操作阻塞工作池
 const (
-	cacheWriteWorkerCount     = 10              // 工作协程数量
-	cacheWriteBufferSize      = 1000            // 任务队列缓冲大小
-	cacheWriteTimeout         = 2 * time.Second // 单个写入操作超时
-	cacheWriteDropLogInterval = 5 * time.Second // 丢弃日志节流间隔
-	balanceLoadTimeout        = 3 * time.Second
+	cacheWriteWorkerCount             = 10              // 工作协程数量
+	cacheWriteBufferSize              = 1000            // 任务队列缓冲大小
+	cacheWriteTimeout                 = 2 * time.Second // 单个写入操作超时
+	cacheWriteDropLogInterval         = 5 * time.Second // 丢弃日志节流间隔
+	balanceLoadTimeout                = 3 * time.Second
+	apiKeyRateLimitResetConcurrency   = 10
+	apiKeyRateLimitResetMaxTracked    = 10000
+	apiKeyRateLimitResetCleanupPeriod = 5 * time.Second
+	apiKeyRateLimitResetRetryInterval = 5 * time.Second
 )
 
 // cacheWriteTask 缓存写入任务
@@ -101,6 +105,11 @@ type subscriptionCacheInvalidationPubSub interface {
 	SubscribeSubscriptionCacheInvalidation(ctx context.Context, handler func(cacheKey string)) error
 }
 
+type apiKeyRateLimitResetState struct {
+	inFlight   bool
+	retryAfter time.Time
+}
+
 // BillingCacheService 计费缓存服务
 // 负责余额和订阅数据的缓存管理，提供高性能的计费资格检查
 type BillingCacheService struct {
@@ -114,18 +123,100 @@ type BillingCacheService struct {
 	circuitBreaker        *billingCircuitBreaker
 	userPlatformQuotaRepo UserPlatformQuotaRepository
 
-	cacheWriteChan     chan cacheWriteTask
-	cacheWriteWg       sync.WaitGroup
-	cacheWriteStopOnce sync.Once
-	cacheWriteMu       sync.RWMutex
-	stopped            atomic.Bool
-	balanceLoadSF      singleflight.Group
-	quotaLoadSF        singleflight.Group
+	cacheWriteChan                     chan cacheWriteTask
+	cacheWriteWg                       sync.WaitGroup
+	cacheWriteStopOnce                 sync.Once
+	cacheWriteMu                       sync.RWMutex
+	stopped                            atomic.Bool
+	balanceLoadSF                      singleflight.Group
+	quotaLoadSF                        singleflight.Group
+	apiKeyRateLimitResetMu             sync.Mutex
+	apiKeyRateLimitResets              map[int64]apiKeyRateLimitResetState
+	apiKeyRateLimitResetSlots          chan struct{}
+	apiKeyRateLimitResetLastCleanup    time.Time
+	apiKeyRateLimitResetSaturatedUntil time.Time
 	// 丢弃日志节流计数器（减少高负载下日志噪音）
 	cacheWriteDropFullCount     uint64
 	cacheWriteDropFullLastLog   int64
 	cacheWriteDropClosedCount   uint64
 	cacheWriteDropClosedLastLog int64
+}
+
+func (s *BillingCacheService) scheduleAPIKeyRateLimitReset(keyID int64) {
+	if s == nil || keyID <= 0 || s.stopped.Load() {
+		return
+	}
+
+	now := time.Now()
+	s.apiKeyRateLimitResetMu.Lock()
+	if s.apiKeyRateLimitResets == nil {
+		s.apiKeyRateLimitResets = make(map[int64]apiKeyRateLimitResetState)
+	}
+	if s.apiKeyRateLimitResetSlots == nil {
+		s.apiKeyRateLimitResetSlots = make(chan struct{}, apiKeyRateLimitResetConcurrency)
+	}
+	if now.Before(s.apiKeyRateLimitResetSaturatedUntil) {
+		s.apiKeyRateLimitResetMu.Unlock()
+		return
+	}
+	if now.Sub(s.apiKeyRateLimitResetLastCleanup) >= apiKeyRateLimitResetCleanupPeriod {
+		for id, state := range s.apiKeyRateLimitResets {
+			if !state.inFlight && !now.Before(state.retryAfter) {
+				delete(s.apiKeyRateLimitResets, id)
+			}
+		}
+		s.apiKeyRateLimitResetLastCleanup = now
+	}
+	if state, ok := s.apiKeyRateLimitResets[keyID]; ok && (state.inFlight || now.Before(state.retryAfter)) {
+		s.apiKeyRateLimitResetMu.Unlock()
+		return
+	}
+	if len(s.apiKeyRateLimitResets) >= apiKeyRateLimitResetMaxTracked {
+		s.apiKeyRateLimitResetSaturatedUntil = now.Add(apiKeyRateLimitResetRetryInterval)
+		s.apiKeyRateLimitResetMu.Unlock()
+		return
+	}
+	select {
+	case s.apiKeyRateLimitResetSlots <- struct{}{}:
+	default:
+		s.apiKeyRateLimitResetSaturatedUntil = now.Add(apiKeyRateLimitResetRetryInterval)
+		s.apiKeyRateLimitResetMu.Unlock()
+		return
+	}
+	resetSlots := s.apiKeyRateLimitResetSlots
+	s.apiKeyRateLimitResets[keyID] = apiKeyRateLimitResetState{inFlight: true}
+	s.apiKeyRateLimitResetMu.Unlock()
+
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logger.LegacyPrintf("service.billing_cache", "Warning: panic resetting rate limit windows for api key %d: %v", keyID, recovered)
+			}
+			s.apiKeyRateLimitResetMu.Lock()
+			s.apiKeyRateLimitResets[keyID] = apiKeyRateLimitResetState{
+				retryAfter: time.Now().Add(apiKeyRateLimitResetRetryInterval),
+			}
+			s.apiKeyRateLimitResetMu.Unlock()
+			<-resetSlots
+		}()
+
+		resetCtx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
+		defer cancel()
+		if s.apiKeyRateLimitLoader != nil {
+			if loader, ok := s.apiKeyRateLimitLoader.(interface {
+				ResetRateLimitWindows(ctx context.Context, id int64) error
+			}); ok {
+				if err := loader.ResetRateLimitWindows(resetCtx, keyID); err != nil {
+					logger.LegacyPrintf("service.billing_cache", "Warning: reset rate limit windows failed for api key %d: %v", keyID, err)
+				}
+			}
+		}
+		if s.cache != nil {
+			if err := s.cache.InvalidateAPIKeyRateLimit(resetCtx, keyID); err != nil {
+				logger.LegacyPrintf("service.billing_cache", "Warning: invalidate rate limit cache failed for api key %d: %v", keyID, err)
+			}
+		}
+	}()
 }
 
 // NewBillingCacheService 创建计费缓存服务
@@ -636,42 +727,22 @@ func (s *BillingCacheService) evaluateRateLimits(ctx context.Context, apiKey *AP
 	needsReset := false
 
 	// Reset expired windows in-memory for check purposes
-	if IsWindowExpired(w5h, RateLimitWindow5h) {
+	if apiKey.RateLimit5h > 0 && IsWindowExpired(w5h, RateLimitWindow5h) {
 		usage5h = 0
-		needsReset = true
+		needsReset = needsReset || w5h != nil
 	}
-	if IsWindowExpired(w1d, RateLimitWindow1d) {
+	if apiKey.RateLimit1d > 0 && IsWindowExpired(w1d, RateLimitWindow1d) {
 		usage1d = 0
-		needsReset = true
+		needsReset = needsReset || w1d != nil
 	}
-	if IsWindowExpired(w7d, RateLimitWindow7d) {
+	if apiKey.RateLimit7d > 0 && IsWindowExpired(w7d, RateLimitWindow7d) {
 		usage7d = 0
-		needsReset = true
+		needsReset = needsReset || w7d != nil
 	}
 
 	// Trigger async DB reset if any window expired
 	if needsReset {
-		keyID := apiKey.ID
-		go func() {
-			resetCtx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
-			defer cancel()
-			if s.apiKeyRateLimitLoader != nil {
-				// Use the repo directly - reset then reload cache
-				if loader, ok := s.apiKeyRateLimitLoader.(interface {
-					ResetRateLimitWindows(ctx context.Context, id int64) error
-				}); ok {
-					if err := loader.ResetRateLimitWindows(resetCtx, keyID); err != nil {
-						logger.LegacyPrintf("service.billing_cache", "Warning: reset rate limit windows failed for api key %d: %v", keyID, err)
-					}
-				}
-			}
-			// Invalidate cache so next request loads fresh data
-			if s.cache != nil {
-				if err := s.cache.InvalidateAPIKeyRateLimit(resetCtx, keyID); err != nil {
-					logger.LegacyPrintf("service.billing_cache", "Warning: invalidate rate limit cache failed for api key %d: %v", keyID, err)
-				}
-			}
-		}()
+		s.scheduleAPIKeyRateLimitReset(apiKey.ID)
 	}
 
 	// Check limits

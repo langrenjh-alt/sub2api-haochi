@@ -238,7 +238,6 @@ const userKeyword = ref('')
 const userResults = ref<SimpleUser[]>([])
 const showUserDropdown = ref(false)
 let userSearchTimeout: ReturnType<typeof setTimeout> | null = null
-let userSearchSequence = 0
 
 const apiKeyKeyword = ref('')
 const apiKeyResults = ref<SimpleApiKey[]>([])
@@ -308,34 +307,18 @@ const billingModeOptions = ref<SelectOption[]>([
 
 const emitChange = () => emit('change')
 
-const clearPendingUserSearch = () => {
-  if (userSearchTimeout) {
-    clearTimeout(userSearchTimeout)
-    userSearchTimeout = null
-  }
-  userSearchSequence += 1
-}
-
 const debounceUserSearch = () => {
-  clearPendingUserSearch()
-  const query = userKeyword.value.trim()
-  if (!query) {
-    userResults.value = []
-    return
-  }
-
-  const sequence = userSearchSequence
+  if (userSearchTimeout) clearTimeout(userSearchTimeout)
   userSearchTimeout = setTimeout(async () => {
-    userSearchTimeout = null
+    if (!userKeyword.value) {
+      userResults.value = []
+      return
+    }
     try {
-      const results = await adminAPI.usage.searchUsers(query)
-      if (sequence === userSearchSequence) {
-        userResults.value = results.sort((a, b) => Number(a.deleted) - Number(b.deleted))
-      }
+      const results = await adminAPI.usage.searchUsers(userKeyword.value)
+      userResults.value = results.sort((a, b) => Number(a.deleted) - Number(b.deleted))
     } catch {
-      if (sequence === userSearchSequence) {
-        userResults.value = []
-      }
+      userResults.value = []
     }
   }, 300)
 }
@@ -355,7 +338,6 @@ const debounceApiKeySearch = () => {
 }
 
 const selectUser = async (u: SimpleUser) => {
-  clearPendingUserSearch()
   userKeyword.value = u.email
   showUserDropdown.value = false
   filters.value.user_id = u.id
@@ -372,7 +354,6 @@ const selectUser = async (u: SimpleUser) => {
 }
 
 const clearUser = () => {
-  clearPendingUserSearch()
   userKeyword.value = ''
   userResults.value = []
   showUserDropdown.value = false
@@ -472,7 +453,6 @@ watch(
   () => filters.value.user_id,
   (userId) => {
     if (!userId) {
-      clearPendingUserSearch()
       userKeyword.value = ''
       userResults.value = []
     }
@@ -510,13 +490,11 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  clearPendingUserSearch()
   document.removeEventListener('click', onDocumentClick)
 })
 
 // 供外部(如用户排行下钻)在程序化设置 user_id 后回显选中的用户邮箱
 const setUserKeyword = (email: string) => {
-  clearPendingUserSearch()
   userKeyword.value = email
   userResults.value = []
   showUserDropdown.value = false

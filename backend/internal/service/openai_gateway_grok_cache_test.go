@@ -5,6 +5,7 @@ package service
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -140,124 +141,6 @@ func TestResolveGrokCacheIdentityExplicitHeaderPriority(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
-func TestResolveGrokCacheIdentityIDEHeaderPriority(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	body := []byte(`{"model":"grok","prompt_cache_key":"body-key","input":"hi"}`)
-	headers := []struct {
-		name  string
-		value string
-	}{
-		{name: openCodeSessionAffinityHeader, value: "opencode-affinity"},
-		{name: openCodeSessionIDHeader, value: "opencode-session-id"},
-		{name: openCodeNativeSessionHeader, value: "opencode-native-session"},
-		{name: codeBuddyConversationHeader, value: "codebuddy-conversation"},
-		{name: grokConversationIDHeader, value: "grok-conversation"},
-	}
-
-	c := newGrokCacheTestContext(402)
-	for _, header := range headers {
-		c.Request.Header.Set(header.name, header.value)
-	}
-	for _, header := range headers {
-		got := resolveGrokCacheIdentity(c, body, "explicit-argument", "grok-4.5")
-		onlyCurrent := newGrokCacheTestContext(402)
-		onlyCurrent.Request.Header.Set(header.name, header.value)
-		want := resolveGrokCacheIdentity(onlyCurrent, []byte(`{"model":"grok","input":"unrelated"}`), "", "grok-4.5")
-		require.Equal(t, want, got, header.name)
-		c.Request.Header.Del(header.name)
-	}
-}
-
-func TestExplicitGrokCacheSeedPriority(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	c := newGrokCacheTestContext(403)
-	headers := []struct {
-		name  string
-		value string
-	}{
-		{name: claudeCodeSessionHeader, value: "claude-session"},
-		{name: "session_id", value: "generic-session"},
-		{name: "conversation_id", value: "generic-conversation"},
-		{name: openCodeSessionAffinityHeader, value: "opencode-affinity"},
-		{name: openCodeSessionIDHeader, value: "opencode-session-id"},
-		{name: openCodeNativeSessionHeader, value: "opencode-native-session"},
-		{name: codeBuddyConversationHeader, value: "codebuddy-conversation"},
-		{name: grokConversationIDHeader, value: "grok-conversation"},
-	}
-	for _, header := range headers {
-		c.Request.Header.Set(header.name, header.value)
-	}
-
-	body := []byte(`{"model":"grok","prompt_cache_key":"body-key","input":"hi"}`)
-	for _, header := range headers {
-		require.Equal(t, header.value, explicitGrokCacheSeed(c, body, "explicit-argument"), header.name)
-		c.Request.Header.Del(header.name)
-	}
-	require.Equal(t, "body-key", explicitGrokCacheSeed(c, body, "explicit-argument"))
-	require.Equal(t, "explicit-argument", explicitGrokCacheSeed(c, []byte(`{"model":"grok"}`), "explicit-argument"))
-}
-
-func TestResolveGrokCacheIdentityIDEHeadersAreStableIsolatedAndOpaque(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	tests := []struct {
-		name   string
-		header string
-	}{
-		{name: "OpenCode affinity", header: openCodeSessionAffinityHeader},
-		{name: "OpenCode session ID", header: openCodeSessionIDHeader},
-		{name: "OpenCode native session", header: openCodeNativeSessionHeader},
-		{name: "CodeBuddy conversation", header: codeBuddyConversationHeader},
-	}
-
-	for index, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rawSession := "raw-ide-session-" + tt.name
-			apiKeyID := int64(800 + index)
-			c := newGrokCacheTestContext(apiKeyID)
-			c.Request.Header.Set(tt.header, rawSession)
-			firstBody := []byte(`{"model":"grok","prompt_cache_key":"turn-one-body-key","input":"first turn"}`)
-			secondBody := []byte(`{"model":"grok","prompt_cache_key":"turn-two-body-key","input":"different second turn"}`)
-
-			first := resolveGrokCacheIdentity(c, firstBody, "first-explicit-key", "grok-4.5")
-			second := resolveGrokCacheIdentity(c, secondBody, "second-explicit-key", "grok-4.5")
-			require.NotEmpty(t, first)
-			require.Equal(t, first, second)
-			require.NotEqual(t, rawSession, first)
-			require.NotContains(t, first, rawSession)
-
-			otherTenant := newGrokCacheTestContext(apiKeyID + 100)
-			otherTenant.Request.Header.Set(tt.header, rawSession)
-			require.NotEqual(t, first, resolveGrokCacheIdentity(otherTenant, firstBody, "", "grok-4.5"))
-			require.NotEqual(t, first, resolveGrokCacheIdentity(c, firstBody, "", "grok-4.3"))
-		})
-	}
-}
-
-func TestOpenCodeResponsesHeaderAndBodyCacheSignalsConverge(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	const rawSession = "opencode-session-42"
-	c := newGrokCacheTestContext(901)
-	c.Request.Header.Set(openCodeSessionAffinityHeader, rawSession)
-	c.Request.Header.Set(openCodeSessionIDHeader, rawSession)
-	firstBody := []byte(`{"model":"grok","prompt_cache_key":"opencode-session-42","input":"first turn"}`)
-	secondBody := []byte(`{"model":"grok","prompt_cache_key":"opencode-session-42","input":"different second turn"}`)
-
-	first := resolveGrokCacheIdentity(c, firstBody, "", "grok-4.5")
-	second := resolveGrokCacheIdentity(c, secondBody, "", "grok-4.5")
-	bodyOnly := resolveGrokCacheIdentity(newGrokCacheTestContext(901), secondBody, "", "grok-4.5")
-	require.NotEmpty(t, first)
-	require.Equal(t, first, second)
-	require.Equal(t, first, bodyOnly)
-
-	patched, err := applyGrokResponsesCacheIdentity(secondBody, secondBody, second, false)
-	require.NoError(t, err)
-	require.Equal(t, second, gjson.GetBytes(patched, "prompt_cache_key").String())
-	headers := make(http.Header)
-	applyGrokCacheHeaders(headers, second)
-	require.Equal(t, second, headers.Get(grokConversationIDHeader))
-	require.NotContains(t, string(patched), rawSession)
-}
-
 func TestResolveGrokCacheIdentityPrefersClaudeCodeSession(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c := newGrokCacheTestContext(701)
@@ -368,6 +251,69 @@ func TestGrokFreeMessagesClientToolCacheDefaultsOnForKnownFree(t *testing.T) {
 			require.Equal(t, "web_search", tools[2].Get("type").String())
 			require.Equal(t, "x_search", tools[3].Get("type").String())
 			require.Equal(t, tt.wantChoice, gjson.GetBytes(body, "tool_choice").Exists())
+			if tt.wantChoice {
+				require.Equal(t, "auto", gjson.GetBytes(body, "tool_choice").String())
+			}
+
+			second, err := applyGrokResponsesCacheIdentity(body, intentBody, "isolated-id", true)
+			require.NoError(t, err)
+			second, err = applyGrokFreeMessagesFunctionToolCacheRoute(second, intentBody, account, "isolated-id")
+			require.NoError(t, err)
+			require.JSONEq(t, string(body), string(second), "native tools must not be duplicated")
+			require.Len(t, gjson.GetBytes(second, "tools").Array(), 4)
+		})
+	}
+}
+
+func TestApplyGrokCacheIdentityAvoidsNativeToolNameCollisions(t *testing.T) {
+	account := healthyGrokOAuthGatewayTestAccount(90102, "access-token")
+	account.Credentials["subscription_tier"] = "free"
+	tests := []struct {
+		name      string
+		functions string
+		wantTools []string
+	}{
+		{
+			name:      "web search function keeps x search marker",
+			functions: `[{"type":"function","name":"web_search","parameters":{"type":"object"}},{"type":"function","name":"Read","parameters":{"type":"object"}}]`,
+			wantTools: []string{"function:web_search", "function:Read", "x_search"},
+		},
+		{
+			name:      "x search function keeps web search marker",
+			functions: `[{"type":"function","name":"x_search","parameters":{"type":"object"}}]`,
+			wantTools: []string{"function:x_search", "web_search"},
+		},
+		{
+			name:      "both reserved names remain functions",
+			functions: `[{"type":"function","name":"web_search","parameters":{"type":"object"}},{"type":"function","name":"x_search","parameters":{"type":"object"}}]`,
+			wantTools: []string{"function:web_search", "function:x_search"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			intentBody := []byte(`{"model":"grok","tools":` + tt.functions + `,"tool_choice":"auto"}`)
+			body, err := applyGrokResponsesCacheIdentity(intentBody, intentBody, "isolated-id", true)
+			require.NoError(t, err)
+			body, err = applyGrokFreeMessagesFunctionToolCacheRoute(body, intentBody, account, "isolated-id")
+			require.NoError(t, err)
+
+			tools := gjson.GetBytes(body, "tools").Array()
+			require.Len(t, tools, len(tt.wantTools))
+			for i, want := range tt.wantTools {
+				if strings.HasPrefix(want, "function:") {
+					require.Equal(t, "function", tools[i].Get("type").String())
+					require.Equal(t, strings.TrimPrefix(want, "function:"), tools[i].Get("name").String())
+					continue
+				}
+				require.Equal(t, want, tools[i].Get("type").String())
+			}
+
+			second, err := applyGrokResponsesCacheIdentity(body, intentBody, "isolated-id", true)
+			require.NoError(t, err)
+			second, err = applyGrokFreeMessagesFunctionToolCacheRoute(second, intentBody, account, "isolated-id")
+			require.NoError(t, err)
+			require.JSONEq(t, string(body), string(second))
 		})
 	}
 }
@@ -404,7 +350,8 @@ func TestApplyGrokCacheIdentityAppendsNativeToolsWhenSearchPresent(t *testing.T)
 	account := healthyGrokOAuthGatewayTestAccount(901, "access-token")
 	account.Credentials["subscription_tier"] = " FREE "
 
-	// Function tools INCLUDING web_search → convert + complement with x_search.
+	// Preserve function-form web_search and add only the non-conflicting
+	// x_search native route marker.
 	intentBody := []byte(`{"model":"grok","tools":[{"type":"function","name":"lookup","description":"look up a value","parameters":{"type":"object"}},{"type":"function","name":"web_search","description":"search","parameters":{"type":"object"}}]}`)
 	body, err := applyGrokResponsesCacheIdentity(intentBody, intentBody, "isolated-id", true)
 	require.NoError(t, err)
@@ -412,10 +359,11 @@ func TestApplyGrokCacheIdentityAppendsNativeToolsWhenSearchPresent(t *testing.T)
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(body, "tools").Array()
-	require.Len(t, tools, 3, "lookup(function) + web_search(native) + x_search(native)")
+	require.Len(t, tools, 3, "lookup(function) + web_search(function) + x_search(native)")
 	require.Equal(t, "function", tools[0].Get("type").String())
 	require.Equal(t, "lookup", tools[0].Get("name").String())
-	require.Equal(t, "web_search", tools[1].Get("type").String())
+	require.Equal(t, "function", tools[1].Get("type").String())
+	require.Equal(t, "web_search", tools[1].Get("name").String())
 	require.Equal(t, "x_search", tools[2].Get("type").String())
 }
 
@@ -678,7 +626,8 @@ func TestGrokFreeRequestClientSearchFunctionUsesDefaultAccountPolicy(t *testing.
 	tools := gjson.GetBytes(patched, "tools").Array()
 	require.Len(t, tools, 3)
 	require.Equal(t, "view_image", tools[0].Get("name").String())
-	require.Equal(t, "web_search", tools[1].Get("type").String())
+	require.Equal(t, "function", tools[1].Get("type").String())
+	require.Equal(t, "web_search", tools[1].Get("name").String())
 	require.Equal(t, "x_search", tools[2].Get("type").String())
 }
 
@@ -774,8 +723,7 @@ func TestApplyGrokCacheIdentityRequiresPatchedFunctionTools(t *testing.T) {
 }
 
 func TestGrokFreeMessagesFunctionToolCacheRouteRequiresKnownFreeTier(t *testing.T) {
-	// Include web_search as a function to also cover its conversion to a native tool.
-	intentBody := []byte(`{"model":"grok","tools":[{"type":"function","name":"lookup"},{"type":"function","name":"web_search"}],"tool_choice":"auto"}`)
+	intentBody := []byte(`{"model":"grok","tools":[{"type":"function","name":"lookup"}],"tool_choice":"auto"}`)
 	tests := []struct {
 		name    string
 		account *Account
@@ -897,7 +845,7 @@ func TestGrokFreeMessagesFunctionToolCacheRouteRequiresKnownFreeTier(t *testing.
 				require.Equal(t, "x_search", tools[2].Get("type").String())
 				return
 			}
-			require.Len(t, tools, 2, "non-free accounts should not get native search injected")
+			require.Len(t, tools, 1)
 		})
 	}
 }

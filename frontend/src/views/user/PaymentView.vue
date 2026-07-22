@@ -284,7 +284,6 @@ import SubscriptionPlanCard from '@/components/payment/SubscriptionPlanCard.vue'
 import PaymentStatusPanel from '@/components/payment/PaymentStatusPanel.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { DEFAULT_PAYMENT_CURRENCY, formatPaymentAmount, normalizePaymentCurrency } from '@/components/payment/currency'
-import { planValiditySuffix as validitySuffixOf } from '@/components/payment/validity'
 import type { PaymentMethodOption } from '@/components/payment/PaymentMethodSelector.vue'
 import { buildPaymentErrorToastMessage, describePaymentScenarioError } from './paymentUx'
 import { hasWechatResumeQuery, parseWechatResumeRoute, stripWechatResumeQuery } from './paymentWechatResume'
@@ -719,7 +718,10 @@ const renewalPlans = computed(() => {
 
 const planValiditySuffix = computed(() => {
   if (!selectedPlan.value) return ''
-  return validitySuffixOf(selectedPlan.value, t)
+  const u = selectedPlan.value.validity_unit || 'day'
+  if (u === 'month') return t('payment.perMonth')
+  if (u === 'year') return t('payment.perYear')
+  return `${selectedPlan.value.validity_days}${t('payment.days')}`
 })
 
 function planHasPeakRate(plan: SubscriptionPlan): boolean {

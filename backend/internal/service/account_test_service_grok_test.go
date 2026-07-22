@@ -168,7 +168,7 @@ func TestAccountTestService_Grok429PersistsRateLimitReset(t *testing.T) {
 	require.WithinDuration(t, time.Now().Add(45*time.Second), repo.resetAt, time.Second)
 }
 
-func TestAccountTestService_Grok429WithoutQuotaHeadersUsesFallback(t *testing.T) {
+func TestAccountTestService_GrokFree429WithoutQuotaHeadersUses24HourFallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	account := &Account{
 		ID: 15, Name: "grok-oauth-limited-no-headers", Platform: PlatformGrok,
@@ -183,7 +183,7 @@ func TestAccountTestService_Grok429WithoutQuotaHeadersUsesFallback(t *testing.T)
 	repo := &grokAccountTestRateLimitRepo{mockAccountRepoForGemini: baseRepo}
 	upstream := &httpUpstreamRecorder{resp: &http.Response{
 		StatusCode: http.StatusTooManyRequests,
-		Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"quota exhausted"}}`)),
+		Body:       io.NopCloser(strings.NewReader(grokFreeUsageExhaustedResponseForTest)),
 	}}
 	svc := &AccountTestService{
 		accountRepo: repo, grokTokenProvider: NewGrokTokenProvider(repo, nil), httpUpstream: upstream,
@@ -197,5 +197,5 @@ func TestAccountTestService_Grok429WithoutQuotaHeadersUsesFallback(t *testing.T)
 
 	require.Error(t, err)
 	require.Equal(t, 1, repo.rateLimitedCalls)
-	require.WithinDuration(t, before.Add(grokRateLimitFallbackCooldown), repo.resetAt, time.Second)
+	require.WithinDuration(t, before.Add(grokFreeRateLimitFallbackCooldown), repo.resetAt, time.Second)
 }

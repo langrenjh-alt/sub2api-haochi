@@ -22,6 +22,7 @@
         :thresholds="metricThresholds"
         :auto-refresh-enabled="autoRefreshEnabled"
         :auto-refresh-countdown="autoRefreshCountdown"
+        :refresh-token="dashboardRefreshToken"
         :fullscreen="isFullscreen"
         :custom-start-time="customStartTime"
         :custom-end-time="customEndTime"
@@ -241,6 +242,9 @@ function handleKeydown(e: KeyboardEvent) {
 
 let dashboardFetchController: AbortController | null = null
 let dashboardFetchSeq = 0
+let dashboardAdvancedSettingsSeq = 0
+let dashboardThresholdsSeq = 0
+let dashboardMounted = false
 
 function isCanceledRequest(err: unknown): boolean {
   return (
@@ -399,8 +403,7 @@ const { pause: pauseCountdown, resume: resumeCountdown } = useIntervalFn(
 
     if (autoRefreshCountdown.value <= 0) {
       // Fetch immediately when the countdown reaches 0.
-      // fetchData() will reset the countdown to the full interval.
-      fetchData()
+      void fetchData()
       return
     }
 
@@ -412,14 +415,17 @@ const { pause: pauseCountdown, resume: resumeCountdown } = useIntervalFn(
 
 // Load ops dashboard presentation settings from backend.
 async function loadDashboardAdvancedSettings() {
+  const settingsSeq = ++dashboardAdvancedSettingsSeq
   try {
     const settings = await opsAPI.getAdvancedSettings()
+    if (!dashboardMounted || settingsSeq !== dashboardAdvancedSettingsSeq) return false
     showAlertEvents.value = settings.display_alert_events
     showOpenAITokenStats.value = settings.display_openai_token_stats
     autoRefreshEnabled.value = settings.auto_refresh_enabled
     autoRefreshIntervalMs.value = settings.auto_refresh_interval_seconds * 1000
     autoRefreshCountdown.value = settings.auto_refresh_interval_seconds
   } catch (err) {
+    if (!dashboardMounted || settingsSeq !== dashboardAdvancedSettingsSeq) return false
     console.error('[OpsDashboard] Failed to load dashboard advanced settings', err)
     showAlertEvents.value = true
     showOpenAITokenStats.value = false
@@ -427,6 +433,7 @@ async function loadDashboardAdvancedSettings() {
     autoRefreshIntervalMs.value = 30000
     autoRefreshCountdown.value = 0
   }
+  return true
 }
 
 function handleThroughputSelectPlatform(nextPlatform: string) {
@@ -474,9 +481,10 @@ function onCustomTimeRangeChange(startTime: string, endTime: string) {
 }
 
 async function onSettingsSaved() {
-  await loadDashboardAdvancedSettings()
-  loadThresholds()
-  fetchData()
+  const settingsApplied = await loadDashboardAdvancedSettings()
+  if (!dashboardMounted || !settingsApplied) return
+  void loadThresholds()
+  void fetchData()
 }
 
 function onPlatformChange(v: string | number | boolean | null) {
@@ -695,7 +703,7 @@ function isOpsDisabledError(err: unknown): boolean {
 }
 
 async function fetchData() {
-  if (!opsEnabled.value) return
+  if (!dashboardMounted || !opsEnabled.value) return
 
   abortDashboardFetch()
   dashboardFetchSeq += 1
@@ -709,27 +717,26 @@ async function fetchData() {
       refreshCoreSnapshotWithCancel(fetchSeq, dashboardFetchController.signal),
       refreshSwitchTrendWithCancel(fetchSeq, dashboardFetchController.signal),
     ])
-    if (fetchSeq !== dashboardFetchSeq) return
+    if (!dashboardMounted || fetchSeq !== dashboardFetchSeq) return
 
     lastUpdated.value = new Date()
 
     // Trigger child component refreshes using the same cadence as the header.
     dashboardRefreshToken.value += 1
 
-    // Reset auto refresh countdown after successful fetch
-    if (autoRefreshEnabled.value) {
-      autoRefreshCountdown.value = Math.floor(autoRefreshIntervalMs.value / 1000)
-    }
-
     // Defer non-core visual panels to reduce initial blocking.
     void refreshDeferredPanels(fetchSeq, dashboardFetchController.signal)
   } catch (err) {
+    if (!dashboardMounted || fetchSeq !== dashboardFetchSeq || isCanceledRequest(err)) return
     if (!isOpsDisabledError(err)) {
       console.error('[ops] failed to fetch dashboard data', err)
       errorMessage.value = t('admin.ops.failedToLoadData')
     }
   } finally {
     if (fetchSeq === dashboardFetchSeq) {
+      if (autoRefreshEnabled.value) {
+        autoRefreshCountdown.value = Math.max(1, Math.floor(autoRefreshIntervalMs.value / 1000))
+      }
       loading.value = false
       hasLoadedOnce.value = true
     }
@@ -771,10 +778,14 @@ watch(
 )
 
 onMounted(async () => {
+  dashboardMounted = true
+
   // Fullscreen mode: listen for ESC key
   window.addEventListener('keydown', handleKeydown)
 
   await adminSettingsStore.fetch()
+  if (!dashboardMounted) return
+
   if (!adminSettingsStore.opsMonitoringEnabled) {
     await router.replace('/admin/settings')
     return
@@ -784,10 +795,12 @@ onMounted(async () => {
   loadThresholds()
 
   // Load auto refresh settings
-  await loadDashboardAdvancedSettings()
+  const settingsApplied = await loadDashboardAdvancedSettings()
+  if (!dashboardMounted || !settingsApplied) return
 
   if (opsEnabled.value) {
     await fetchData()
+    if (!dashboardMounted) return
   }
 
   // Start auto refresh if enabled
@@ -797,16 +810,23 @@ onMounted(async () => {
 })
 
 async function loadThresholds() {
+  const thresholdsSeq = ++dashboardThresholdsSeq
   try {
     const thresholds = await opsAPI.getMetricThresholds()
+    if (!dashboardMounted || thresholdsSeq !== dashboardThresholdsSeq) return
     metricThresholds.value = thresholds || null
   } catch (err) {
+    if (!dashboardMounted || thresholdsSeq !== dashboardThresholdsSeq) return
     console.warn('[OpsDashboard] Failed to load thresholds', err)
     metricThresholds.value = null
   }
 }
 
 onUnmounted(() => {
+  dashboardMounted = false
+  dashboardFetchSeq += 1
+  dashboardAdvancedSettingsSeq += 1
+  dashboardThresholdsSeq += 1
   window.removeEventListener('keydown', handleKeydown)
   abortDashboardFetch()
   pauseCountdown()
@@ -814,8 +834,12 @@ onUnmounted(() => {
 
 // Watch auto refresh settings changes
 watch(autoRefreshEnabled, (enabled) => {
+  if (!dashboardMounted) {
+    pauseCountdown()
+    return
+  }
   if (enabled) {
-    autoRefreshCountdown.value = Math.floor(autoRefreshIntervalMs.value / 1000)
+    autoRefreshCountdown.value = Math.max(1, Math.floor(autoRefreshIntervalMs.value / 1000))
     resumeCountdown()
   } else {
     pauseCountdown()

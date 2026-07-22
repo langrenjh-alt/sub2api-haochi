@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/resourcepressure"
 	"github.com/stretchr/testify/require"
 )
 
@@ -882,6 +883,327 @@ func TestOpenAIWSConnPool_BackgroundCleanupSweep_WithoutAcquire(t *testing.T) {
 	require.False(t, exists, "后台清理应在无新 acquire 时也回收过期连接")
 }
 
+func TestOpenAIWSConnPool_ResourcePressureHysteresis(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.DynamicReadyPool.Enabled = true
+	cfg.Gateway.DynamicReadyPool.SampleIntervalSeconds = 300
+	cfg.Gateway.DynamicReadyPool.HighWatermark = 0.85
+	cfg.Gateway.DynamicReadyPool.HighExitWatermark = 0.72
+	cfg.Gateway.DynamicReadyPool.CriticalWatermark = 0.92
+	cfg.Gateway.DynamicReadyPool.CriticalExitWatermark = 0.84
+	pool := newOpenAIWSConnPool(cfg)
+	defer pool.Close()
+
+	sampler := &openAIWSTestResourcePressureSampler{}
+	pool.setResourcePressureSamplerForTest(sampler, openAIWSResourcePressurePolicyFromConfig(cfg))
+
+	sampler.Set(0.86, true)
+	require.Equal(t, openAIWSResourcePressureHigh, pool.refreshResourcePressure(context.Background()))
+
+	// Values between enter and exit thresholds must not flap the state.
+	sampler.Set(0.80, true)
+	require.Equal(t, openAIWSResourcePressureHigh, pool.refreshResourcePressure(context.Background()))
+	sampler.Set(0.70, true)
+	require.Equal(t, openAIWSResourcePressureNormal, pool.refreshResourcePressure(context.Background()))
+
+	sampler.Set(0.95, true)
+	require.Equal(t, openAIWSResourcePressureCritical, pool.refreshResourcePressure(context.Background()))
+	sampler.Set(0.86, true)
+	require.Equal(t, openAIWSResourcePressureCritical, pool.refreshResourcePressure(context.Background()))
+	sampler.Set(0.83, true)
+	require.Equal(t, openAIWSResourcePressureHigh, pool.refreshResourcePressure(context.Background()))
+
+	// An unavailable sample keeps the last known pressure level.
+	sampler.Set(0, false)
+	require.Equal(t, openAIWSResourcePressureHigh, pool.refreshResourcePressure(context.Background()))
+	sampler.Set(0.60, true)
+	require.Equal(t, openAIWSResourcePressureNormal, pool.refreshResourcePressure(context.Background()))
+}
+
+func TestOpenAIWSConnPool_ResourcePressurePausesAndResumesPrewarm(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.DynamicReadyPool.Enabled = true
+	cfg.Gateway.DynamicReadyPool.SampleIntervalSeconds = 300
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 4
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 2
+	cfg.Gateway.OpenAIWS.PoolTargetUtilization = 0.8
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 1
+	pool := newOpenAIWSConnPool(cfg)
+	defer pool.Close()
+
+	dialer := &openAIWSCountingDialer{}
+	pool.setClientDialerForTest(dialer)
+	sampler := &openAIWSTestResourcePressureSampler{}
+	pool.setResourcePressureSamplerForTest(sampler, defaultOpenAIWSResourcePressurePolicy())
+
+	accountID := int64(303)
+	ap := pool.getOrCreateAccountPool(accountID)
+	ap.mu.Lock()
+	ap.lastAcquire = &openAIWSAcquireRequest{
+		Account: &Account{ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		WSURL:   "wss://example.com/v1/responses",
+	}
+	ap.mu.Unlock()
+
+	sampler.Set(0.86, true)
+	require.Equal(t, openAIWSResourcePressureHigh, pool.refreshResourcePressure(context.Background()))
+	pool.ensureTargetIdleAsync(accountID)
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, 0, dialer.DialCount(), "high pressure must not create reserve connections")
+	lease, err := pool.Acquire(context.Background(), *ap.lastAcquire)
+	require.NoError(t, err, "pressure control must not block a demand-driven connection")
+	require.NotNil(t, lease)
+	require.Equal(t, 1, dialer.DialCount())
+	lease.Release()
+
+	sampler.Set(0.60, true)
+	require.Equal(t, openAIWSResourcePressureNormal, pool.refreshResourcePressure(context.Background()))
+	pool.ensureTargetIdleAsync(accountID)
+	require.Eventually(t, func() bool {
+		return dialer.DialCount() == 2
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestOpenAIWSConnPool_ResourcePressureStopsInflightPrewarmBatch(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.DynamicReadyPool.Enabled = true
+	cfg.Gateway.DynamicReadyPool.SampleIntervalSeconds = 300
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 4
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 3
+	cfg.Gateway.OpenAIWS.PoolTargetUtilization = 0.8
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 2
+	pool := newOpenAIWSConnPool(cfg)
+	defer pool.Close()
+
+	dialer := newOpenAIWSPressureBlockingDialer()
+	pool.setClientDialerForTest(dialer)
+	sampler := &openAIWSTestResourcePressureSampler{}
+	pool.setResourcePressureSamplerForTest(sampler, defaultOpenAIWSResourcePressurePolicy())
+	sampler.Set(0.50, true)
+	require.Equal(t, openAIWSResourcePressureNormal, pool.refreshResourcePressure(context.Background()))
+
+	accountID := int64(304)
+	ap := pool.getOrCreateAccountPool(accountID)
+	ap.mu.Lock()
+	ap.lastAcquire = &openAIWSAcquireRequest{
+		Account: &Account{ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		WSURL:   "wss://example.com/v1/responses",
+	}
+	ap.mu.Unlock()
+
+	pool.ensureTargetIdleAsync(accountID)
+	select {
+	case <-dialer.started:
+	case <-time.After(time.Second):
+		t.Fatal("prewarm dial did not start")
+	}
+
+	sampler.Set(0.95, true)
+	require.Equal(t, openAIWSResourcePressureCritical, pool.refreshResourcePressure(context.Background()))
+	close(dialer.release)
+	require.Eventually(t, func() bool {
+		ap.mu.Lock()
+		defer ap.mu.Unlock()
+		return !ap.prewarmActive && ap.creating == 0
+	}, 2*time.Second, 20*time.Millisecond)
+	require.Equal(t, int32(1), dialer.dialCount.Load(), "pressure transition must cancel the remainder of the batch")
+	ap.mu.Lock()
+	require.Empty(t, ap.conns, "a connection completed after pressure rose must not enter the reserve")
+	ap.mu.Unlock()
+}
+
+func TestOpenAIWSConnPool_CloseCancelsAndWaitsForPrewarm(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 4
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 2
+	cfg.Gateway.OpenAIWS.PoolTargetUtilization = 0.8
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 30
+	pool := newOpenAIWSConnPool(cfg)
+
+	dialer := newOpenAIWSPressureBlockingDialer()
+	pool.setClientDialerForTest(dialer)
+	accountID := int64(306)
+	ap := pool.getOrCreateAccountPool(accountID)
+	ap.mu.Lock()
+	ap.lastAcquire = &openAIWSAcquireRequest{
+		Account: &Account{ID: accountID, Platform: PlatformOpenAI, Type: AccountTypeAPIKey},
+		WSURL:   "wss://example.com/v1/responses",
+	}
+	ap.mu.Unlock()
+
+	pool.ensureTargetIdleAsync(accountID)
+	select {
+	case <-dialer.started:
+	case <-time.After(time.Second):
+		t.Fatal("prewarm dial did not start")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		pool.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not cancel and join the prewarm batch")
+	}
+
+	ap.mu.Lock()
+	require.False(t, ap.prewarmActive)
+	require.Zero(t, ap.creating)
+	require.Empty(t, ap.conns, "a cancelled prewarm must not reinsert a connection after Close")
+	ap.mu.Unlock()
+	_, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+		Account: &Account{ID: accountID},
+		WSURL:   "wss://example.com/v1/responses",
+	})
+	require.ErrorIs(t, err, errOpenAIWSConnClosed)
+}
+
+func TestOpenAIWSConnPool_ClosePreventsRequestDialReinsert(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.PoolTargetUtilization = 0.8
+	pool := newOpenAIWSConnPool(cfg)
+	dialer := newOpenAIWSPressureBlockingDialer()
+	pool.setClientDialerForTest(dialer)
+
+	account := &Account{ID: 307, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := pool.Acquire(context.Background(), openAIWSAcquireRequest{
+			Account: account,
+			WSURL:   "wss://example.com/v1/responses",
+		})
+		errCh <- err
+	}()
+	select {
+	case <-dialer.started:
+	case <-time.After(time.Second):
+		t.Fatal("request dial did not start")
+	}
+
+	pool.Close()
+	close(dialer.release)
+	require.ErrorIs(t, <-errCh, errOpenAIWSConnClosed)
+	ap, ok := pool.getAccountPool(account.ID)
+	require.True(t, ok)
+	ap.mu.Lock()
+	require.Empty(t, ap.conns, "a request dial finishing after Close must not reinsert its connection")
+	ap.mu.Unlock()
+}
+
+func TestOpenAIWSConnPool_ResourcePressureReclaimsOnlySafeIdleLRU(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.DynamicReadyPool.Enabled = true
+	cfg.Gateway.DynamicReadyPool.SampleIntervalSeconds = 300
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 10
+	cfg.Gateway.OpenAIWS.MaxIdlePerAccount = 10
+	pool := newOpenAIWSConnPool(cfg)
+
+	policy := defaultOpenAIWSResourcePressurePolicy()
+	policy.HighReserveRatio = 0
+	policy.HighMinReserve = 2
+	sampler := &openAIWSTestResourcePressureSampler{}
+	pool.setResourcePressureSamplerForTest(sampler, policy)
+
+	accountID := int64(305)
+	ap := pool.getOrCreateAccountPool(accountID)
+	now := time.Now()
+	oldest := newOpenAIWSConn("pressure_oldest", accountID, &openAIWSFakeConn{}, nil)
+	older := newOpenAIWSConn("pressure_older", accountID, &openAIWSFakeConn{}, nil)
+	newer := newOpenAIWSConn("pressure_newer", accountID, &openAIWSFakeConn{}, nil)
+	newest := newOpenAIWSConn("pressure_newest", accountID, &openAIWSFakeConn{}, nil)
+	oldest.lastUsedNano.Store(now.Add(-4 * time.Minute).UnixNano())
+	older.lastUsedNano.Store(now.Add(-3 * time.Minute).UnixNano())
+	newer.lastUsedNano.Store(now.Add(-2 * time.Minute).UnixNano())
+	newest.lastUsedNano.Store(now.Add(-time.Minute).UnixNano())
+
+	leased := newOpenAIWSConn("pressure_leased", accountID, &openAIWSFakeConn{}, nil)
+	require.True(t, leased.tryAcquire())
+	waiting := newOpenAIWSConn("pressure_waiting", accountID, &openAIWSFakeConn{}, nil)
+	waiting.waiters.Store(1)
+	pinned := newOpenAIWSConn("pressure_pinned", accountID, &openAIWSFakeConn{}, nil)
+	for _, protected := range []*openAIWSConn{leased, waiting, pinned} {
+		protected.createdAtNano.Store(now.Add(-2 * time.Hour).UnixNano())
+		protected.lastUsedNano.Store(now.Add(-2 * time.Hour).UnixNano())
+	}
+
+	ap.mu.Lock()
+	for _, conn := range []*openAIWSConn{oldest, older, newer, newest, leased, waiting, pinned} {
+		ap.conns[conn.id] = conn
+	}
+	ap.mu.Unlock()
+	require.True(t, pool.PinConn(accountID, pinned.id))
+
+	sampler.Set(0.86, true)
+	pool.runBackgroundCleanupSweep(now)
+	ap.mu.Lock()
+	_, oldestExists := ap.conns[oldest.id]
+	_, olderExists := ap.conns[older.id]
+	_, newerExists := ap.conns[newer.id]
+	_, newestExists := ap.conns[newest.id]
+	_, leasedExists := ap.conns[leased.id]
+	_, waitingExists := ap.conns[waiting.id]
+	_, pinnedExists := ap.conns[pinned.id]
+	ap.mu.Unlock()
+	require.False(t, oldestExists)
+	require.False(t, olderExists)
+	require.True(t, newerExists)
+	require.True(t, newestExists)
+	require.True(t, leasedExists)
+	require.True(t, waitingExists)
+	require.True(t, pinnedExists)
+
+	// Sustained high pressure keeps the configured global idle target instead
+	// of repeatedly draining every account pool to zero.
+	pool.runBackgroundCleanupSweep(now.Add(time.Second))
+	ap.mu.Lock()
+	_, olderExists = ap.conns[older.id]
+	_, newerExists = ap.conns[newer.id]
+	_, newestExists = ap.conns[newest.id]
+	_, leasedExists = ap.conns[leased.id]
+	_, waitingExists = ap.conns[waiting.id]
+	_, pinnedExists = ap.conns[pinned.id]
+	ap.mu.Unlock()
+	require.False(t, olderExists)
+	require.True(t, newerExists)
+	require.True(t, newestExists)
+	require.True(t, leasedExists)
+	require.True(t, waitingExists)
+	require.True(t, pinnedExists)
+
+	sampler.Set(0.95, true)
+	pool.runBackgroundCleanupSweep(now.Add(2 * time.Second))
+	ap.mu.Lock()
+	_, newerExists = ap.conns[newer.id]
+	_, newestExists = ap.conns[newest.id]
+	_, leasedExists = ap.conns[leased.id]
+	_, waitingExists = ap.conns[waiting.id]
+	_, pinnedExists = ap.conns[pinned.id]
+	ap.mu.Unlock()
+	require.False(t, newerExists, "critical pressure reclaims every safely idle connection")
+	require.False(t, newestExists, "critical pressure reclaims every safely idle connection")
+	require.True(t, leasedExists, "leased connections are never pressure-reclaimed")
+	require.True(t, waitingExists, "connections with waiters are never pressure-reclaimed")
+	require.True(t, pinnedExists, "pinned connections are never pressure-reclaimed")
+
+	waiting.waiters.Store(0)
+	leased.release()
+	pool.UnpinConn(accountID, pinned.id)
+	pool.Close()
+}
+
+func TestOpenAIWSConnPool_ResourcePressureDisabledPreservesLegacyBehavior(t *testing.T) {
+	pool := newOpenAIWSConnPool(&config.Config{})
+	defer pool.Close()
+	require.False(t, pool.resourcePressureControlEnabled())
+	require.Nil(t, pool.resourcePressureSampler)
+	require.Equal(t, openAIWSBackgroundSweepTicker, pool.resourcePressureSampleInterval())
+	require.Equal(t, openAIWSResourcePressureNormal, pool.refreshResourcePressure(context.Background()))
+}
+
 func TestOpenAIWSConnPool_BackgroundWorkerGuardBranches(t *testing.T) {
 	var nilPool *openAIWSConnPool
 	require.NotPanics(t, func() {
@@ -946,11 +1268,19 @@ func TestOpenAIWSConnPool_SnapshotIdleConnsForPing_SkipsInvalidEntries(t *testin
 
 	idle := newOpenAIWSConn("idle", accountID, &openAIWSFakeConn{}, nil)
 	ap.conns[idle.id] = idle
+	pinned := newOpenAIWSConn("pinned", accountID, &openAIWSFakeConn{}, nil)
+	ap.conns[pinned.id] = pinned
+	ap.pinnedConns = map[string]int{pinned.id: 1}
 
 	pool.accounts.Store(accountID, ap)
 	candidates := pool.snapshotIdleConnsForPing()
-	require.Len(t, candidates, 1)
-	require.Equal(t, idle.id, candidates[0].conn.id)
+	require.Len(t, candidates, 2, "pinned idle sessions still need protocol-level ping")
+	ids := map[string]bool{}
+	for _, candidate := range candidates {
+		ids[candidate.conn.id] = true
+	}
+	require.True(t, ids[idle.id])
+	require.True(t, ids[pinned.id])
 }
 
 func TestOpenAIWSConnPool_RunBackgroundCleanupSweep_SkipsInvalidAndUsesAccountCap(t *testing.T) {
@@ -1580,6 +1910,53 @@ func TestOpenAIWSConnPool_Acquire_ErrorBranches(t *testing.T) {
 		WSURL:   "wss://example.com/v1/responses",
 	})
 	require.ErrorIs(t, err, errOpenAIWSConnQueueFull)
+}
+
+type openAIWSTestResourcePressureSampler struct {
+	mu    sync.Mutex
+	ratio resourcepressure.Ratio
+}
+
+func (s *openAIWSTestResourcePressureSampler) Set(value float64, valid bool) {
+	s.mu.Lock()
+	s.ratio = resourcepressure.Ratio{Value: value, Valid: valid}
+	s.mu.Unlock()
+}
+
+func (s *openAIWSTestResourcePressureSampler) Sample(context.Context) resourcepressure.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return resourcepressure.Snapshot{Pressure: s.ratio}
+}
+
+type openAIWSPressureBlockingDialer struct {
+	started   chan struct{}
+	release   chan struct{}
+	dialCount atomic.Int32
+	startOnce sync.Once
+}
+
+func newOpenAIWSPressureBlockingDialer() *openAIWSPressureBlockingDialer {
+	return &openAIWSPressureBlockingDialer{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (d *openAIWSPressureBlockingDialer) Dial(
+	ctx context.Context,
+	_ string,
+	_ http.Header,
+	_ string,
+) (openAIWSClientConn, int, http.Header, error) {
+	d.dialCount.Add(1)
+	d.startOnce.Do(func() { close(d.started) })
+	select {
+	case <-ctx.Done():
+		return nil, 0, nil, ctx.Err()
+	case <-d.release:
+		return &openAIWSFakeConn{}, 0, nil, nil
+	}
 }
 
 type openAIWSFakeDialer struct{}

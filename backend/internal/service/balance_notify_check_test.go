@@ -9,6 +9,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type countingBalanceSettingRepo struct {
+	*mockSettingRepo
+	getValueCalls    int
+	getMultipleCalls int
+}
+
+func (r *countingBalanceSettingRepo) GetValue(ctx context.Context, key string) (string, error) {
+	r.getValueCalls++
+	return r.mockSettingRepo.GetValue(ctx, key)
+}
+
+func (r *countingBalanceSettingRepo) GetMultiple(ctx context.Context, keys []string) (map[string]string, error) {
+	r.getMultipleCalls++
+	return r.mockSettingRepo.GetMultiple(ctx, keys)
+}
+
+func newCountingBalanceNotifyServiceForTest() (*BalanceNotifyService, *countingBalanceSettingRepo) {
+	repo := &countingBalanceSettingRepo{mockSettingRepo: newMockSettingRepo()}
+	email := NewEmailService(repo, nil)
+	return NewBalanceNotifyService(email, repo, nil), repo
+}
+
 // newBalanceNotifyServiceForTest constructs a BalanceNotifyService with an
 // in-memory settings repo and a non-nil emailService so that the guard-clause
 // nil-checks pass. The emailService is intentionally minimal — tests must
@@ -69,6 +91,20 @@ func TestCheckBalanceAfterDeduction_UserThresholdOverride(t *testing.T) {
 	s.CheckBalanceAfterDeduction(context.Background(), u, 20, 15)
 }
 
+func TestCheckBalanceAfterDeduction_CustomThresholdNoCrossingSkipsSettings(t *testing.T) {
+	s, repo := newCountingBalanceNotifyServiceForTest()
+	threshold := 5.0
+	u := &User{
+		ID:                     1,
+		BalanceNotifyEnabled:   true,
+		BalanceNotifyThreshold: &threshold,
+	}
+
+	s.CheckBalanceAfterDeduction(context.Background(), u, 20, 1)
+	require.Zero(t, repo.getValueCalls)
+	require.Zero(t, repo.getMultipleCalls)
+}
+
 func TestCheckBalanceAfterDeduction_NoCrossingNotFired(t *testing.T) {
 	s, repo := newBalanceNotifyServiceForTest()
 	repo.data[SettingKeyBalanceLowNotifyEnabled] = "true"
@@ -80,6 +116,17 @@ func TestCheckBalanceAfterDeduction_NoCrossingNotFired(t *testing.T) {
 	// 5 -> 3, both already below threshold, no crossing (only fires on first
 	// cross from above-to-below).
 	s.CheckBalanceAfterDeduction(context.Background(), u, 5, 2)
+}
+
+func TestCheckBalanceAfterDeduction_DefaultThresholdCachesGlobalSettings(t *testing.T) {
+	s, repo := newCountingBalanceNotifyServiceForTest()
+	repo.data[SettingKeyBalanceLowNotifyEnabled] = "true"
+	repo.data[SettingKeyBalanceLowNotifyThreshold] = "10"
+	u := &User{ID: 1, BalanceNotifyEnabled: true}
+
+	s.CheckBalanceAfterDeduction(context.Background(), u, 100, 1)
+	s.CheckBalanceAfterDeduction(context.Background(), u, 90, 1)
+	require.Equal(t, 1, repo.getMultipleCalls)
 }
 
 // ---------- nil-service guards on CheckAccountQuotaAfterIncrement ----------
@@ -118,6 +165,24 @@ func TestCheckAccountQuotaAfterIncrement_GlobalDisabled(t *testing.T) {
 	}
 	// Global disabled → no processing even if a dim would cross.
 	s.CheckAccountQuotaAfterIncrement(context.Background(), a, 100, nil)
+}
+
+func TestCheckAccountQuotaAfterIncrement_NoCrossingSkipsSettings(t *testing.T) {
+	s, repo := newCountingBalanceNotifyServiceForTest()
+	a := &Account{
+		ID:       1,
+		Platform: PlatformAnthropic,
+		Type:     AccountTypeAPIKey,
+		Extra: map[string]any{
+			"quota_notify_daily_enabled":   true,
+			"quota_notify_daily_threshold": 100.0,
+		},
+	}
+	state := &AccountQuotaState{DailyUsed: 100, DailyLimit: 1000}
+
+	s.CheckAccountQuotaAfterIncrement(context.Background(), a, 10, state)
+	require.Zero(t, repo.getValueCalls)
+	require.Zero(t, repo.getMultipleCalls)
 }
 
 // ---------- sanity: internal helpers still work ----------

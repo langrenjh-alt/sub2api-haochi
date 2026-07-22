@@ -102,15 +102,34 @@ func resolveGrokCacheIdentity(c *gin.Context, body []byte, explicitKey, upstream
 }
 
 func explicitGrokCacheSeed(c *gin.Context, body []byte, explicitKey string) string {
-	// Claude Code session is the most stable multi-turn identity for
-	// /v1/messages → Grok bridges. Prefer it over generic session headers so
-	// prompt cache routing matches CPA behavior.
-	seed := extractClaudeCodeSessionID(c, body)
-	if seed == "" {
-		seed = explicitOpenAIHeaderSessionID(c)
+	seed := ""
+	if c != nil {
+		// Claude Code session is the most stable multi-turn identity for
+		// /v1/messages → Grok bridges. Prefer it over generic session headers
+		// so prompt cache routing matches CPA behavior.
+		seed = extractClaudeCodeSessionID(c, body)
+		if seed == "" {
+			seed = strings.TrimSpace(c.GetHeader("session_id"))
+		}
+		if seed == "" {
+			seed = strings.TrimSpace(c.GetHeader("conversation_id"))
+		}
+		if seed == "" {
+			// OpenAI-compatible agent clients commonly send the stable session in
+			// hyphenated headers rather than the underscore-style Codex headers.
+			for _, header := range []string{"x-opencode-session", "X-Session-Id", "x-session-affinity"} {
+				seed = strings.TrimSpace(c.GetHeader(header))
+				if seed != "" {
+					break
+				}
+			}
+		}
+		if seed == "" {
+			seed = strings.TrimSpace(c.GetHeader(grokConversationIDHeader))
+		}
 	}
-	if seed == "" && c != nil {
-		seed = strings.TrimSpace(c.GetHeader(grokConversationIDHeader))
+	if seed == "" && len(body) > 0 {
+		seed = extractClaudeCodeSessionIDFromPayload(body)
 	}
 	if seed == "" && len(body) > 0 {
 		seed = strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
@@ -140,8 +159,8 @@ func isGrokRequestContext(c *gin.Context) bool {
 // Free OAuth requests without native search tools are routed by xAI to the
 // non-cacheable build-free model. For otherwise tool-free requests, add the
 // native tools with tool_choice=none: this selects the cache-capable tier
-// without allowing an actual search. Explicit client function tools are handled by
-// applyGrokFreeMessagesFunctionToolCacheRoute (Messages bridge and native Responses).
+// without allowing an actual search. Explicit client tools are handled by
+// applyGrokFreeRequestToolCacheRoute after request sanitization.
 func applyGrokResponsesCacheIdentity(body, intentSourceBody []byte, identity string, injectFreeTierTools bool) ([]byte, error) {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
@@ -405,7 +424,9 @@ func isGrokFreeCacheFunctionToolIntent(tools, toolChoice gjson.Result) bool {
 }
 
 func appendMissingGrokFreeCacheNativeTools(body []byte) ([]byte, error) {
-	return appendGrokFreeCacheNativeTools(body, false)
+	// This compatibility helper retains the locally established behavior: all
+	// valid client function tools gain non-conflicting native route markers.
+	return appendGrokFreeCacheNativeTools(body, true)
 }
 
 func appendGrokFreeCacheNativeTools(body []byte, allowPureClientTools bool) ([]byte, error) {
@@ -434,6 +455,7 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 	}
 	merged := make([]json.RawMessage, 0, len(items)+2)
 	present := make(map[string]bool, 2)
+	functionNames := make(map[string]bool, len(items))
 	hasCompanionTool := false
 	for _, tool := range items {
 		toolType := strings.TrimSpace(tool.Get("type").String())
@@ -443,28 +465,7 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 			if !tool.IsObject() || name == "" || tool.Get("function").Exists() {
 				return body, nil
 			}
-			// Grok Build may declare search as function tools. Convert to native
-			// entries so Free OAuth stays cache-capable without duplicate names.
-			if (name == "web_search" || name == "x_search") && allowFunctionSearch {
-				if present[name] {
-					continue
-				}
-				raw, err := json.Marshal(map[string]string{"type": name})
-				if err != nil {
-					return nil, err
-				}
-				merged = append(merged, raw)
-				present[name] = true
-				if allowPureClientTools {
-					hasCompanionTool = true
-				}
-				continue
-			}
-			if name == "web_search" || name == "x_search" {
-				// Keep the client function intact and avoid adding a same-named
-				// native tool unless conversion was explicitly enabled.
-				present[name] = true
-			}
+			functionNames[name] = true
 			hasCompanionTool = true
 			merged = append(merged, json.RawMessage(tool.Raw))
 		case "web_search", "x_search":
@@ -484,15 +485,18 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 	if !hasCompanionTool {
 		return body, nil
 	}
-	// Only complement missing native search tools when the request already contains
-	// at least one search tool (native or function-form). Pure client function tools
-	// (e.g. view_image) must not trigger injection to avoid biasing model tool
-	// selection (#4486).
-	if !allowPureClientTools && !present["web_search"] && !present["x_search"] {
+	// With an explicit opt-out, only existing search intent may select this
+	// route. Preserve function-form search declarations instead of rewriting
+	// their semantics, and add only non-conflicting native markers.
+	hasFunctionSearch := functionNames["web_search"] || functionNames["x_search"]
+	if !allowPureClientTools && !present["web_search"] && !present["x_search"] &&
+		!(allowFunctionSearch && hasFunctionSearch) {
 		return body, nil
 	}
 	for _, toolType := range []string{"web_search", "x_search"} {
-		if present[toolType] {
+		// xAI assigns native search tools their type as an implicit name. Keep a
+		// client function with that name and omit only the colliding route marker.
+		if present[toolType] || functionNames[toolType] {
 			continue
 		}
 		raw, err := json.Marshal(map[string]string{"type": toolType})

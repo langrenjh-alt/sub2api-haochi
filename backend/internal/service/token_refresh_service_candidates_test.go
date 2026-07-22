@@ -23,6 +23,7 @@ type tokenRefreshCandidateRepo struct {
 	clearTempCalls        int
 	lastTempUnschedReason string
 	listActiveCalls       int
+	listCandidateCalls    int
 }
 
 func (r *tokenRefreshCandidateRepo) ListActive(context.Context) ([]Account, error) {
@@ -33,6 +34,10 @@ func (r *tokenRefreshCandidateRepo) ListActive(context.Context) ([]Account, erro
 }
 
 func (r *tokenRefreshCandidateRepo) ListOAuthRefreshCandidatePage(_ context.Context, options OAuthRefreshPageOptions) (*OAuthRefreshCandidatePage, error) {
+	r.mu.Lock()
+	r.listCandidateCalls++
+	r.mu.Unlock()
+
 	candidates := make([]Account, 0, len(r.accounts))
 	now := time.Now()
 	for _, account := range r.accounts {
@@ -67,6 +72,48 @@ func (r *tokenRefreshCandidateRepo) ListOAuthRefreshCandidatePage(_ context.Cont
 		page.NextAfterID = candidates[len(candidates)-1].ID
 	}
 	return page, nil
+}
+
+func TestTokenRefreshService_ProcessRefreshUsesSingletonLeaderLock(t *testing.T) {
+	repo := &tokenRefreshCandidateRepo{}
+	lockCache := &fakeLeaderLockCache{}
+	acquired, err := lockCache.TryAcquireLeaderLock(context.Background(), tokenRefreshLeaderLockKey, "peer", time.Minute)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	svc := &TokenRefreshService{
+		accountRepo:    repo,
+		candidatePager: repo,
+		registrations: []tokenRefreshRegistration{
+			{platform: PlatformGrok, refresher: &tokenRefreshTestRefresher{}},
+		},
+		refreshPolicy: DefaultBackgroundRefreshPolicy(),
+		cfg:           &config.TokenRefreshConfig{CycleTimeoutSeconds: 1},
+		instanceID:    "candidate",
+	}
+	svc.SetLeaderLock(lockCache, nil)
+
+	svc.processRefresh()
+	require.Zero(t, repo.listCandidateCalls, "a non-leader must not scan candidate accounts")
+
+	require.NoError(t, lockCache.ReleaseLeaderLock(context.Background(), tokenRefreshLeaderLockKey, "peer"))
+	svc.processRefresh()
+	require.Equal(t, 1, repo.listCandidateCalls, "the elected leader should scan candidates")
+	require.Empty(t, lockCache.heldBy(tokenRefreshLeaderLockKey), "the cycle must release leadership")
+}
+
+func TestTokenRefreshService_GrokProviderCapacityOverridesAreScoped(t *testing.T) {
+	svc := &TokenRefreshService{cfg: &config.TokenRefreshConfig{
+		ProviderConcurrency:     4,
+		ProviderQPS:             2,
+		GrokProviderConcurrency: 32,
+		GrokProviderQPS:         25,
+	}}
+
+	require.Equal(t, 32, svc.providerConcurrency(PlatformGrok))
+	require.Equal(t, 25, svc.providerQPS(PlatformGrok))
+	require.Equal(t, 4, svc.providerConcurrency(PlatformOpenAI))
+	require.Equal(t, 2, svc.providerQPS(PlatformOpenAI))
 }
 
 func (r *tokenRefreshCandidateRepo) UpdateCredentials(_ context.Context, id int64, _ map[string]any) error {

@@ -41,24 +41,24 @@ const (
 	// directProxyKey: 无代理时的缓存键标识
 	directProxyKey = "direct"
 	// defaultMaxIdleConns: 默认最大空闲连接总数
-	// HTTP/2 场景下，单连接可多路复用，240 足以支撑高并发
-	defaultMaxIdleConns = 240
+	// 96GB / 400-500 并发实例保留较高回退容量；账号隔离模式仍按账号并发收敛。
+	defaultMaxIdleConns = 8192
 	// defaultMaxIdleConnsPerHost: 默认每主机最大空闲连接数
-	defaultMaxIdleConnsPerHost = 120
+	defaultMaxIdleConnsPerHost = 512
 	// defaultMaxConnsPerHost: 默认每主机最大连接数（含活跃连接）
 	// 达到上限后新请求会等待，而非无限创建连接
-	defaultMaxConnsPerHost = 240
-	// defaultIdleConnTimeout: 默认空闲连接超时时间（90秒）
-	// 超时后连接会被关闭，释放系统资源（建议小于上游 LB 超时）
-	defaultIdleConnTimeout = 90 * time.Second
+	defaultMaxConnsPerHost = 2048
+	// defaultIdleConnTimeout: 默认空闲连接超时时间（5分钟）
+	// 与近期热窗口对齐；HTTP/1.1 不发送额外应用层保活请求。
+	defaultIdleConnTimeout = 300 * time.Second
 	// defaultResponseHeaderTimeout: 默认等待响应头超时时间（5分钟）
 	// LLM 请求可能排队较久，需要较长超时
 	defaultResponseHeaderTimeout = 300 * time.Second
 	// defaultMaxUpstreamClients: 默认最大客户端缓存数量
 	// 超出后会淘汰最久未使用的客户端
-	defaultMaxUpstreamClients = 5000
-	// defaultClientIdleTTLSeconds: 默认客户端空闲回收阈值（15分钟）
-	defaultClientIdleTTLSeconds = 900
+	defaultMaxUpstreamClients = 8192
+	// defaultClientIdleTTLSeconds: 默认客户端空闲回收阈值（30分钟）
+	defaultClientIdleTTLSeconds = 1800
 	// OpenAI HTTP/2 代理回退策略默认值
 	defaultOpenAIHTTP2FallbackErrorThreshold = 2
 	defaultOpenAIHTTP2FallbackWindow         = 60 * time.Second
@@ -144,9 +144,10 @@ type openAIHTTP2FallbackState struct {
 // 7. 代理变更时清空旧连接池，避免复用错误代理
 // 8. 账号并发数与连接池上限对应（账号隔离策略下）
 type httpUpstreamService struct {
-	cfg     *config.Config                  // 全局配置
-	mu      sync.RWMutex                    // 保护 clients map 的读写锁
-	clients map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
+	cfg       *config.Config                  // 全局配置
+	mu        sync.RWMutex                    // 保护 clients map 的读写锁
+	clients   map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
+	reclaimer *httpUpstreamReclaimer          // 本地资源压力驱动的后台空闲回收器
 	// OpenAI 走 HTTP/HTTPS 代理时的 H2->H1 回退状态（key=标准化 proxyKey）
 	openAIHTTP2Fallbacks sync.Map
 }
@@ -160,10 +161,29 @@ type httpUpstreamService struct {
 // 返回:
 //   - service.HTTPUpstream 接口实现
 func NewHTTPUpstream(cfg *config.Config) service.HTTPUpstream {
-	return &httpUpstreamService{
+	s := &httpUpstreamService{
 		cfg:     cfg,
 		clients: make(map[string]*upstreamClientEntry),
 	}
+	s.reclaimer = newConfiguredHTTPUpstreamReclaimer(s, cfg)
+	return s
+}
+
+func (s *httpUpstreamService) startReclaimer() {
+	if s == nil || s.reclaimer == nil {
+		return
+	}
+	s.reclaimer.Start()
+}
+
+// Stop terminates the background resource-pressure sampler. It intentionally
+// remains outside service.HTTPUpstream so existing test doubles and consumers
+// do not need a lifecycle method.
+func (s *httpUpstreamService) Stop() {
+	if s == nil || s.reclaimer == nil {
+		return
+	}
+	s.reclaimer.Stop()
 }
 
 // Do 执行 HTTP 请求
@@ -183,6 +203,7 @@ func NewHTTPUpstream(cfg *config.Config) service.HTTPUpstream {
 //   - 调用方必须关闭 resp.Body，否则会导致 inFlight 计数泄漏
 //   - inFlight > 0 的客户端不会被淘汰，确保活跃请求不被中断
 func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID int64, accountConcurrency int) (*http.Response, error) {
+	s.startReclaimer()
 	applyGrokCLIProxyHeaders(req)
 	if err := s.validateRequestHost(req); err != nil {
 		return nil, err
@@ -229,6 +250,7 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 // profile 为 nil 时不启用 TLS 指纹，行为与 Do 方法相同。
 // profile 非 nil 时使用指定的 Profile 进行 TLS 指纹伪装。
 func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, profile *tlsfingerprint.Profile) (*http.Response, error) {
+	s.startReclaimer()
 	if profile == nil {
 		return s.Do(req, proxyURL, accountID, accountConcurrency)
 	}
@@ -746,6 +768,12 @@ func (s *httpUpstreamService) removeClientLocked(key string, entry *upstreamClie
 // 参数:
 //   - now: 当前时间
 func (s *httpUpstreamService) evictIdleLocked(now time.Time) {
+	// The dynamic ready-pool worker owns idle retention while enabled. Its
+	// recent-demand + spare target intentionally keeps a warm floor even when
+	// individual client entries are older than the legacy TTL.
+	if s != nil && s.cfg != nil && s.cfg.Gateway.DynamicReadyPool.Enabled {
+		return
+	}
 	ttl := s.clientIdleTTL()
 	if ttl <= 0 {
 		return
