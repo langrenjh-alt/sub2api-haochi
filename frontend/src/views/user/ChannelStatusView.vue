@@ -10,6 +10,11 @@
       @refresh="manualReload"
     />
 
+    <ChannelCapacityPoolCard
+      :pool="capacityPoolData"
+      :loading="capacityLoading"
+    />
+
     <MonitorCardGrid
       :items="items"
       :window="currentWindow"
@@ -36,8 +41,10 @@ import { extractApiErrorMessage } from '@/utils/apiError'
 import {
   list as listChannelMonitorViews,
   status as fetchChannelMonitorDetail,
+  capacityPool as fetchCapacityPool,
   type UserMonitorView,
   type UserMonitorDetail,
+  type CapacityPoolResponse,
 } from '@/api/channelMonitor'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import MonitorHero, {
@@ -45,6 +52,7 @@ import MonitorHero, {
   type OverallStatus,
 } from '@/components/user/monitor/MonitorHero.vue'
 import MonitorCardGrid from '@/components/user/monitor/MonitorCardGrid.vue'
+import ChannelCapacityPoolCard from '@/components/user/monitor/ChannelCapacityPoolCard.vue'
 import MonitorDetailDialog from '@/components/user/MonitorDetailDialog.vue'
 import { DEFAULT_INTERVAL_SECONDS, STATUS_OPERATIONAL } from '@/constants/channelMonitor'
 import { useAutoRefresh } from '@/composables/useAutoRefresh'
@@ -55,6 +63,8 @@ const appStore = useAppStore()
 // ── State ──
 const items = ref<UserMonitorView[]>([])
 const loading = ref(false)
+const capacityPoolData = ref<CapacityPoolResponse | null>(null)
+const capacityLoading = ref(false)
 const currentWindow = ref<MonitorWindow>('7d')
 const detailCache = reactive<Record<number, UserMonitorDetail>>({})
 const showDetail = ref(false)
@@ -91,10 +101,15 @@ async function reload(silent = false) {
   const ctrl = new AbortController()
   abortController = ctrl
   if (!silent) loading.value = true
+  if (!silent) capacityLoading.value = true
   try {
-    const res = await listChannelMonitorViews({ signal: ctrl.signal })
+    const [res, pool] = await Promise.all([
+      listChannelMonitorViews({ signal: ctrl.signal }),
+      fetchCapacityPool({ signal: ctrl.signal }),
+    ])
     if (ctrl.signal.aborted || abortController !== ctrl) return
     items.value = res.items || []
+    capacityPoolData.value = pool
   } catch (err: unknown) {
     const e = err as { name?: string; code?: string }
     if (e?.name === 'AbortError' || e?.code === 'ERR_CANCELED') return
@@ -102,6 +117,7 @@ async function reload(silent = false) {
   } finally {
     if (abortController === ctrl) {
       if (!silent) loading.value = false
+      if (!silent) capacityLoading.value = false
       countdown.value = DEFAULT_INTERVAL_SECONDS
       abortController = null
     }
