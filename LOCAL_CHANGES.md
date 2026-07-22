@@ -38,6 +38,28 @@ Added files:
 
 ## Functional Changes
 
+### 0. Cascaded Grok Stream Keepalive
+
+- Chat and Messages bridges schedule heartbeats from the last downstream write,
+  not the last upstream line. Upstream SSE comments are commonly consumed by an
+  intermediate gateway and must not suppress its client-facing heartbeat.
+- Large Chat requests (64 KiB and above) continue sending SSE comment
+  heartbeats while semantic chunks are staged by the silent-refusal detector.
+- Raw Chat passthrough forwards upstream SSE comments immediately instead of
+  staging them with semantic output.
+- Silent-refusal failover remains allowed after heartbeat-only writes.
+
+This prevents cascaded `sub2api -> sub2api -> Cloudflare` requests from idling
+past Cloudflare's 120-second proxy read timeout during long Grok generations.
+
+Affected files:
+
+- `backend/internal/service/openai_gateway_chat_completions.go`
+- `backend/internal/service/openai_gateway_chat_completions_raw.go`
+- `backend/internal/service/openai_gateway_messages.go`
+- `backend/internal/service/openai_silent_refusal.go`
+- `backend/internal/service/openai_gateway_cascade_keepalive_test.go`
+
 ### 1. Kiro-rs Balance Display
 
 Backend:
