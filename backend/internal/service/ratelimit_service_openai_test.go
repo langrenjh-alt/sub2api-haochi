@@ -327,7 +327,7 @@ func TestNormalizedCodexLimits_OnlyPrimaryData(t *testing.T) {
 	}
 }
 
-func TestRateLimitService_HandleUpstreamError_403StructuredBodyDoesNotMutateAccount(t *testing.T) {
+func TestRateLimitService_HandleUpstreamError_403PreservesOriginalUpstreamMessage(t *testing.T) {
 	repo := &rateLimitAccountRepoStub{}
 	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	account := &Account{
@@ -345,12 +345,12 @@ func TestRateLimitService_HandleUpstreamError_403StructuredBodyDoesNotMutateAcco
 	)
 
 	require.True(t, shouldDisable)
-	require.Zero(t, repo.setErrorCalls)
-	require.Zero(t, repo.tempCalls)
-	require.Empty(t, repo.lastErrorMsg)
+	require.Equal(t, 1, repo.setErrorCalls)
+	require.Contains(t, repo.lastErrorMsg, "workspace forbidden by policy")
+	require.NotContains(t, repo.lastErrorMsg, "account may be suspended or lack permissions")
 }
 
-func TestRateLimitService_HandleUpstreamError_403RawBodyDoesNotMutateAccount(t *testing.T) {
+func TestRateLimitService_HandleUpstreamError_403FallsBackToRawBody(t *testing.T) {
 	repo := &rateLimitAccountRepoStub{}
 	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
 	account := &Account{
@@ -368,9 +368,10 @@ func TestRateLimitService_HandleUpstreamError_403RawBodyDoesNotMutateAccount(t *
 	)
 
 	require.True(t, shouldDisable)
-	require.Zero(t, repo.setErrorCalls)
-	require.Zero(t, repo.tempCalls)
-	require.Empty(t, repo.lastErrorMsg)
+	require.Equal(t, 1, repo.setErrorCalls)
+	require.Contains(t, repo.lastErrorMsg, `"access_denied"`)
+	require.Contains(t, repo.lastErrorMsg, `"ip_blocked"`)
+	require.NotContains(t, repo.lastErrorMsg, "account may be suspended or lack permissions")
 }
 
 func TestNormalizedCodexLimits_OnlySecondaryData(t *testing.T) {

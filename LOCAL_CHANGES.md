@@ -174,25 +174,18 @@ Upgrade notes:
   - `TestSetRateLimited`
   - `TestSetRateLimitedDoesNotShortenExistingTempUnschedulable`
 
-### 5. OpenAI 403 Retry Behavior
+### 5. OpenAI 403 Credential-owner Handling
 
-OpenAI 403 is customized to keep retrying without disabling the account unless the response identifies a permanent credential-owner failure.
+Generic OpenAI 403 handling follows official sub2api behavior:
 
-Behavior before local change:
+- The first two failures write a 10-minute `OpenAI 403 temporary cooldown (...)` and remove the account from scheduling.
+- The third failure within the 180-minute counter window marks the account as error with `consecutive_403=3/3`.
+- A missing or failed counter backend marks the account as error instead of leaving it schedulable.
 
-- OpenAI 403 used an internal consecutive counter.
-- Early hits wrote `OpenAI 403 temporary cooldown (1/3): ...` to `temp_unschedulable_reason`.
-- Threshold hit disabled the account with `consecutive_403=3/3`.
+The remaining local extension is limited to deterministic credential-owner failures:
 
-Local behavior:
-
-- No `OpenAI 403 temporary cooldown (...)` reason is written.
-- No temporary unschedulable state is set for OpenAI 403.
-- Generic OpenAI 403 responses do not set account error/disabled state, even after repeated failures.
-- `biscuit_baker_service_auth_credential_error_status` is treated as permanent: the credential owner is marked as error when the personal access token owner is no longer an active member of the selected workspace.
-- The permanent credential error takes precedence over user-configured temporary-unschedulable rules.
-- The function still returns the failover/retry signal, so existing upstream retry/failover logic can continue trying another attempt/account.
-- Log event is now `openai_403_retry_without_account_disable`.
+- `biscuit_baker_service_auth_credential_error_status` immediately marks the credential owner as error when the personal access token owner is no longer an active member of the selected workspace.
+- This deterministic credential error takes precedence over user-configured temporary-unschedulable rules.
 
 Affected files:
 
@@ -201,20 +194,10 @@ Affected files:
 - `backend/internal/service/ratelimit_service.go`
 - `backend/internal/service/ratelimit_service_403_test.go`
 
-Important note:
-
-- This is not an infinite loop inside a single HTTP request. Existing gateway retry/failover limits still bound each request.
-- The "infinite retry" behavior applies to generic OpenAI 403 responses; deterministic credential-owner failures are disabled immediately.
-
 Upgrade notes:
 
-- In `handleOpenAI403`, preserve the permanent credential-owner exception before the generic retry path.
-- For generic OpenAI 403 responses, keep building the 403 message for logging, but do not:
-  - increment/check the OpenAI 403 counter
-  - call `SetTempUnschedulable`
-  - call `handleAuthError`
-  - append `consecutive_403=...`
-- Keep returning `true` from `handleOpenAI403` so callers still enter failover/retry handling.
+- Keep generic OpenAI 403 counter, cooldown, and threshold behavior aligned with official sub2api.
+- Preserve only the deterministic credential-owner exception before the generic official path.
 
 ### 6. Public Capacity Pool on Channel Status
 
@@ -324,8 +307,8 @@ Upgrade notes:
   `web_search`/`x_search` route markers for known-Free OAuth accounts. This
   retains the local cache-capable Free model routing without rewriting client
   tool semantics.
-- Preserved the local Grok token-refresh capacity defaults, OpenAI `403`
-  scheduling policy, empty-response retry behavior, Kiro balance/redaction,
+- Preserved the local Grok token-refresh capacity defaults, deterministic OpenAI
+  credential-owner handling, empty-response retry behavior, Kiro balance/redaction,
   public capacity pools, and frontend lifecycle/batch-processing protections.
 - Advanced `backend/cmd/server/VERSION` to `0.1.162` because the official tag
   still contains the previous source fallback version.
@@ -338,10 +321,9 @@ Upgrade notes:
   classification, subscription renewal, billing probe, and related migrations/UI.
 - Preserved the local dynamic HTTP upstream readiness pool and combined its
   shutdown lifecycle with the new official ops/auth-cache background workers.
-- Combined official model-scoped temporary cooldowns with the local OpenAI 403
-  policy: deterministic inactive-workspace credential failures still bypass
-  temporary rules and disable the owner, while generic 403 responses remain
-  retryable without disabling or cooling down the account.
+- Combined official model-scoped temporary cooldowns with official generic OpenAI
+  403 counter/cooldown behavior. Deterministic inactive-workspace credential
+  failures still bypass temporary rules and disable the owner immediately.
 - Preserved the local Grok Chat Completions-to-Responses route and client
   function names. Restored the `v0.1.160` cache routing behavior: known-Free
   OAuth requests with pure client function tools retain those functions and gain
@@ -414,7 +396,7 @@ When a newer official version is released:
 3. Start with backend changes:
    - Kiro balance files and `AccountWithConcurrency`
    - credential redaction keys
-   - OpenAI 403 behavior
+   - deterministic OpenAI 403 credential-owner handling
    - account test/image compatibility
    - `SetRateLimited` scheduling behavior
    - public group capacity aggregation and route wiring
@@ -427,10 +409,10 @@ When a newer official version is released:
    - channel capacity card and `channelStatus.capacityPool` locale keys
 5. Run the verification commands above.
 6. Manually test the admin account list with the capacity column visible.
-7. Manually test a generic OpenAI 403 response and confirm:
-   - no `OpenAI 403 temporary cooldown` reason appears
-   - account is not marked temporarily unschedulable
-   - account is not disabled after repeated OpenAI 403 responses
+7. Manually test generic OpenAI 403 responses and confirm:
+   - the first two failures create an `OpenAI 403 temporary cooldown` reason
+   - the account is temporarily removed from scheduling during cooldown
+   - the third failure in the counter window marks the account as error
 8. Test `biscuit_baker_service_auth_credential_error_status` and confirm the credential owner is marked as error immediately.
 
 ## Recommended Git Preservation
@@ -442,5 +424,5 @@ Example:
 ```powershell
 cd E:\号池sub2api\sub2api
 git add backend frontend LOCAL_CHANGES.md
-git commit -m "Apply local Kiro balance and OpenAI 403 retry customizations"
+git commit -m "Apply local Kiro balance and OpenAI credential-owner handling"
 ```
