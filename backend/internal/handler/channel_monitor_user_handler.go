@@ -13,8 +13,9 @@ import (
 
 // ChannelMonitorUserHandler 渠道监控用户只读 handler。
 type ChannelMonitorUserHandler struct {
-	monitorService *service.ChannelMonitorService
-	settingService *service.SettingService
+	monitorService  *service.ChannelMonitorService
+	settingService  *service.SettingService
+	capacityService *service.GroupCapacityService
 }
 
 // NewChannelMonitorUserHandler 创建 handler。
@@ -22,10 +23,12 @@ type ChannelMonitorUserHandler struct {
 func NewChannelMonitorUserHandler(
 	monitorService *service.ChannelMonitorService,
 	settingService *service.SettingService,
+	capacityService *service.GroupCapacityService,
 ) *ChannelMonitorUserHandler {
 	return &ChannelMonitorUserHandler{
-		monitorService: monitorService,
-		settingService: settingService,
+		monitorService:  monitorService,
+		settingService:  settingService,
+		capacityService: capacityService,
 	}
 }
 
@@ -154,6 +157,23 @@ func (h *ChannelMonitorUserHandler) List(c *gin.Context) {
 		items = append(items, userMonitorViewToItem(v))
 	}
 	response.Success(c, gin.H{"items": items})
+}
+
+// CapacityPool GET /api/v1/channel-monitors/capacity-pool
+func (h *ChannelMonitorUserHandler) CapacityPool(c *gin.Context) {
+	if !h.featureEnabled(c) || h.capacityService == nil {
+		response.Success(c, &service.PublicCapacityPool{
+			UpdatedAt: time.Now().UTC(),
+			Groups:    []service.PublicCapacityGroupSummary{},
+		})
+		return
+	}
+	pool, err := h.capacityService.GetPublicCapacityPool(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, pool)
 }
 
 // GetStatus GET /api/v1/channel-monitors/:id/status
