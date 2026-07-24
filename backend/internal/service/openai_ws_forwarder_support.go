@@ -551,6 +551,9 @@ func classifyOpenAIWSAcquireError(err error) string {
 	}
 	var dialErr *openAIWSDialError
 	if errors.As(err, &dialErr) {
+		if isOpenAITransientHTML403Response(dialErr.StatusCode, dialErr.ResponseBody) {
+			return "transient_html_403"
+		}
 		switch dialErr.StatusCode {
 		case 426:
 			return "upgrade_required"

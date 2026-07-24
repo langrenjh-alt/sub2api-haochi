@@ -13,6 +13,15 @@ import (
 )
 
 func TestClassifyOpenAIWSAcquireError(t *testing.T) {
+	t.Run("transient_html_403", func(t *testing.T) {
+		err := &openAIWSDialError{
+			StatusCode:   http.StatusForbidden,
+			ResponseBody: []byte(`<html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><style global>.container{align-items:center;display:flex}.logo{color:#8e8ea0}.scale-appear{animation:enlarge-appear .4s ease-out}</style></head></html>`),
+			Err:          errors.New("forbidden"),
+		}
+		require.Equal(t, "transient_html_403", classifyOpenAIWSAcquireError(err))
+	})
+
 	t.Run("dial_426_upgrade_required", func(t *testing.T) {
 		err := &openAIWSDialError{StatusCode: 426, Err: errors.New("upgrade required")}
 		require.Equal(t, "upgrade_required", classifyOpenAIWSAcquireError(err))
@@ -117,6 +126,10 @@ func TestClassifyOpenAIWSReconnectReason(t *testing.T) {
 
 	reason, retryable = classifyOpenAIWSReconnectReason(wrapOpenAIWSFallback("read_event", errors.New("io")))
 	require.Equal(t, "read_event", reason)
+	require.True(t, retryable)
+
+	reason, retryable = classifyOpenAIWSReconnectReason(wrapOpenAIWSFallback("transient_html_403", errors.New("forbidden")))
+	require.Equal(t, "transient_html_403", reason)
 	require.True(t, retryable)
 }
 

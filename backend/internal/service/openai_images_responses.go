@@ -1754,9 +1754,10 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 			})
 			shouldDisable := s.handleFailoverSideEffects(upstreamCtx, resp, account, respBody, requestModel)
 			return nil, &UpstreamFailoverError{
-				StatusCode:             resp.StatusCode,
-				ResponseBody:           respBody,
-				RetryableOnSameAccount: !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
+				StatusCode:   resp.StatusCode,
+				ResponseBody: respBody,
+				RetryableOnSameAccount: !shouldDisable && (isOpenAITransientHTML403(account, resp.StatusCode, respBody) ||
+					account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode)),
 			}
 		}
 		return s.handleOpenAIImagesErrorResponse(upstreamCtx, resp, c, account, requestModel)
