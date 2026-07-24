@@ -181,6 +181,7 @@ Generic OpenAI 403 handling follows official sub2api behavior:
 - The first two failures write a 10-minute `OpenAI 403 temporary cooldown (...)` and remove the account from scheduling.
 - The third failure within the 180-minute counter window marks the account as error with `consecutive_403=3/3`.
 - A missing or failed counter backend marks the account as error instead of leaving it schedulable.
+- OpenAI's branded transient HTML 403 shell is the exception: it does not increment the counter or mutate account state, and HTTP/WS request paths retry the same account immediately before normal account failover.
 
 The remaining local extension is limited to deterministic credential-owner failures:
 
@@ -191,13 +192,25 @@ Affected files:
 
 - `backend/internal/service/account_test_service.go`
 - `backend/internal/service/account_test_service_openai_403_test.go`
+- `backend/internal/service/openai_account_runtime_block_fastpath.go`
+- `backend/internal/service/openai_alpha_search.go`
+- `backend/internal/service/openai_embeddings.go`
+- `backend/internal/service/openai_gateway_cc_pipeline.go`
+- `backend/internal/service/openai_gateway_forward.go`
+- `backend/internal/service/openai_gateway_passthrough.go`
+- `backend/internal/service/openai_gateway_service.go`
+- `backend/internal/service/openai_images.go`
+- `backend/internal/service/openai_images_responses.go`
+- `backend/internal/service/openai_oauth_passthrough_test.go`
+- `backend/internal/service/openai_ws_fallback_test.go`
+- `backend/internal/service/openai_ws_forwarder_support.go`
 - `backend/internal/service/ratelimit_service.go`
 - `backend/internal/service/ratelimit_service_403_test.go`
 
 Upgrade notes:
 
 - Keep generic OpenAI 403 counter, cooldown, and threshold behavior aligned with official sub2api.
-- Preserve only the deterministic credential-owner exception before the generic official path.
+- Preserve the transient branded-HTML retry and deterministic credential-owner exceptions before the generic official path.
 
 ### 6. Public Capacity Pool on Channel Status
 
@@ -413,7 +426,8 @@ When a newer official version is released:
    - the first two failures create an `OpenAI 403 temporary cooldown` reason
    - the account is temporarily removed from scheduling during cooldown
    - the third failure in the counter window marks the account as error
-8. Test `biscuit_baker_service_auth_credential_error_status` and confirm the credential owner is marked as error immediately.
+8. Test the branded OpenAI HTML 403 shell and confirm the current request retries without an account cooldown or 403 counter increment.
+9. Test `biscuit_baker_service_auth_credential_error_status` and confirm the credential owner is marked as error immediately.
 
 ## Recommended Git Preservation
 

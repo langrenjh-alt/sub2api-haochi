@@ -46,6 +46,22 @@ type passthroughCloseTrackingReadCloser struct {
 	closed bool
 }
 
+type transientHTML403AccountRepo struct {
+	AccountRepository
+	setErrorCalls int
+	tempCalls     int
+}
+
+func (r *transientHTML403AccountRepo) SetError(context.Context, int64, string) error {
+	r.setErrorCalls++
+	return nil
+}
+
+func (r *transientHTML403AccountRepo) SetTempUnschedulable(context.Context, int64, time.Time, string) error {
+	r.tempCalls++
+	return nil
+}
+
 func (r *passthroughCloseTrackingReadCloser) Close() error {
 	r.closed = true
 	return nil
@@ -1587,6 +1603,37 @@ func TestOpenAIGatewayService_APIKeyPassthrough_PoolModeConfigured5xxRetriesSame
 	require.ErrorAs(t, err, &failoverErr)
 	require.True(t, failoverErr.RetryableOnSameAccount)
 	require.False(t, c.Writer.Written())
+}
+
+func TestOpenAIGatewayService_OAuthPassthrough_TransientHTML403RetriesSameAccountWithoutCooldown(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
+
+	const upstreamBody = `<html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><style global>.container{align-items:center;display:flex}.logo{color:#8e8ea0}.scale-appear{animation:enlarge-appear .4s ease-out}</style></head><body>Access denied</body></html>`
+	repo := &transientHTML403AccountRepo{}
+	rateLimitService := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	svc := &OpenAIGatewayService{
+		cfg:              &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
+		httpUpstream:     &httpUpstreamRecorder{resp: &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader(upstreamBody))}},
+		rateLimitService: rateLimitService,
+	}
+	account := &Account{
+		ID: 129, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
+		Extra:       map[string]any{"openai_passthrough": true}, Status: StatusActive, Schedulable: true,
+	}
+
+	_, err := svc.Forward(context.Background(), c, account, []byte(`{"model":"gpt-5.5","input":"hello"}`))
+
+	var failoverErr *UpstreamFailoverError
+	require.ErrorAs(t, err, &failoverErr)
+	require.True(t, failoverErr.RetryableOnSameAccount)
+	require.False(t, c.Writer.Written(), "the transient 403 must be retried before committing a client response")
+	require.Zero(t, repo.setErrorCalls)
+	require.Zero(t, repo.tempCalls)
+	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
 }
 
 func TestOpenAIGatewayService_OpenAIPassthrough_CompactNetworkErrorsTriggerFailover(t *testing.T) {

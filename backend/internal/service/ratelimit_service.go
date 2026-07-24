@@ -179,6 +179,14 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 	ctx = withTempUnschedulableModel(ctx, requestedModel)
 	customErrorCodesEnabled := account.IsCustomErrorCodesEnabled()
 
+	// OpenAI occasionally returns its branded HTML error shell for a transient
+	// edge-layer 403. Keep the account schedulable so the request path can retry
+	// it immediately; this must also take precedence over broad custom 403 rules.
+	if isOpenAITransientHTML403(account, statusCode, responseBody) {
+		slog.Warn("openai_transient_html_403_retry", "account_id", account.ID)
+		return false
+	}
+
 	// 池模式默认不标记本地账号状态；但管理员显式配置的临时不可调度规则优先。
 	// 401 保留现有认证错误语义，不在这里改变池模式的认证处理。
 	if account.IsPoolMode() && !customErrorCodesEnabled {
@@ -826,6 +834,10 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 }
 
 func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte) (shouldDisable bool) {
+	if isOpenAITransientHTML403(account, http.StatusForbidden, responseBody) {
+		return false
+	}
+
 	if isOpenAIPermanentCredential403(responseBody) {
 		authAccount := account
 		if resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account); err == nil && resolved != nil {
@@ -885,6 +897,36 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 		"count", count,
 		"threshold", openAI403DisableThreshold,
 	)
+	return true
+}
+
+func isOpenAITransientHTML403(account *Account, statusCode int, responseBody []byte) bool {
+	return account != nil && account.Platform == PlatformOpenAI && isOpenAITransientHTML403Response(statusCode, responseBody)
+}
+
+func isOpenAITransientHTML403Response(statusCode int, responseBody []byte) bool {
+	if statusCode != http.StatusForbidden {
+		return false
+	}
+
+	body := strings.ToLower(strings.TrimSpace(string(responseBody)))
+	if !strings.HasPrefix(body, "<html") && !strings.HasPrefix(body, "<!doctype html") {
+		return false
+	}
+
+	// Match the stable markers in OpenAI's branded access-error shell without
+	// treating every HTML 403 (for example, a custom upstream WAF page) as retryable.
+	markers := []string{
+		`<meta name="viewport"`,
+		`.container{align-items:center`,
+		`.logo{color:#8e8ea0}`,
+		`scale-appear`,
+	}
+	for _, marker := range markers {
+		if !strings.Contains(body, marker) {
+			return false
+		}
+	}
 	return true
 }
 

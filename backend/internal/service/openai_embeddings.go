@@ -134,9 +134,10 @@ func (s *OpenAIGatewayService) ForwardEmbeddings(
 			})
 			shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody, upstreamModel)
 			return nil, &UpstreamFailoverError{
-				StatusCode:             resp.StatusCode,
-				ResponseBody:           respBody,
-				RetryableOnSameAccount: !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
+				StatusCode:   resp.StatusCode,
+				ResponseBody: respBody,
+				RetryableOnSameAccount: !shouldDisable && (isOpenAITransientHTML403(account, resp.StatusCode, respBody) ||
+					account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode)),
 			}
 		}
 		writeOpenAIEmbeddingsUpstreamResponse(c, resp, respBody, s.responseHeaderFilter)

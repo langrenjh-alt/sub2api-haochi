@@ -121,7 +121,8 @@ func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
 		resp.Header,
 		respBody,
 		upstreamMsg,
-		!shouldDisable && account.IsPoolMode() && (account.IsPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody)),
+		!shouldDisable && (isOpenAITransientHTML403(account, resp.StatusCode, respBody) ||
+			account.IsPoolMode() && (account.IsPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody))),
 	)
 }
 

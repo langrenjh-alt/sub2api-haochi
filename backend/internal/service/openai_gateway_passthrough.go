@@ -461,6 +461,9 @@ func shouldFailoverOpenAIPassthroughResponse(account *Account, statusCode int, r
 	if isOpenAIContextWindowError("", responseBody) {
 		return false
 	}
+	if isOpenAITransientHTML403(account, statusCode, responseBody) {
+		return true
+	}
 	if isOpenAIRequestBodyTooLargeError(statusCode, "", responseBody) {
 		return true
 	}
@@ -598,7 +601,8 @@ func (s *OpenAIGatewayService) handleFailoverErrorResponsePassthrough(
 		resp.Header,
 		body,
 		upstreamMsg,
-		!shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
+		!shouldDisable && (isOpenAITransientHTML403(account, resp.StatusCode, body) ||
+			account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode)),
 	)
 }
 

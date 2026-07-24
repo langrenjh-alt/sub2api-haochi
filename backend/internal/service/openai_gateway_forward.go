@@ -883,7 +883,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					resp.Header,
 					respBody,
 					upstreamMsg,
-					!shouldDisable && account.IsPoolMode() && (account.IsPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody)),
+					!shouldDisable && (isOpenAITransientHTML403(account, resp.StatusCode, respBody) ||
+						account.IsPoolMode() && (account.IsPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody))),
 				)
 			}
 			return s.handleErrorResponse(ctx, resp, c, account, body, billingModel)

@@ -704,6 +704,7 @@ func classifyOpenAIWSReconnectReason(err error) (string, bool) {
 		"acquire_conn",
 		"conn_queue_full",
 		"dial_failed",
+		"transient_html_403",
 		"upstream_5xx",
 		"event_error",
 		"error_event",
