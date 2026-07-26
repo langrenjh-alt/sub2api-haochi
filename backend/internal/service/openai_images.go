@@ -586,15 +586,8 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 		return nil, err
 	}
 	upstreamModel := account.GetMappedModel(requestModel)
-	// Allow account-level aliases for upstream image models. Some OpenAI-compatible
-	// providers expose non-"gpt-image-*" model IDs for the same images endpoint.
-	// We still require the inbound/public model to be a valid image model.
-	if upstreamModel == requestModel {
-		if err := validateOpenAIImagesModel(upstreamModel); err != nil {
-			return nil, err
-		}
-	} else if strings.TrimSpace(upstreamModel) == "" {
-		return nil, fmt.Errorf("mapped upstream image model is empty")
+	if err := validateOpenAIImagesModel(upstreamModel); err != nil {
+		return nil, err
 	}
 	logger.LegacyPrintf(
 		"service.openai_gateway",
@@ -661,10 +654,9 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 			})
 			shouldDisable := s.handleFailoverSideEffects(upstreamCtx, resp, account, respBody, upstreamModel)
 			return nil, &UpstreamFailoverError{
-				StatusCode:   resp.StatusCode,
-				ResponseBody: respBody,
-				RetryableOnSameAccount: !shouldDisable && (isOpenAITransientHTML403(account, resp.StatusCode, respBody) ||
-					account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode)),
+				StatusCode:             resp.StatusCode,
+				ResponseBody:           respBody,
+				RetryableOnSameAccount: !shouldDisable && account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
 			}
 		}
 		return s.handleOpenAIImagesErrorResponse(upstreamCtx, resp, c, account, upstreamModel)

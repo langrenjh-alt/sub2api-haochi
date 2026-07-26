@@ -46,8 +46,6 @@ var cursorResponsesUnsupportedFields = []string{
 // 这些上游普遍只支持 /v1/chat/completions，无 /v1/responses 端点。
 //
 // 当前路由策略（基于账号覆盖模式/探测标记，详见 openai_compat.ShouldUseResponsesAPI）：
-//   - Grok 账号（OAuth 或 APIKey）→ 固定走 CC→Responses 转换和 /v1/responses，
-//     以保持 Grok 原生 prompt cache 路由
 //   - APIKey 账号 + 强制或探测确认不支持 Responses → 走 forwardAsRawChatCompletions
 //     直转上游 /v1/chat/completions，不做协议转换
 //   - 其他所有情况（OAuth、APIKey 强制/探测确认支持、未探测）→ 走原有 CC→Responses
@@ -74,11 +72,17 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	}
 
 	if account.Platform == PlatformGrok {
-		// Grok prompt caching is tied to the native Responses route. Normalize
-		// every Chat Completions ingress request into Responses instead of
-		// falling back to /chat/completions based on request shape, mapped model,
-		// or the availability of an explicit cache identity.
-		return s.forwardGrokChatCompletionsViaResponses(ctx, c, account, body, promptCacheKey, defaultMappedModel)
+		if account.IsGrokOAuth() {
+			if eligible, reason := grokChatResponsesBridgeEligibility(body); eligible {
+				return s.forwardGrokChatCompletionsViaResponses(ctx, c, account, body, promptCacheKey, defaultMappedModel)
+			} else {
+				logger.L().Debug("grok chat_completions: using raw fallback",
+					zap.Int64("account_id", account.ID),
+					zap.String("reason", reason),
+				)
+			}
+		}
+		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 
 	// 入口分流：APIKey 账号 + 强制或已探测确认上游不支持 Responses，走 CC 直转。
@@ -511,11 +515,6 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	clientOutputStarted := false
 	pendingSSE := make([]string, 0, 4)
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
-	lastDownstreamWriteAt := time.Now()
-	flushDownstream := func() {
-		c.Writer.Flush()
-		lastDownstreamWriteAt = time.Now()
-	}
 	var streamFailoverErr *UpstreamFailoverError
 	var streamNonFailoverErr error
 
@@ -598,7 +597,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 					}
 					if _, err := fmt.Fprint(c.Writer, buildChatStreamErrorSSE(code, clientMsg)); err == nil {
 						_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
-						flushDownstream()
+						if fl, ok := c.Writer.(http.Flusher); ok {
+							fl.Flush()
+						}
 					}
 					// 无条件置位：成功路径防 finalizeStream 重复 [DONE]；写失败意味着连接已不可写，
 					// finalizeStream 的 [DONE] 同样发不出去，统一抑制。
@@ -641,7 +642,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				}
 			}
 			if !clientDisconnected {
-				flushDownstream()
+				c.Writer.Flush()
 			}
 			streamNonFailoverErr = fmt.Errorf("upstream response failed: %s", message)
 			return true
@@ -690,7 +691,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			}
 		}
 		if len(chunks) > 0 && !clientDisconnected && clientOutputStarted {
-			flushDownstream()
+			c.Writer.Flush()
 		}
 		return isTerminalEvent
 	}
@@ -773,7 +774,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			clientOutputStarted = !clientDisconnected
 		}
 		if !clientDisconnected {
-			flushDownstream()
+			c.Writer.Flush()
 		}
 		return resultWithUsage(), nil
 	}
@@ -877,6 +878,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	if keepaliveTicker != nil {
 		keepaliveCh = keepaliveTicker.C
 	}
+	lastDataAt := time.Now()
 	var parser openAICompatSSEFrameParser
 
 	for {
@@ -900,6 +902,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				}
 				return resultWithUsage(), newOpenAIUpstreamStreamReadError(ev.err)
 			}
+			lastDataAt = time.Now()
 			line := ev.line
 			frame, ok := parser.AddLine(line)
 			if !ok {
@@ -931,11 +934,10 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			if clientDisconnected {
 				continue
 			}
-			// Upstream gateways may emit SSE comments that are consumed by the
-			// frame parser. They must not postpone our downstream heartbeat.
-			// Comments contain no model output, so they are also safe while the
-			// silent-refusal detector is staging semantic chunks.
-			if time.Since(lastDownstreamWriteAt) < keepaliveInterval {
+			if refusalDetector.Enabled() && !clientOutputStarted {
+				continue
+			}
+			if time.Since(lastDataAt) < keepaliveInterval {
 				continue
 			}
 			// Send SSE comment as keepalive
@@ -947,7 +949,7 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 				clientDisconnected = true
 				continue
 			}
-			flushDownstream()
+			c.Writer.Flush()
 		}
 	}
 }

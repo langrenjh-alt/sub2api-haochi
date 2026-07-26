@@ -1,8 +1,5 @@
 import { buildGatewayUrl } from './client'
 
-const BATCH_IMAGE_JOB_REQUEST_TIMEOUT_MS = 30_000
-const batchImageJobRequests = new Map<string, Promise<BatchImageJob>>()
-
 export type BatchImageStatus =
   | 'queued'
   | 'running'
@@ -112,11 +109,7 @@ export interface BatchImageJobsListOptions {
   to?: string
 }
 
-export interface BatchImageRequestOptions {
-  signal?: AbortSignal
-}
-
-async function parseBatchImageError(response: Response, signal?: AbortSignal): Promise<Error> {
+async function parseBatchImageError(response: Response): Promise<Error> {
   try {
     const body = await response.json()
     const message = body?.error?.message || body?.message || response.statusText
@@ -125,16 +118,7 @@ async function parseBatchImageError(response: Response, signal?: AbortSignal): P
     ;(error as any).status = response.status
     ;(error as any).requestId = response.headers.get('X-Request-Id') || ''
     return error
-  } catch (cause) {
-    if (signal?.aborted) throw signal.reason ?? cause
-    if (
-      cause &&
-      typeof cause === 'object' &&
-      'name' in cause &&
-      ((cause as { name?: unknown }).name === 'AbortError' || (cause as { name?: unknown }).name === 'TimeoutError')
-    ) {
-      throw cause
-    }
+  } catch {
     const error = new Error(response.statusText || `HTTP ${response.status}`)
     ;(error as any).code = response.status
     ;(error as any).status = response.status
@@ -167,43 +151,15 @@ export async function submitBatchImageJob(
   return response.json()
 }
 
-export function getBatchImageJob(apiKey: string, batchId: string): Promise<BatchImageJob> {
-  const requestKey = `${apiKey}\n${batchId}`
-  const existingRequest = batchImageJobRequests.get(requestKey)
-  if (existingRequest) {
-    return existingRequest
-  }
-
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => {
-    controller.abort(new DOMException('Batch image status request timed out', 'TimeoutError'))
-  }, BATCH_IMAGE_JOB_REQUEST_TIMEOUT_MS)
-  const request = (async () => {
-    try {
-      const response = await fetch(buildGatewayUrl(`/v1/images/batches/${encodeURIComponent(batchId)}`), {
-        headers: authHeaders(apiKey),
-        signal: controller.signal,
-      })
-      if (!response.ok) throw await parseBatchImageError(response, controller.signal)
-      return await response.json()
-    } finally {
-      clearTimeout(timeoutId)
-    }
-  })()
-  const trackedRequest = request.finally(() => {
-    if (batchImageJobRequests.get(requestKey) === trackedRequest) {
-      batchImageJobRequests.delete(requestKey)
-    }
+export async function getBatchImageJob(apiKey: string, batchId: string): Promise<BatchImageJob> {
+  const response = await fetch(buildGatewayUrl(`/v1/images/batches/${encodeURIComponent(batchId)}`), {
+    headers: authHeaders(apiKey),
   })
-  batchImageJobRequests.set(requestKey, trackedRequest)
-  return trackedRequest
+  if (!response.ok) throw await parseBatchImageError(response)
+  return response.json()
 }
 
-export async function listBatchImageJobs(
-  apiKey: string,
-  options: number | BatchImageJobsListOptions = 20,
-  requestOptions: BatchImageRequestOptions = {},
-): Promise<BatchImageJobsResponse> {
+export async function listBatchImageJobs(apiKey: string, options: number | BatchImageJobsListOptions = 20): Promise<BatchImageJobsResponse> {
   const params = new URLSearchParams()
   if (typeof options === 'number') {
     params.set('limit', String(options))
@@ -218,9 +174,8 @@ export async function listBatchImageJobs(
   }
   const response = await fetch(buildGatewayUrl(`/v1/images/batches?${params.toString()}`), {
     headers: authHeaders(apiKey),
-    signal: requestOptions.signal,
   })
-  if (!response.ok) throw await parseBatchImageError(response, requestOptions.signal)
+  if (!response.ok) throw await parseBatchImageError(response)
   return response.json()
 }
 

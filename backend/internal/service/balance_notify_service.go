@@ -7,10 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -26,9 +23,6 @@ const (
 	quotaDimTotal  = "total"
 
 	defaultSiteName = "Sub2API"
-
-	balanceNotifyConfigCacheTTL    = 5 * time.Second
-	balanceNotifyConfigLoadTimeout = 3 * time.Second
 )
 
 // quotaDimLabels maps dimension names to display labels.
@@ -49,17 +43,6 @@ type BalanceNotifyService struct {
 	settingRepo              SettingRepository
 	accountRepo              AccountQuotaReader
 	notificationEmailService *NotificationEmailService
-	balanceConfigMu          sync.RWMutex
-	balanceConfigCache       balanceNotifyConfigSnapshot
-	balanceConfigCached      bool
-	balanceConfigExpiresAt   time.Time
-	balanceConfigLoadSF      singleflight.Group
-}
-
-type balanceNotifyConfigSnapshot struct {
-	enabled     bool
-	threshold   float64
-	rechargeURL string
 }
 
 // NewBalanceNotifyService creates a new BalanceNotifyService.
@@ -90,12 +73,6 @@ func (s *BalanceNotifyService) CheckBalanceAfterDeduction(ctx context.Context, u
 	if !s.canNotifyBalance(user) {
 		return
 	}
-	if user.BalanceNotifyThreshold != nil {
-		threshold := resolveBalanceThreshold(*user.BalanceNotifyThreshold, user.BalanceNotifyThresholdType, user.TotalRecharged)
-		if threshold <= 0 || !crossedDownward(oldBalance, oldBalance-cost, threshold) {
-			return
-		}
-	}
 	effectiveThreshold, rechargeURL, ok := s.resolveUserEffectiveThreshold(ctx, user)
 	if !ok {
 		return
@@ -118,11 +95,11 @@ func (s *BalanceNotifyService) canNotifyBalance(user *User) bool {
 // resolveUserEffectiveThreshold reads global + user config, returns the effective threshold.
 // Returns ok=false when notifications should be skipped.
 func (s *BalanceNotifyService) resolveUserEffectiveThreshold(ctx context.Context, user *User) (effectiveThreshold float64, rechargeURL string, ok bool) {
-	global, ok := s.loadBalanceNotifyConfig(ctx)
-	if !ok || !global.enabled {
+	globalEnabled, globalThreshold, rechargeURL := s.getBalanceNotifyConfig(ctx)
+	if !globalEnabled {
 		return 0, "", false
 	}
-	threshold := global.threshold
+	threshold := globalThreshold
 	if user.BalanceNotifyThreshold != nil {
 		threshold = *user.BalanceNotifyThreshold
 	}
@@ -133,60 +110,7 @@ func (s *BalanceNotifyService) resolveUserEffectiveThreshold(ctx context.Context
 	if effectiveThreshold <= 0 {
 		return 0, "", false
 	}
-	return effectiveThreshold, global.rechargeURL, true
-}
-
-func (s *BalanceNotifyService) loadBalanceNotifyConfig(ctx context.Context) (balanceNotifyConfigSnapshot, bool) {
-	if cached, ok := s.cachedBalanceNotifyConfig(time.Now()); ok {
-		return cached, true
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ctx.Err() != nil {
-		return balanceNotifyConfigSnapshot{}, false
-	}
-
-	resultCh := s.balanceConfigLoadSF.DoChan("balance_notify_config", func() (any, error) {
-		if cached, ok := s.cachedBalanceNotifyConfig(time.Now()); ok {
-			return cached, nil
-		}
-		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), balanceNotifyConfigLoadTimeout)
-		defer cancel()
-		enabled, threshold, rechargeURL := s.getBalanceNotifyConfig(loadCtx)
-		loaded := balanceNotifyConfigSnapshot{
-			enabled:     enabled,
-			threshold:   threshold,
-			rechargeURL: rechargeURL,
-		}
-		s.storeBalanceNotifyConfig(loaded, time.Now())
-		return loaded, nil
-	})
-
-	select {
-	case result := <-resultCh:
-		loaded, ok := result.Val.(balanceNotifyConfigSnapshot)
-		return loaded, result.Err == nil && ok
-	case <-ctx.Done():
-		return balanceNotifyConfigSnapshot{}, false
-	}
-}
-
-func (s *BalanceNotifyService) cachedBalanceNotifyConfig(now time.Time) (balanceNotifyConfigSnapshot, bool) {
-	s.balanceConfigMu.RLock()
-	defer s.balanceConfigMu.RUnlock()
-	if !s.balanceConfigCached || !now.Before(s.balanceConfigExpiresAt) {
-		return balanceNotifyConfigSnapshot{}, false
-	}
-	return s.balanceConfigCache, true
-}
-
-func (s *BalanceNotifyService) storeBalanceNotifyConfig(config balanceNotifyConfigSnapshot, now time.Time) {
-	s.balanceConfigMu.Lock()
-	s.balanceConfigCache = config
-	s.balanceConfigCached = true
-	s.balanceConfigExpiresAt = now.Add(balanceNotifyConfigCacheTTL)
-	s.balanceConfigMu.Unlock()
+	return effectiveThreshold, rechargeURL, true
 }
 
 // crossedDownward returns true when oldV was at-or-above threshold but newV dropped below it.
@@ -260,6 +184,15 @@ func (s *BalanceNotifyService) CheckAccountQuotaAfterIncrement(ctx context.Conte
 	if account == nil || s.emailService == nil || s.settingRepo == nil || cost <= 0 {
 		return
 	}
+	if !s.isAccountQuotaNotifyEnabled(ctx) {
+		return
+	}
+	adminEmails := s.getAccountQuotaNotifyEmails(ctx)
+	if len(adminEmails) == 0 {
+		return
+	}
+
+	siteName := s.getSiteName(ctx)
 	var dims []quotaDim
 	if quotaState != nil {
 		dims = buildQuotaDimsFromState(account, quotaState)
@@ -268,31 +201,7 @@ func (s *BalanceNotifyService) CheckAccountQuotaAfterIncrement(ctx context.Conte
 		dims = buildQuotaDims(freshAccount)
 		account = freshAccount // use fresh data for alert metadata
 	}
-	if !hasQuotaDimCrossing(dims, cost) || !s.isAccountQuotaNotifyEnabled(ctx) {
-		return
-	}
-	adminEmails := s.getAccountQuotaNotifyEmails(ctx)
-	if len(adminEmails) == 0 {
-		return
-	}
-
-	s.checkQuotaDimCrossings(account, dims, cost, adminEmails, s.getSiteName(ctx))
-}
-
-func hasQuotaDimCrossing(dims []quotaDim, cost float64) bool {
-	for _, dim := range dims {
-		if !dim.enabled || dim.threshold <= 0 {
-			continue
-		}
-		effectiveThreshold := dim.resolvedThreshold()
-		if effectiveThreshold <= 0 {
-			continue
-		}
-		if dim.currentUsed-cost < effectiveThreshold && dim.currentUsed >= effectiveThreshold {
-			return true
-		}
-	}
-	return false
+	s.checkQuotaDimCrossings(account, dims, cost, adminEmails, siteName)
 }
 
 // fetchFreshAccount loads the latest account from DB; falls back to the snapshot on error.

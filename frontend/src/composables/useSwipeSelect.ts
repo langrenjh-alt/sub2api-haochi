@@ -73,15 +73,6 @@ export function findRowIndexByDomPosition(scrollEl: Element, clientY: number): n
   return (clientY - rHi.bottom < rLo.top - clientY) ? idxOf(domRows[hi]) : idxOf(domRows[lo])
 }
 
-export function scrollByAndCheckMovement(
-  scrollEl: Pick<HTMLElement, 'scrollTop'>,
-  delta: number
-): boolean {
-  const previousScrollTop = scrollEl.scrollTop
-  scrollEl.scrollTop += delta
-  return scrollEl.scrollTop !== previousScrollTop
-}
-
 export function useSwipeSelect(
   containerRef: Ref<HTMLElement | null>,
   adapter: SwipeSelectAdapter,
@@ -569,13 +560,13 @@ export function useSwipeSelect(
       const findIdx = virtualContext ? findRowIndexAtYVirtual : findRowIndexAtY
       const apply = virtualContext ? applyRangeVirtual : applyRange
       const step = () => {
-        if (!scrollByAndCheckMovement(scrollEl, dy)) {
-          scrollRAF = 0
-          return
+        const prevScrollTop = scrollEl.scrollTop
+        scrollEl.scrollTop += dy
+        // Only re-check selection if scroll actually moved
+        if (scrollEl.scrollTop !== prevScrollTop) {
+          const rowIdx = findIdx(lastMouseY)
+          if (rowIdx >= 0 && rowIdx !== lastEndIndex) apply(rowIdx)
         }
-
-        const rowIdx = findIdx(lastMouseY)
-        if (rowIdx >= 0 && rowIdx !== lastEndIndex) apply(rowIdx)
         scrollRAF = requestAnimationFrame(step)
       }
       scrollRAF = requestAnimationFrame(step)

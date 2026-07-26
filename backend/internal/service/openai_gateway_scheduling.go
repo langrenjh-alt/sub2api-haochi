@@ -19,6 +19,39 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const (
+	openCodeSessionAffinityHeader = "X-Session-Affinity"
+	openCodeSessionIDHeader       = "X-Session-Id"
+	openCodeNativeSessionHeader   = "X-OpenCode-Session"
+	codeBuddyConversationHeader   = "X-Conversation-ID"
+)
+
+var explicitOpenAIHeaderSessionNames = []string{
+	"session_id",
+	"conversation_id",
+	openCodeSessionAffinityHeader,
+	openCodeSessionIDHeader,
+	openCodeNativeSessionHeader,
+	codeBuddyConversationHeader,
+}
+
+// explicitOpenAIHeaderSessionID resolves stable conversation identifiers sent
+// by OpenAI-compatible clients. Keep this list limited to session-scoped
+// fields: request/message IDs rotate every turn and would defeat sticky routing
+// and upstream prompt caching.
+func explicitOpenAIHeaderSessionID(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+
+	for _, header := range explicitOpenAIHeaderSessionNames {
+		if sessionID := strings.TrimSpace(c.GetHeader(header)); sessionID != "" {
+			return sessionID
+		}
+	}
+	return ""
+}
+
 // ExtractSessionID extracts the raw session ID from headers or body without hashing.
 // Used by ForwardAsAnthropic to pass as prompt_cache_key for upstream cache.
 func (s *OpenAIGatewayService) ExtractSessionID(c *gin.Context, body []byte) string {
@@ -30,10 +63,7 @@ func explicitOpenAISessionID(c *gin.Context, body []byte) string {
 		return ""
 	}
 
-	sessionID := strings.TrimSpace(c.GetHeader("session_id"))
-	if sessionID == "" {
-		sessionID = strings.TrimSpace(c.GetHeader("conversation_id"))
-	}
+	sessionID := explicitOpenAIHeaderSessionID(c)
 	if sessionID == "" && len(body) > 0 {
 		sessionID = strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String())
 	}
@@ -49,10 +79,7 @@ func explicitOpenAIRequestSessionID(c *gin.Context, body []byte) string {
 		return ""
 	}
 
-	sessionID := strings.TrimSpace(c.GetHeader("session_id"))
-	if sessionID == "" {
-		sessionID = strings.TrimSpace(c.GetHeader("conversation_id"))
-	}
+	sessionID := explicitOpenAIHeaderSessionID(c)
 	if sessionID == "" && isGrokRequestContext(c) {
 		sessionID = strings.TrimSpace(c.GetHeader(grokConversationIDHeader))
 	}
@@ -81,9 +108,11 @@ func (s *OpenAIGatewayService) GenerateExplicitSessionHash(c *gin.Context, body 
 // Priority:
 //  1. Header: session_id
 //  2. Header: conversation_id
-//  3. Header: x-grok-conv-id (Grok groups only)
-//  4. Body:   prompt_cache_key (opencode)
-//  5. Body:   content-based fallback (model + system + tools + first user message)
+//  3. Header: x-session-affinity / x-session-id / x-opencode-session (OpenCode)
+//  4. Header: x-conversation-id (CodeBuddy)
+//  5. Header: x-grok-conv-id (Grok groups only)
+//  6. Body:   prompt_cache_key
+//  7. Body:   content-based fallback (model + system + tools + first user message)
 func (s *OpenAIGatewayService) GenerateSessionHash(c *gin.Context, body []byte) string {
 	if c == nil {
 		return ""
@@ -170,14 +199,24 @@ func normalizeOpenAICompatiblePlatform(platform string) string {
 	return PlatformOpenAI
 }
 
-func noAvailableOpenAISelectionError(requestedModel string, compactBlocked bool) error {
+// details carries an optional machine-parseable exclusion summary (e.g.
+// "pool=2, filtered: quota_auto_pause_7d=1 runtime_blocked=1") appended in
+// parentheses. It is for server-side logs / ops diagnostics only: handlers
+// never forward this error text to OpenAI-platform clients (they respond with
+// the generic classification message). Callers that must preserve the legacy
+// message pass "".
+func noAvailableOpenAISelectionError(requestedModel string, compactBlocked bool, details string) error {
 	if compactBlocked {
 		return ErrNoAvailableCompactAccounts
 	}
+	message := "no available OpenAI accounts"
 	if requestedModel != "" {
-		return openAINoAvailableSelectionError{message: fmt.Sprintf("no available OpenAI accounts supporting model: %s", requestedModel)}
+		message = fmt.Sprintf("no available OpenAI accounts supporting model: %s", requestedModel)
 	}
-	return openAINoAvailableSelectionError{message: "no available OpenAI accounts"}
+	if details != "" {
+		message += " (" + details + ")"
+	}
+	return openAINoAvailableSelectionError{message: message}
 }
 
 type openAINoAvailableSelectionError struct {
@@ -192,10 +231,16 @@ func (e openAINoAvailableSelectionError) Unwrap() error {
 	return ErrNoAvailableAccounts
 }
 
-// openAICompactSupportTier classifies an OpenAI account by compact capability.
+// openAICompactSupportTier classifies an OpenAI-compatible account by compact capability.
 // 0 = explicitly unsupported, 1 = unknown / not yet probed, 2 = explicitly supported.
 func openAICompactSupportTier(account *Account) int {
-	if account == nil || !account.IsOpenAI() {
+	if account == nil {
+		return 0
+	}
+	if account.IsGrok() {
+		return 2
+	}
+	if !account.IsOpenAI() {
 		return 0
 	}
 	supported, known := account.OpenAICompactSupportKnown()
@@ -252,7 +297,7 @@ func isOpenAICompatibleAccountEligibleForRequest(ctx context.Context, account *A
 		}
 		return false
 	}
-	if requireCompact && (!account.IsOpenAI() || openAICompactSupportTier(account) == 0) {
+	if requireCompact && openAICompactSupportTier(account) == 0 {
 		return false
 	}
 	return true
@@ -612,7 +657,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 	selected, compactBlocked := s.selectBestAccount(ctx, groupID, platform, accounts, requestedModel, excludedIDs, requireCompact, requiredCapability, preferLowUpstreamRate)
 
 	if selected == nil {
-		return nil, noAvailableOpenAISelectionError(requestedModel, compactBlocked)
+		return nil, noAvailableOpenAISelectionError(requestedModel, compactBlocked, "")
 	}
 
 	hydrated, err := s.hydrateSelectedAccount(ctx, selected)
@@ -827,53 +872,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		if err == nil && result != nil && result.Acquired {
 			return s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc)
 		}
-		busyStickyAccountID := stickyAccountID
-		if shouldBypassGrokStickyWaitForRequest(platform, requiredCapability) &&
-			busyStickyAccountID <= 0 && sessionHash != "" && err == nil && result != nil && !result.Acquired {
-			if currentStickyID, lookupErr := s.getStickySessionAccountID(ctx, groupID, sessionHash); lookupErr == nil {
-				busyStickyAccountID = currentStickyID
-			}
-		}
-		if shouldBypassGrokStickyWaitForRequest(platform, requiredCapability) &&
-			busyStickyAccountID > 0 && busyStickyAccountID == account.ID && err == nil && result != nil && !result.Acquired {
-			excludedIDs = withExcludedAccountID(excludedIDs, busyStickyAccountID)
-			slog.Info("sticky_escape_triggered",
-				"account_id", busyStickyAccountID,
-				"platform", platform,
-				"reason", "concurrency_full",
-			)
-			var fallbackAccount *Account
-			for probeCount := 0; probeCount < openAIAccountSelectionProbeLimit; probeCount++ {
-				nextAccount, selectErr := s.selectAccountForModelWithExclusions(ctx, groupID, platform, "", requestedModel, excludedIDs, requireCompact, 0, requiredCapability, preferLowUpstreamRate)
-				if selectErr != nil {
-					if fallbackAccount == nil {
-						return nil, selectErr
-					}
-					account = fallbackAccount
-					break
-				}
-
-				nextResult, acquireErr := s.tryAcquireAccountSlot(ctx, nextAccount.ID, nextAccount.Concurrency)
-				if acquireErr != nil {
-					return nil, acquireErr
-				}
-				if nextResult != nil && nextResult.Acquired {
-					selection, hydrateErr := s.newAcquiredSelectionResult(ctx, nextAccount, nextResult.ReleaseFunc)
-					if hydrateErr != nil {
-						return nil, hydrateErr
-					}
-					_ = s.BindStickySession(ctx, groupID, sessionHash, nextAccount.ID)
-					return selection, nil
-				}
-				if fallbackAccount == nil {
-					fallbackAccount = nextAccount
-				}
-				excludedIDs = withExcludedAccountID(excludedIDs, nextAccount.ID)
-			}
-			if fallbackAccount != nil {
-				account = fallbackAccount
-			}
-		}
 		if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
 			waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, account.ID)
 			if waitingCount < cfg.StickySessionMaxWaiting {
@@ -942,23 +940,14 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 							return selection, nil
 						}
 
-						if shouldBypassGrokStickyWaitForRequest(platform, requiredCapability) && err == nil && result != nil && !result.Acquired {
-							excludedIDs = withExcludedAccountID(excludedIDs, accountID)
-							slog.Info("sticky_escape_triggered",
-								"account_id", accountID,
-								"platform", platform,
-								"reason", "concurrency_full",
-							)
-						} else {
-							waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
-							if waitingCount < cfg.StickySessionMaxWaiting {
-								return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
-									AccountID:      accountID,
-									MaxConcurrency: account.Concurrency,
-									Timeout:        cfg.StickySessionWaitTimeout,
-									MaxWaiting:     cfg.StickySessionMaxWaiting,
-								})
-							}
+						waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
+						if waitingCount < cfg.StickySessionMaxWaiting {
+							return s.newSelectionResult(ctx, account, false, nil, &AccountWaitPlan{
+								AccountID:      accountID,
+								MaxConcurrency: account.Concurrency,
+								Timeout:        cfg.StickySessionWaitTimeout,
+								MaxWaiting:     cfg.StickySessionMaxWaiting,
+							})
 						}
 					}
 				}
@@ -1021,31 +1010,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			ID:             acc.ID,
 			MaxConcurrency: acc.EffectiveLoadFactor(),
 		})
-	}
-	resolveLateGrokSticky := func() {
-		if !shouldBypassGrokStickyWaitForRequest(platform, requiredCapability) || stickyAccountID > 0 || sessionHash == "" {
-			return
-		}
-		currentStickyID, lookupErr := s.getStickySessionAccountID(ctx, groupID, sessionHash)
-		if lookupErr != nil || currentStickyID <= 0 {
-			return
-		}
-		stickyAccountID = currentStickyID
-		excludedIDs = withExcludedAccountID(excludedIDs, currentStickyID)
-		remaining := make([]*Account, 0, len(candidates))
-		for _, candidate := range candidates {
-			if candidate.ID != currentStickyID {
-				remaining = append(remaining, candidate)
-			}
-		}
-		candidates = remaining
-		accountLoads = accountLoads[:0]
-		for _, candidate := range candidates {
-			accountLoads = append(accountLoads, AccountWithConcurrency{
-				ID:             candidate.ID,
-				MaxConcurrency: candidate.EffectiveLoadFactor(),
-			})
-		}
 	}
 
 	tryAcquireFromLoadMap := func(loadMap map[int64]*AccountLoadInfo) (*AccountSelectionResult, bool, error) {
@@ -1181,7 +1145,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		} else if selection != nil {
 			return selection, nil
 		} else if attempted {
-			resolveLateGrokSticky()
 			if freshLoadMap, loadErr := s.concurrencyService.GetAccountsLoadBatchFresh(ctx, accountLoads); loadErr == nil {
 				if selection, _, selectErr := tryAcquireFromLoadMap(freshLoadMap); selectErr != nil {
 					return nil, selectErr
@@ -1191,8 +1154,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			}
 		}
 	}
-
-	resolveLateGrokSticky()
 
 	// ============ Layer 3: Fallback wait ============
 	sortAccountsByPriorityAndLastUsed(candidates, false)
@@ -1205,9 +1166,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		candidates = prioritizeOpenAICompactAccounts(candidates)
 	}
 	for _, acc := range candidates {
-		if isExcluded(acc.ID) {
-			continue
-		}
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, platform, requestedModel, false, requiredCapability)
 		if fresh == nil {
 			continue

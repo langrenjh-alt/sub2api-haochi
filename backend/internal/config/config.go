@@ -633,12 +633,6 @@ type TokenRefreshConfig struct {
 	ProviderConcurrency int `mapstructure:"provider_concurrency"`
 	// 每个平台、每个进程允许的刷新请求速率
 	ProviderQPS int `mapstructure:"provider_qps"`
-	// Grok 每个后台刷新 leader 允许的并发刷新数；0 表示继承 ProviderConcurrency
-	GrokProviderConcurrency int `mapstructure:"grok_provider_concurrency"`
-	// Grok 每个后台刷新 leader 允许的刷新请求速率；0 表示继承 ProviderQPS
-	GrokProviderQPS int `mapstructure:"grok_provider_qps"`
-	// Grok 刷新窗口的确定性错峰范围（分钟）
-	GrokRefreshJitterMinutes int `mapstructure:"grok_refresh_jitter_minutes"`
 	// 一个周期内连续临时失败达到此值后停止该平台
 	ProviderFailureThreshold int `mapstructure:"provider_failure_threshold"`
 	// 单次上游刷新尝试的超时（秒）
@@ -919,6 +913,8 @@ type GatewayConfig struct {
 	OpenAICompactModel string `mapstructure:"openai_compact_model"`
 	// OpenAIWS: OpenAI Responses WebSocket 配置（默认开启，可按需回滚到 HTTP）
 	OpenAIWS GatewayOpenAIWSConfig `mapstructure:"openai_ws"`
+	// Live: ChatGPT Frameless Live 会话配置。
+	Live GatewayLiveConfig `mapstructure:"live"`
 	// OpenAIScheduler: OpenAI 高级调度器粘性逃逸配置
 	OpenAIScheduler GatewayOpenAISchedulerConfig `mapstructure:"openai_scheduler"`
 	// OpenAIHTTP2: OpenAI HTTP 上游协议策略（默认启用 HTTP/2，可按代理能力回退 HTTP/1.1）
@@ -943,13 +939,9 @@ type GatewayConfig struct {
 	// 建议值：预估的活跃账户数 * 1.2（留有余量）
 	MaxUpstreamClients int `mapstructure:"max_upstream_clients"`
 	// ClientIdleTTLSeconds: 上游连接池客户端空闲回收阈值（秒）
-	// 动态就绪池关闭时作为硬回收阈值；开启时由 recent+reserve 目标接管，
-	// 允许最小备用池中的 client 条目保留更久。
+	// 超过此时间未使用的客户端会被标记为可回收
 	// 建议值：根据用户访问频率设置，一般 10-30 分钟
 	ClientIdleTTLSeconds int `mapstructure:"client_idle_ttl_seconds"`
-	// DynamicReadyPool: 全平台调度快照、HTTP transport 热池和 WebSocket 池的
-	// 本地资源压力协调配置。HTTP/1.1 只保留真实业务请求建立的连接，不发送探测请求。
-	DynamicReadyPool GatewayDynamicReadyPoolConfig `mapstructure:"dynamic_ready_pool"`
 	// ConcurrencySlotTTLMinutes: 并发槽位过期时间（分钟）
 	// 应大于最长 LLM 请求时间，防止请求完成前槽位过期
 	ConcurrencySlotTTLMinutes int `mapstructure:"concurrency_slot_ttl_minutes"`
@@ -1009,6 +1001,11 @@ type GatewayConfig struct {
 	UserMessageQueue UserMessageQueueConfig `mapstructure:"user_message_queue"`
 }
 
+type GatewayLiveConfig struct {
+	// MaxSessionDurationSeconds 是 Live 会话的硬上限。
+	MaxSessionDurationSeconds int `mapstructure:"max_session_duration_seconds"`
+}
+
 // GatewayOpenAIHTTP2Config OpenAI HTTP 上游协议配置。
 // 默认启用 HTTP/2；在部分代理不兼容时按策略回退 HTTP/1.1。
 type GatewayOpenAIHTTP2Config struct {
@@ -1033,23 +1030,6 @@ type GatewayOpenAIProxyStreamCircuitConfig struct {
 	WindowSeconds int `mapstructure:"window_seconds"`
 	// TTLSeconds: 代理隔离持续时间（秒）。
 	TTLSeconds int `mapstructure:"ttl_seconds"`
-}
-
-// GatewayDynamicReadyPoolConfig controls local hot-resource retention. The
-// scheduler snapshot remains the source of truth for account readiness; this
-// policy only decides how many already-used HTTP/WS resources stay warm.
-type GatewayDynamicReadyPoolConfig struct {
-	Enabled               bool    `mapstructure:"enabled"`
-	SampleIntervalSeconds int     `mapstructure:"sample_interval_seconds"`
-	RecentWindowSeconds   int     `mapstructure:"recent_window_seconds"`
-	ReserveRatio          float64 `mapstructure:"reserve_ratio"`
-	MinReserve            int     `mapstructure:"min_reserve"`
-	HighReserveRatio      float64 `mapstructure:"high_reserve_ratio"`
-	HighMinReserve        int     `mapstructure:"high_min_reserve"`
-	HighWatermark         float64 `mapstructure:"high_watermark"`
-	HighExitWatermark     float64 `mapstructure:"high_exit_watermark"`
-	CriticalWatermark     float64 `mapstructure:"critical_watermark"`
-	CriticalExitWatermark float64 `mapstructure:"critical_exit_watermark"`
 }
 
 // UserMessageQueueConfig 用户消息串行队列配置
@@ -1443,6 +1423,7 @@ func (d *DatabaseConfig) DSNWithTimezone(tz string) string {
 type RedisConfig struct {
 	Host     string `mapstructure:"host"`
 	Port     int    `mapstructure:"port"`
+	Username string `mapstructure:"username"`
 	Password string `mapstructure:"password"`
 	DB       int    `mapstructure:"db"`
 	// 连接池与超时配置（性能优化：可配置化连接池参数）
@@ -2021,6 +2002,7 @@ func setDefaults() {
 	// Redis
 	viper.SetDefault("redis.host", "localhost")
 	viper.SetDefault("redis.port", 6379)
+	viper.SetDefault("redis.username", "")
 	viper.SetDefault("redis.password", "")
 	viper.SetDefault("redis.db", 0)
 	viper.SetDefault("redis.dial_timeout_seconds", 5)
@@ -2213,6 +2195,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.codex_image_generation_bridge_enabled", false)
 	viper.SetDefault("gateway.openai_passthrough_allow_timeout_headers", false)
 	viper.SetDefault("gateway.openai_compact_model", "gpt-5.4")
+	viper.SetDefault("gateway.live.max_session_duration_seconds", 3600)
 	// OpenAI Responses WebSocket（默认开启；可通过 force_http 紧急回滚）
 	viper.SetDefault("gateway.openai_ws.enabled", true)
 	viper.SetDefault("gateway.openai_ws.mode_router_v2_enabled", false)
@@ -2293,26 +2276,12 @@ func setDefaults() {
 	viper.SetDefault("gateway.gemini_debug_response_headers", false)
 	viper.SetDefault("gateway.connection_pool_isolation", ConnectionPoolIsolationAccountProxy)
 	// HTTP 上游连接池配置（针对 5000+ 并发用户优化）
-	viper.SetDefault("gateway.max_idle_conns", 8192)           // 96GB / 400-500 并发实例的高容量默认值
-	viper.SetDefault("gateway.max_idle_conns_per_host", 512)   // HTTP/1.1 共享池也保留充足热连接
-	viper.SetDefault("gateway.max_conns_per_host", 2048)       // 每主机最大连接数（含活跃）
-	viper.SetDefault("gateway.idle_conn_timeout_seconds", 300) // 与动态热窗口对齐；不发送 H1 应用层探测
-	viper.SetDefault("gateway.max_upstream_clients", 8192)
-	viper.SetDefault("gateway.client_idle_ttl_seconds", 1800)
-	// Dynamic ready pool: keep a generous passive reserve under normal load and
-	// let local memory/FD pressure shrink only idle resources. This never emits
-	// HTTP/1.1 application requests.
-	viper.SetDefault("gateway.dynamic_ready_pool.enabled", true)
-	viper.SetDefault("gateway.dynamic_ready_pool.sample_interval_seconds", 5)
-	viper.SetDefault("gateway.dynamic_ready_pool.recent_window_seconds", 300)
-	viper.SetDefault("gateway.dynamic_ready_pool.reserve_ratio", 1.00)
-	viper.SetDefault("gateway.dynamic_ready_pool.min_reserve", 512)
-	viper.SetDefault("gateway.dynamic_ready_pool.high_reserve_ratio", 0.25)
-	viper.SetDefault("gateway.dynamic_ready_pool.high_min_reserve", 128)
-	viper.SetDefault("gateway.dynamic_ready_pool.high_watermark", 0.85)
-	viper.SetDefault("gateway.dynamic_ready_pool.high_exit_watermark", 0.72)
-	viper.SetDefault("gateway.dynamic_ready_pool.critical_watermark", 0.92)
-	viper.SetDefault("gateway.dynamic_ready_pool.critical_exit_watermark", 0.84)
+	viper.SetDefault("gateway.max_idle_conns", 2560)          // 最大空闲连接总数（高并发场景可调大）
+	viper.SetDefault("gateway.max_idle_conns_per_host", 120)  // 每主机最大空闲连接（HTTP/2 场景默认）
+	viper.SetDefault("gateway.max_conns_per_host", 1024)      // 每主机最大连接数（含活跃；流式/HTTP1.1 场景可调大，如 2400+）
+	viper.SetDefault("gateway.idle_conn_timeout_seconds", 90) // 空闲连接超时（秒）
+	viper.SetDefault("gateway.max_upstream_clients", 5000)
+	viper.SetDefault("gateway.client_idle_ttl_seconds", 900)
 	viper.SetDefault("gateway.concurrency_slot_ttl_minutes", 30) // 并发槽位过期时间（支持超长请求）
 	viper.SetDefault("gateway.stream_data_interval_timeout", 180)
 	viper.SetDefault("gateway.stream_keepalive_interval", 10)
@@ -2377,15 +2346,12 @@ func setDefaults() {
 	viper.SetDefault("token_refresh.refresh_before_expiry_hours", 0.5) // 提前30分钟刷新（适配Google 1小时token）
 	viper.SetDefault("token_refresh.max_retries", 3)                   // 最多重试3次
 	viper.SetDefault("token_refresh.retry_backoff_seconds", 2)         // 重试退避基础2秒
-	viper.SetDefault("token_refresh.candidate_page_size", 1000)
+	viper.SetDefault("token_refresh.candidate_page_size", 200)
 	viper.SetDefault("token_refresh.provider_concurrency", 4)
 	viper.SetDefault("token_refresh.provider_qps", 2)
-	viper.SetDefault("token_refresh.grok_provider_concurrency", 32)
-	viper.SetDefault("token_refresh.grok_provider_qps", 25)
-	viper.SetDefault("token_refresh.grok_refresh_jitter_minutes", 60)
 	viper.SetDefault("token_refresh.provider_failure_threshold", 3)
 	viper.SetDefault("token_refresh.attempt_timeout_seconds", 15)
-	viper.SetDefault("token_refresh.cycle_timeout_seconds", 3600)
+	viper.SetDefault("token_refresh.cycle_timeout_seconds", 240)
 
 	// Gemini OAuth - configure via environment variables or config file
 	// GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET
@@ -3081,6 +3047,9 @@ func (c *Config) Validate() error {
 		(c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds > 0 && c.Gateway.OpenAIHighEffortFirstOutputTimeoutSeconds < 30) {
 		return fmt.Errorf("gateway.openai_high_effort_first_output_timeout_seconds must be 0 or between 30-1800 seconds")
 	}
+	if c.Gateway.Live.MaxSessionDurationSeconds <= 0 {
+		c.Gateway.Live.MaxSessionDurationSeconds = 3600
+	}
 	if strings.TrimSpace(c.Gateway.ConnectionPoolIsolation) != "" {
 		switch c.Gateway.ConnectionPoolIsolation {
 		case ConnectionPoolIsolationProxy, ConnectionPoolIsolationAccount, ConnectionPoolIsolationAccountProxy:
@@ -3116,46 +3085,14 @@ func (c *Config) Validate() error {
 	if c.Gateway.IdleConnTimeoutSeconds <= 0 {
 		return fmt.Errorf("gateway.idle_conn_timeout_seconds must be positive")
 	}
-	if c.Gateway.IdleConnTimeoutSeconds > 600 {
-		slog.Warn("gateway.idle_conn_timeout_seconds is high; verify upstream and proxy idle timeouts", "idle_conn_timeout_seconds", c.Gateway.IdleConnTimeoutSeconds)
+	if c.Gateway.IdleConnTimeoutSeconds > 180 {
+		slog.Warn("gateway.idle_conn_timeout_seconds is high; consider 60-120 seconds for better connection reuse", "idle_conn_timeout_seconds", c.Gateway.IdleConnTimeoutSeconds)
 	}
 	if c.Gateway.MaxUpstreamClients <= 0 {
 		return fmt.Errorf("gateway.max_upstream_clients must be positive")
 	}
 	if c.Gateway.ClientIdleTTLSeconds <= 0 {
 		return fmt.Errorf("gateway.client_idle_ttl_seconds must be positive")
-	}
-	if ready := c.Gateway.DynamicReadyPool; ready.Enabled {
-		if ready.SampleIntervalSeconds < 1 || ready.SampleIntervalSeconds > 300 {
-			return fmt.Errorf("gateway.dynamic_ready_pool.sample_interval_seconds must be between 1-300")
-		}
-		if ready.RecentWindowSeconds < 1 || ready.RecentWindowSeconds > 3600 {
-			return fmt.Errorf("gateway.dynamic_ready_pool.recent_window_seconds must be between 1-3600")
-		}
-		if ready.ReserveRatio < 0 || ready.ReserveRatio > 5 {
-			return fmt.Errorf("gateway.dynamic_ready_pool.reserve_ratio must be between 0-5")
-		}
-		if ready.MinReserve < 0 {
-			return fmt.Errorf("gateway.dynamic_ready_pool.min_reserve must be non-negative")
-		}
-		if ready.HighReserveRatio < 0 || ready.HighReserveRatio > ready.ReserveRatio {
-			return fmt.Errorf("gateway.dynamic_ready_pool.high_reserve_ratio must be between 0 and reserve_ratio")
-		}
-		if ready.HighMinReserve < 0 || ready.HighMinReserve > ready.MinReserve {
-			return fmt.Errorf("gateway.dynamic_ready_pool.high_min_reserve must be between 0 and min_reserve")
-		}
-		if ready.HighExitWatermark <= 0 || ready.HighExitWatermark >= ready.HighWatermark {
-			return fmt.Errorf("gateway.dynamic_ready_pool.high_exit_watermark must be within (0, high_watermark)")
-		}
-		if ready.HighWatermark <= 0 || ready.HighWatermark >= ready.CriticalWatermark {
-			return fmt.Errorf("gateway.dynamic_ready_pool.high_watermark must be within (0, critical_watermark)")
-		}
-		if ready.CriticalWatermark <= 0 || ready.CriticalWatermark > 1 {
-			return fmt.Errorf("gateway.dynamic_ready_pool.critical_watermark must be within (0,1]")
-		}
-		if ready.CriticalExitWatermark <= ready.HighExitWatermark || ready.CriticalExitWatermark >= ready.CriticalWatermark {
-			return fmt.Errorf("gateway.dynamic_ready_pool.critical_exit_watermark must be between high_exit_watermark and critical_watermark")
-		}
 	}
 	if c.Gateway.ConcurrencySlotTTLMinutes <= 0 {
 		return fmt.Errorf("gateway.concurrency_slot_ttl_minutes must be positive")

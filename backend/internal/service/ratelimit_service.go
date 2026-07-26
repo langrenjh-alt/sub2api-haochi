@@ -179,14 +179,6 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 	ctx = withTempUnschedulableModel(ctx, requestedModel)
 	customErrorCodesEnabled := account.IsCustomErrorCodesEnabled()
 
-	// OpenAI occasionally returns its branded HTML error shell for a transient
-	// edge-layer 403. Keep the account schedulable so the request path can retry
-	// it immediately; this must also take precedence over broad custom 403 rules.
-	if isOpenAITransientHTML403(account, statusCode, responseBody) {
-		slog.Warn("openai_transient_html_403_retry", "account_id", account.ID)
-		return false
-	}
-
 	// 池模式默认不标记本地账号状态；但管理员显式配置的临时不可调度规则优先。
 	// 401 保留现有认证错误语义，不在这里改变池模式的认证处理。
 	if account.IsPoolMode() && !customErrorCodesEnabled {
@@ -223,12 +215,9 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		}
 	}
 
-	// 先尝试临时不可调度规则（401除外）。OpenAI 的确定性凭证失效 403
-	// 必须继续进入永久错误分支，不能被宽泛的自定义 403 冷却规则截获。
-	permanentOpenAICredential403 := statusCode == http.StatusForbidden &&
-		account.Platform == PlatformOpenAI &&
-		isOpenAIPermanentCredential403(responseBody)
-	if statusCode != 401 && !permanentOpenAICredential403 {
+	// 先尝试临时不可调度规则（401除外）
+	// 如果匹配成功，直接返回，不执行后续禁用逻辑
+	if statusCode != 401 {
 		if s.tryTempUnschedulable(ctx, account, statusCode, responseBody, firstRequestedModel(requestedModel)) {
 			return true
 		}
@@ -834,28 +823,6 @@ func (s *RateLimitService) handle403(ctx context.Context, account *Account, upst
 }
 
 func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account, upstreamMsg string, responseBody []byte) (shouldDisable bool) {
-	if isOpenAITransientHTML403(account, http.StatusForbidden, responseBody) {
-		return false
-	}
-
-	if isOpenAIPermanentCredential403(responseBody) {
-		authAccount := account
-		if resolved, err := resolveCredentialAccount(ctx, s.accountRepo, account); err == nil && resolved != nil {
-			authAccount = resolved
-		} else if err != nil {
-			slog.Warn("openai_403_resolve_credential_owner_failed", "account_id", account.ID, "error", err)
-		}
-
-		msg := buildForbiddenErrorMessage(
-			"Workspace membership invalid (403):",
-			upstreamMsg,
-			responseBody,
-			"personal access token owner is not an active workspace member",
-		)
-		s.handleAuthError(ctx, authAccount, msg)
-		return true
-	}
-
 	msg := buildForbiddenErrorMessage(
 		"Access forbidden (403):",
 		upstreamMsg,
@@ -898,46 +865,6 @@ func (s *RateLimitService) handleOpenAI403(ctx context.Context, account *Account
 		"threshold", openAI403DisableThreshold,
 	)
 	return true
-}
-
-func isOpenAITransientHTML403(account *Account, statusCode int, responseBody []byte) bool {
-	return account != nil && account.Platform == PlatformOpenAI && isOpenAITransientHTML403Response(statusCode, responseBody)
-}
-
-func isOpenAITransientHTML403Response(statusCode int, responseBody []byte) bool {
-	if statusCode != http.StatusForbidden {
-		return false
-	}
-
-	body := strings.ToLower(strings.TrimSpace(string(responseBody)))
-	if !strings.HasPrefix(body, "<html") && !strings.HasPrefix(body, "<!doctype html") {
-		return false
-	}
-
-	// Match the stable markers in OpenAI's branded access-error shell without
-	// treating every HTML 403 (for example, a custom upstream WAF page) as retryable.
-	markers := []string{
-		`<meta name="viewport"`,
-		`.container{align-items:center`,
-		`.logo{color:#8e8ea0}`,
-		`scale-appear`,
-	}
-	for _, marker := range markers {
-		if !strings.Contains(body, marker) {
-			return false
-		}
-	}
-	return true
-}
-
-func isOpenAIPermanentCredential403(responseBody []byte) bool {
-	const credentialErrorCode = "biscuit_baker_service_auth_credential_error_status"
-	if strings.EqualFold(strings.TrimSpace(extractUpstreamErrorCode(responseBody)), credentialErrorCode) {
-		return true
-	}
-
-	message := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(responseBody)))
-	return strings.Contains(message, "personal access token owner is not an active member of the selected workspace")
 }
 
 // handleAntigravity403 处理 Antigravity 平台的 403 错误

@@ -46,22 +46,6 @@ type passthroughCloseTrackingReadCloser struct {
 	closed bool
 }
 
-type transientHTML403AccountRepo struct {
-	AccountRepository
-	setErrorCalls int
-	tempCalls     int
-}
-
-func (r *transientHTML403AccountRepo) SetError(context.Context, int64, string) error {
-	r.setErrorCalls++
-	return nil
-}
-
-func (r *transientHTML403AccountRepo) SetTempUnschedulable(context.Context, int64, time.Time, string) error {
-	r.tempCalls++
-	return nil
-}
-
 func (r *passthroughCloseTrackingReadCloser) Close() error {
 	r.closed = true
 	return nil
@@ -466,7 +450,10 @@ func TestOpenAIGatewayService_OAuthPassthrough_NamespaceRequestAndStreamResponse
 			{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","description":"spawn","parameters":{"type":"object"}}]}
 		],
 		"tool_choice":{"type":"function","name":"spawn_agent","namespace":"collaboration"},
-		"input":[{"type":"function_call","call_id":"call_old","name":"spawn_agent","namespace":"collaboration","arguments":"{}"}]
+		"input":[
+			{"type":"function_call","call_id":"call_old","name":"spawn_agent","namespace":"collaboration","arguments":"{}"},
+			{"type":"message","role":"user","namespace":"residual","content":[{"type":"input_text","text":"keep","namespace":"nested"}]}
+		]
 	}`)
 
 	upstreamSSE := strings.Join([]string{
@@ -504,6 +491,9 @@ func TestOpenAIGatewayService_OAuthPassthrough_NamespaceRequestAndStreamResponse
 	require.False(t, gjson.GetBytes(upstream.lastBody, "tool_choice.namespace").Exists())
 	require.Equal(t, "collaboration__spawn_agent", gjson.GetBytes(upstream.lastBody, "input.0.name").String())
 	require.False(t, gjson.GetBytes(upstream.lastBody, "input.0.namespace").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "input.1.namespace").Exists())
+	require.Equal(t, "nested", gjson.GetBytes(upstream.lastBody, "input.1.content.0.namespace").String())
+	require.Len(t, upstream.bodies, 1)
 
 	downstream := rec.Body.String()
 	require.NotContains(t, downstream, "collaboration__spawn_agent")
@@ -1605,37 +1595,6 @@ func TestOpenAIGatewayService_APIKeyPassthrough_PoolModeConfigured5xxRetriesSame
 	require.False(t, c.Writer.Written())
 }
 
-func TestOpenAIGatewayService_OAuthPassthrough_TransientHTML403RetriesSameAccountWithoutCooldown(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(nil))
-
-	const upstreamBody = `<html><head><meta name="viewport" content="width=device-width, initial-scale=1" /><style global>.container{align-items:center;display:flex}.logo{color:#8e8ea0}.scale-appear{animation:enlarge-appear .4s ease-out}</style></head><body>Access denied</body></html>`
-	repo := &transientHTML403AccountRepo{}
-	rateLimitService := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
-	svc := &OpenAIGatewayService{
-		cfg:              &config.Config{Gateway: config.GatewayConfig{ForceCodexCLI: false}},
-		httpUpstream:     &httpUpstreamRecorder{resp: &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader(upstreamBody))}},
-		rateLimitService: rateLimitService,
-	}
-	account := &Account{
-		ID: 129, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
-		Credentials: map[string]any{"access_token": "oauth-token", "chatgpt_account_id": "chatgpt-acc"},
-		Extra:       map[string]any{"openai_passthrough": true}, Status: StatusActive, Schedulable: true,
-	}
-
-	_, err := svc.Forward(context.Background(), c, account, []byte(`{"model":"gpt-5.5","input":"hello"}`))
-
-	var failoverErr *UpstreamFailoverError
-	require.ErrorAs(t, err, &failoverErr)
-	require.True(t, failoverErr.RetryableOnSameAccount)
-	require.False(t, c.Writer.Written(), "the transient 403 must be retried before committing a client response")
-	require.Zero(t, repo.setErrorCalls)
-	require.Zero(t, repo.tempCalls)
-	require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
-}
-
 func TestOpenAIGatewayService_OpenAIPassthrough_CompactNetworkErrorsTriggerFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -2007,6 +1966,8 @@ func TestOpenAIGatewayService_APIKeyPassthrough_PreservesBodyAndUsesResponsesEnd
 	c.Request.Header.Set("User-Agent", "curl/8.0")
 	c.Request.Header.Set("X-Test", "keep")
 	c.Request.Header.Set("x-codex-beta-features", "remote_compaction_v2")
+	c.Request.Header.Set("X-Codex-Window-ID", "window-passthrough")
+	c.Request.Header.Set("X-Codex-Installation-ID", "installation-passthrough")
 
 	originalBody := []byte(`{"model":"gpt-5.2","stream":false,"service_tier":"flex","max_output_tokens":128,"input":[{"type":"text","text":"hi"}]}`)
 	resp := &http.Response{
@@ -2045,6 +2006,8 @@ func TestOpenAIGatewayService_APIKeyPassthrough_PreservesBodyAndUsesResponsesEnd
 	require.Equal(t, "Bearer sk-api-key", upstream.lastReq.Header.Get("Authorization"))
 	require.Equal(t, "curl/8.0", upstream.lastReq.Header.Get("User-Agent"))
 	require.Equal(t, "remote_compaction_v2", upstream.lastReq.Header.Get("x-codex-beta-features"))
+	require.Equal(t, "window-passthrough", upstream.lastReq.Header.Get("X-Codex-Window-ID"))
+	require.Equal(t, "installation-passthrough", upstream.lastReq.Header.Get("X-Codex-Installation-ID"))
 	require.Empty(t, upstream.lastReq.Header.Get("X-Test"))
 }
 

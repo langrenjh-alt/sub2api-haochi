@@ -48,19 +48,18 @@ func (s *DigestSessionStore) Find(groupID int64, prefixHash, digestChain string)
 		return "", 0, "", false
 	}
 	ns := buildNS(groupID, prefixHash)
-	lookupKey := ns + digestChain
-	end := len(digestChain)
+	chain := digestChain
 	for {
-		if val, ok := s.cache.Get(lookupKey[:len(ns)+end]); ok {
+		if val, ok := s.cache.Get(ns + chain); ok {
 			if e, ok := val.(*sessionEntry); ok {
-				return e.uuid, e.accountID, digestChain[:end], true
+				return e.uuid, e.accountID, chain, true
 			}
 		}
-		next := strings.LastIndexByte(digestChain[:end], '-')
-		if next < 0 {
+		i := strings.LastIndex(chain, "-")
+		if i < 0 {
 			return "", 0, "", false
 		}
-		end = next
+		chain = chain[:i]
 	}
 }
 

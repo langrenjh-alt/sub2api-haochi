@@ -52,12 +52,9 @@ func (s *OpenAIGatewayService) findOpenAICompatAnthropicDigestPromptCacheKey(acc
 	if ns == "" {
 		return "", ""
 	}
-	lookupKey := ns + digestChain
-	end := len(digestChain)
+	chain := digestChain
 	for {
-		chain := digestChain[:end]
-		candidateKey := lookupKey[:len(ns)+end]
-		if raw, ok := s.openaiCompatAnthropicDigestSessions.Load(candidateKey); ok {
+		if raw, ok := s.openaiCompatAnthropicDigestSessions.Load(ns + chain); ok {
 			if binding, ok := raw.(openAICompatAnthropicDigestBinding); ok {
 				if binding.ExpiresAt.IsZero() || time.Now().Before(binding.ExpiresAt) {
 					if key := strings.TrimSpace(binding.PromptCacheKey); key != "" {
@@ -65,13 +62,13 @@ func (s *OpenAIGatewayService) findOpenAICompatAnthropicDigestPromptCacheKey(acc
 					}
 				}
 			}
-			s.openaiCompatAnthropicDigestSessions.Delete(candidateKey)
+			s.openaiCompatAnthropicDigestSessions.Delete(ns + chain)
 		}
-		next := strings.LastIndexByte(digestChain[:end], '-')
-		if next < 0 {
+		i := strings.LastIndex(chain, "-")
+		if i < 0 {
 			return "", ""
 		}
-		end = next
+		chain = chain[:i]
 	}
 }
 

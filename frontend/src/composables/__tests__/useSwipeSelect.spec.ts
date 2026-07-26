@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { findRowIndexByDomPosition, scrollByAndCheckMovement } from '../useSwipeSelect'
+import { findRowIndexByDomPosition } from '../useSwipeSelect'
 
 /**
  * Build a fake scroll element whose `tbody tr[data-index]` rows expose stubbed
@@ -70,20 +70,5 @@ describe('findRowIndexByDomPosition (swipe-select full-render fallback)', () => 
     ])
     expect(findRowIndexByDomPosition(remapped, 150)).toBe(5)
     expect(findRowIndexByDomPosition(remapped, 250)).toBe(9)
-  })
-})
-
-describe('scrollByAndCheckMovement', () => {
-  it('reports a clamped scroll boundary so the RAF loop can stop', () => {
-    let scrollTop = 100
-    const scrollEl = {
-      get scrollTop() { return scrollTop },
-      set scrollTop(value: number) { scrollTop = Math.max(0, Math.min(100, value)) }
-    }
-
-    expect(scrollByAndCheckMovement(scrollEl, 8)).toBe(false)
-    scrollTop = 50
-    expect(scrollByAndCheckMovement(scrollEl, 8)).toBe(true)
-    expect(scrollTop).toBe(58)
   })
 })

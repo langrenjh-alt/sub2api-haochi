@@ -60,9 +60,24 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 				Input: sanitizeAnthropicToolUseInput(item.Name, item.Arguments),
 			})
 		case "web_search_call":
-			// The upstream consumes search results internally and incorporates them
-			// into its text output. Exposing synthetic Anthropic server-tool blocks
-			// breaks Claude Code versions that only accept client tool blocks.
+			toolUseID := "srvtoolu_" + item.ID
+			query := ""
+			if item.Action != nil {
+				query = item.Action.Query
+			}
+			inputJSON, _ := json.Marshal(map[string]string{"query": query})
+			blocks = append(blocks, AnthropicContentBlock{
+				Type:  "server_tool_use",
+				ID:    toolUseID,
+				Name:  "web_search",
+				Input: inputJSON,
+			})
+			emptyResults, _ := json.Marshal([]struct{}{})
+			blocks = append(blocks, AnthropicContentBlock{
+				Type:      "web_search_tool_result",
+				ToolUseID: toolUseID,
+				Content:   emptyResults,
+			})
 		}
 	}
 
@@ -220,14 +235,10 @@ func ResponsesEventToAnthropicEvents(
 		// 原始推理文本增量，与 reasoning summary 一样映射为 thinking。
 		"response.reasoning_text.delta":
 		return resToAnthHandleReasoningDelta(evt, state)
-	// Per-part reasoning completion events must NOT close the Anthropic thinking
-	// block. OpenAI/xAI may emit multiple summary_text / reasoning_text parts
-	// under one reasoning output_item. Closing on the first *.done leaves later
-	// deltas targeting a stopped content_block index, which Claude Code reports
-	// as "Content block not found". Closing early would also drop encrypted
-	// reasoning attached to output_item.done. Close on output_item.done / terminal only.
-	case "response.reasoning_summary_text.done",
-		"response.reasoning_text.done":
+	case "response.reasoning_summary_text.done":
+		// Keep the thinking block open until response.output_item.done.
+		// Grok/Codex attach encrypted_content on the finished reasoning item;
+		// closing early would drop signature_delta and break multi-turn cache.
 		return nil
 	// response.done 是 Realtime/WS 与项目透传路径使用的终止别名；
 	// 普通 Responses HTTP SSE 的公开终止事件仍以 response.completed 为主。
@@ -283,10 +294,15 @@ func ResponsesAnthropicEventToSSE(evt AnthropicStreamEvent) (string, error) {
 
 // --- internal handlers ---
 
-// ensureAnthropicMessageStart synthesizes message_start when upstream omits
-// response.created / delivers content events first. Claude Code requires
-// message_start before any content_block_* event.
-func ensureAnthropicMessageStart(state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+func resToAnthHandleCreated(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	if evt.Response != nil {
+		state.ResponseID = evt.Response.ID
+		// Only use upstream model if no override was set (e.g. originalModel)
+		if state.Model == "" {
+			state.Model = evt.Response.Model
+		}
+	}
+
 	if state.MessageStartSent {
 		return nil
 	}
@@ -313,17 +329,6 @@ func ensureAnthropicMessageStart(state *ResponsesEventToAnthropicState) []Anthro
 	}}
 }
 
-func resToAnthHandleCreated(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
-	if evt.Response != nil {
-		state.ResponseID = evt.Response.ID
-		// Only use upstream model if no override was set (e.g. originalModel)
-		if state.Model == "" {
-			state.Model = evt.Response.Model
-		}
-	}
-	return ensureAnthropicMessageStart(state)
-}
-
 func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
 	if evt.Item == nil {
 		return nil
@@ -334,7 +339,6 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 	// 同样映射为 Anthropic 的 tool_use 块。
 	case "function_call", "custom_tool_call":
 		var events []AnthropicStreamEvent
-		events = append(events, ensureAnthropicMessageStart(state)...)
 		events = append(events, closeCurrentBlock(state)...)
 
 		idx := state.ContentBlockIndex
@@ -360,7 +364,6 @@ func resToAnthHandleOutputItemAdded(evt *ResponsesStreamEvent, state *ResponsesE
 
 	case "reasoning":
 		var events []AnthropicStreamEvent
-		events = append(events, ensureAnthropicMessageStart(state)...)
 		events = append(events, closeCurrentBlock(state)...)
 
 		idx := state.ContentBlockIndex
@@ -392,7 +395,6 @@ func resToAnthHandleTextDelta(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	}
 
 	var events []AnthropicStreamEvent
-	events = append(events, ensureAnthropicMessageStart(state)...)
 
 	if !state.ContentBlockOpen || state.CurrentBlockType != "text" {
 		events = append(events, closeCurrentBlock(state)...)
@@ -428,20 +430,14 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 		return nil
 	}
 
-	// Only stream into an open tool_use block that still maps this output_index.
-	// Deltas after content_block_stop for that index cause Claude Code's
-	// "Content block not found" error.
-	if !state.ContentBlockOpen || state.CurrentBlockType != "tool_use" {
-		return nil
-	}
-	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
-	if !ok || blockIdx != state.ContentBlockIndex {
-		return nil
-	}
-
-	if state.CurrentToolName == "Read" {
+	if state.CurrentBlockType == "tool_use" && state.CurrentToolName == "Read" {
 		state.CurrentToolArgs += evt.Delta
 		if state.CurrentToolHadDelta || !json.Valid([]byte(state.CurrentToolArgs)) {
+			return nil
+		}
+
+		blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+		if !ok {
 			return nil
 		}
 		state.CurrentToolHadDelta = true
@@ -456,7 +452,14 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 		}}
 	}
 
-	state.CurrentToolHadDelta = true
+	if state.CurrentBlockType == "tool_use" {
+		state.CurrentToolHadDelta = true
+	}
+
+	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	if !ok {
+		return nil
+	}
 
 	return []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
@@ -469,14 +472,11 @@ func resToAnthHandleFuncArgsDelta(evt *ResponsesStreamEvent, state *ResponsesEve
 }
 
 func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
-	// A duplicated or delayed done event must not write to the next block index
-	// or close an unrelated text/thinking block.
-	if !state.ContentBlockOpen || state.CurrentBlockType != "tool_use" {
+	if !state.ContentBlockOpen {
 		return nil
 	}
-	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
-	if !ok || blockIdx != state.ContentBlockIndex {
-		return nil
+	if state.CurrentBlockType != "tool_use" {
+		return resToAnthHandleBlockDone(state)
 	}
 
 	raw := evt.Arguments
@@ -492,6 +492,17 @@ func resToAnthHandleFuncArgsDone(evt *ResponsesStreamEvent, state *ResponsesEven
 			return closeCurrentBlock(state)
 		}
 		raw = string(sanitized)
+	}
+
+	// 从事件的 OutputIndex 解析正确的 block index，与 resToAnthHandleFuncArgsDelta 对齐
+	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
+	if !ok {
+		blockIdx = state.ContentBlockIndex
+	}
+
+	// 如果 block 已关闭（ContentBlockIndex 已越过它），说明 arguments 已通过 delta 流式发完，不再补发
+	if !state.ContentBlockOpen || blockIdx != state.ContentBlockIndex {
+		return nil
 	}
 
 	events := []AnthropicStreamEvent{{
@@ -511,39 +522,19 @@ func resToAnthHandleReasoningDelta(evt *ResponsesStreamEvent, state *ResponsesEv
 		return nil
 	}
 
-	var events []AnthropicStreamEvent
-	events = append(events, ensureAnthropicMessageStart(state)...)
-
-	// Prefer the mapped open thinking block for this output_index. If the map is
-	// missing (no output_item.added) or the block was closed early, open/reopen a
-	// thinking block so Claude Code never receives a delta for a stopped index.
 	blockIdx, ok := state.OutputIndexToBlockIdx[evt.OutputIndex]
-	if !ok || !state.ContentBlockOpen || state.CurrentBlockType != "thinking" || blockIdx != state.ContentBlockIndex {
-		events = append(events, closeCurrentBlock(state)...)
-		idx := state.ContentBlockIndex
-		state.OutputIndexToBlockIdx[evt.OutputIndex] = idx
-		state.ContentBlockOpen = true
-		state.CurrentBlockType = "thinking"
-		events = append(events, AnthropicStreamEvent{
-			Type:  "content_block_start",
-			Index: &idx,
-			ContentBlock: &AnthropicContentBlock{
-				Type:     "thinking",
-				Thinking: "",
-			},
-		})
-		blockIdx = idx
+	if !ok {
+		return nil
 	}
 
-	events = append(events, AnthropicStreamEvent{
+	return []AnthropicStreamEvent{{
 		Type:  "content_block_delta",
 		Index: &blockIdx,
 		Delta: &AnthropicDelta{
 			Type:     "thinking_delta",
 			Thinking: evt.Delta,
 		},
-	})
-	return events
+	}}
 }
 
 func resToAnthHandleBlockDone(state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
@@ -558,12 +549,9 @@ func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEv
 		return nil
 	}
 
-	// Grok/OpenAI consumes web search internally and later emits the answer as
-	// text. Keep this event invisible to Anthropic clients: synthetic
-	// server_tool_use/web_search_tool_result blocks are rejected by some Claude
-	// Code versions, and closing the current block here corrupts its lifecycle.
-	if evt.Item.Type == "web_search_call" {
-		return nil
+	// Handle web_search_call → synthesize server_tool_use + web_search_tool_result blocks.
+	if evt.Item.Type == "web_search_call" && evt.Item.Status == "completed" {
+		return resToAnthHandleWebSearchDone(evt, state)
 	}
 
 	// Capture encrypted_content on reasoning item done (often only present here).
@@ -578,6 +566,62 @@ func resToAnthHandleOutputItemDone(evt *ResponsesStreamEvent, state *ResponsesEv
 	}
 	return nil
 }
+
+// resToAnthHandleWebSearchDone converts an OpenAI web_search_call output item
+// into Anthropic server_tool_use + web_search_tool_result content block pairs.
+// This allows Claude Code to count the searches performed.
+func resToAnthHandleWebSearchDone(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
+	var events []AnthropicStreamEvent
+	events = append(events, closeCurrentBlock(state)...)
+
+	toolUseID := "srvtoolu_" + evt.Item.ID
+	query := ""
+	if evt.Item.Action != nil {
+		query = evt.Item.Action.Query
+	}
+	inputJSON, _ := json.Marshal(map[string]string{"query": query})
+
+	// Emit server_tool_use block (start + stop).
+	idx1 := state.ContentBlockIndex
+	events = append(events, AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx1,
+		ContentBlock: &AnthropicContentBlock{
+			Type:  "server_tool_use",
+			ID:    toolUseID,
+			Name:  "web_search",
+			Input: inputJSON,
+		},
+	})
+	events = append(events, AnthropicStreamEvent{
+		Type:  "content_block_stop",
+		Index: &idx1,
+	})
+	state.ContentBlockIndex++
+
+	// Emit web_search_tool_result block (start + stop).
+	// Content is empty because OpenAI does not expose individual search results;
+	// the model consumes them internally and produces text output.
+	emptyResults, _ := json.Marshal([]struct{}{})
+	idx2 := state.ContentBlockIndex
+	events = append(events, AnthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx2,
+		ContentBlock: &AnthropicContentBlock{
+			Type:      "web_search_tool_result",
+			ToolUseID: toolUseID,
+			Content:   emptyResults,
+		},
+	})
+	events = append(events, AnthropicStreamEvent{
+		Type:  "content_block_stop",
+		Index: &idx2,
+	})
+	state.ContentBlockIndex++
+
+	return events
+}
+
 func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventToAnthropicState) []AnthropicStreamEvent {
 	if state.MessageStopSent {
 		return nil
@@ -656,7 +700,6 @@ func closeCurrentBlock(state *ResponsesEventToAnthropicState) []AnthropicStreamE
 	}
 	state.ContentBlockOpen = false
 	state.ContentBlockIndex++
-	state.CurrentBlockType = ""
 	state.CurrentToolName = ""
 	state.CurrentToolArgs = ""
 	state.CurrentToolHadDelta = false
