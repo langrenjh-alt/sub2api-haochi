@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
@@ -309,15 +311,65 @@ type openAIQuotaAutoPauseDecision struct {
 	utilization float64
 }
 
+type grokQuotaSchedulingWindow struct {
+	limit        int64
+	remaining    int64
+	resetUnix    int64
+	hasLimit     bool
+	hasRemaining bool
+	hasResetUnix bool
+}
+
+type grokQuotaSchedulingSnapshot struct {
+	requests             grokQuotaSchedulingWindow
+	tokens               grokQuotaSchedulingWindow
+	retryAfterSeconds    int
+	updatedAt            string
+	hasRetryAfterSeconds bool
+}
+
+var grokQuotaSnapshotJSONFields = [...]string{
+	"requests",
+	"tokens",
+	"retry_after_seconds",
+	"subscription_tier",
+	"entitlement_status",
+	"status_code",
+	"headers",
+	"headers_observed",
+	"observation_source",
+	"last_probe_at",
+	"last_headers_seen_at",
+	"updated_at",
+}
+
+var grokQuotaWindowJSONFields = [...]string{
+	"limit",
+	"remaining",
+	"reset_unix",
+	"reset_at",
+}
+
 func shouldAutoPauseGrokAccountByQuota(account *Account) (bool, openAIQuotaAutoPauseDecision) {
 	if account == nil || !account.IsGrok() || account.Type != AccountTypeOAuth {
 		return false, openAIQuotaAutoPauseDecision{}
+	}
+	// Account Extra loaded from JSONB contains map[string]any values whose
+	// numbers are float64. Decode only the fields scheduling consumes and keep
+	// the generic JSON round trip below for typed or non-canonical in-memory data.
+	if raw, ok := account.Extra[grokQuotaSnapshotExtraKey].(map[string]any); ok {
+		if snapshot, fastPathOK := grokQuotaSchedulingSnapshotFromMap(raw); fastPathOK {
+			return shouldAutoPauseGrokSchedulingSnapshot(snapshot, time.Now())
+		}
 	}
 	snapshot, err := grokQuotaSnapshotFromExtra(account.Extra)
 	if err != nil || snapshot == nil {
 		return false, openAIQuotaAutoPauseDecision{}
 	}
-	now := time.Now()
+	return shouldAutoPauseGrokQuotaSnapshot(snapshot, time.Now())
+}
+
+func shouldAutoPauseGrokQuotaSnapshot(snapshot *xai.QuotaSnapshot, now time.Time) (bool, openAIQuotaAutoPauseDecision) {
 	if grokQuotaSnapshotStaleForPause(snapshot, now) {
 		return false, openAIQuotaAutoPauseDecision{}
 	}
@@ -331,6 +383,273 @@ func shouldAutoPauseGrokAccountByQuota(account *Account) (bool, openAIQuotaAutoP
 		return true, decision
 	}
 	return false, openAIQuotaAutoPauseDecision{}
+}
+
+func shouldAutoPauseGrokSchedulingSnapshot(snapshot grokQuotaSchedulingSnapshot, now time.Time) (bool, openAIQuotaAutoPauseDecision) {
+	if grokQuotaSchedulingSnapshotStaleForPause(snapshot, now) {
+		return false, openAIQuotaAutoPauseDecision{}
+	}
+	if grokQuotaSchedulingRetryAfterActive(snapshot, now) {
+		return true, openAIQuotaAutoPauseDecision{window: "retry_after", threshold: 1, utilization: 1}
+	}
+	if paused, decision := shouldAutoPauseGrokSchedulingWindow("requests", snapshot.requests, now); paused {
+		return true, decision
+	}
+	if paused, decision := shouldAutoPauseGrokSchedulingWindow("tokens", snapshot.tokens, now); paused {
+		return true, decision
+	}
+	return false, openAIQuotaAutoPauseDecision{}
+}
+
+func grokQuotaSchedulingSnapshotFromMap(raw map[string]any) (grokQuotaSchedulingSnapshot, bool) {
+	var snapshot grokQuotaSchedulingSnapshot
+	for key, value := range raw {
+		if !utf8.ValidString(key) || !isCanonicalGrokQuotaJSONValue(value, 0) {
+			return grokQuotaSchedulingSnapshot{}, false
+		}
+		switch key {
+		case "requests":
+			window, ok := grokQuotaSchedulingWindowFromJSONValue(value)
+			if !ok {
+				return grokQuotaSchedulingSnapshot{}, false
+			}
+			snapshot.requests = window
+		case "tokens":
+			window, ok := grokQuotaSchedulingWindowFromJSONValue(value)
+			if !ok {
+				return grokQuotaSchedulingSnapshot{}, false
+			}
+			snapshot.tokens = window
+		case "retry_after_seconds":
+			if value == nil {
+				continue
+			}
+			retryAfterSeconds, ok := grokQuotaJSONInt(value)
+			if !ok {
+				return grokQuotaSchedulingSnapshot{}, false
+			}
+			snapshot.retryAfterSeconds = retryAfterSeconds
+			snapshot.hasRetryAfterSeconds = true
+		case "updated_at":
+			if value == nil {
+				continue
+			}
+			updatedAt, ok := value.(string)
+			if !ok {
+				return grokQuotaSchedulingSnapshot{}, false
+			}
+			snapshot.updatedAt = updatedAt
+		case "subscription_tier", "entitlement_status", "observation_source", "last_probe_at", "last_headers_seen_at":
+			if value != nil {
+				if _, ok := value.(string); !ok {
+					return grokQuotaSchedulingSnapshot{}, false
+				}
+			}
+		case "status_code":
+			if value != nil {
+				if _, ok := grokQuotaJSONInt(value); !ok {
+					return grokQuotaSchedulingSnapshot{}, false
+				}
+			}
+		case "headers_observed":
+			if value != nil {
+				if _, ok := value.(bool); !ok {
+					return grokQuotaSchedulingSnapshot{}, false
+				}
+			}
+		case "headers":
+			if !isGrokQuotaJSONHeaders(value) {
+				return grokQuotaSchedulingSnapshot{}, false
+			}
+		default:
+			if isFoldedGrokQuotaJSONField(key, grokQuotaSnapshotJSONFields[:]) {
+				return grokQuotaSchedulingSnapshot{}, false
+			}
+		}
+	}
+	return snapshot, true
+}
+
+func grokQuotaSchedulingWindowFromJSONValue(raw any) (grokQuotaSchedulingWindow, bool) {
+	if raw == nil {
+		return grokQuotaSchedulingWindow{}, true
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return grokQuotaSchedulingWindow{}, false
+	}
+
+	var window grokQuotaSchedulingWindow
+	for key, value := range values {
+		switch key {
+		case "limit":
+			if value == nil {
+				continue
+			}
+			limit, ok := grokQuotaJSONInt64(value)
+			if !ok {
+				return grokQuotaSchedulingWindow{}, false
+			}
+			window.limit = limit
+			window.hasLimit = true
+		case "remaining":
+			if value == nil {
+				continue
+			}
+			remaining, ok := grokQuotaJSONInt64(value)
+			if !ok {
+				return grokQuotaSchedulingWindow{}, false
+			}
+			window.remaining = remaining
+			window.hasRemaining = true
+		case "reset_unix":
+			if value == nil {
+				continue
+			}
+			resetUnix, ok := grokQuotaJSONInt64(value)
+			if !ok {
+				return grokQuotaSchedulingWindow{}, false
+			}
+			window.resetUnix = resetUnix
+			window.hasResetUnix = true
+		case "reset_at":
+			if value != nil {
+				if _, ok := value.(string); !ok {
+					return grokQuotaSchedulingWindow{}, false
+				}
+			}
+		default:
+			if isFoldedGrokQuotaJSONField(key, grokQuotaWindowJSONFields[:]) {
+				return grokQuotaSchedulingWindow{}, false
+			}
+		}
+	}
+	return window, true
+}
+
+func grokQuotaJSONInt(raw any) (int, bool) {
+	value, ok := grokQuotaJSONInt64(raw)
+	if !ok {
+		return 0, false
+	}
+	intValue := int(value)
+	if int64(intValue) != value {
+		return 0, false
+	}
+	return intValue, true
+}
+
+func grokQuotaJSONInt64(raw any) (int64, bool) {
+	value, ok := raw.(float64)
+	// JSONB numbers arrive as float64. Staying inside the exact-integer range
+	// guarantees the conversion matches the legacy JSON round trip.
+	if !ok || math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value ||
+		value < -9007199254740992 || value > 9007199254740992 {
+		return 0, false
+	}
+	return int64(value), true
+}
+
+func isGrokQuotaJSONHeaders(raw any) bool {
+	if raw == nil {
+		return true
+	}
+	headers, ok := raw.(map[string]any)
+	if !ok {
+		return false
+	}
+	for key, value := range headers {
+		if !utf8.ValidString(key) {
+			return false
+		}
+		if value != nil {
+			if header, ok := value.(string); !ok || !utf8.ValidString(header) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+const grokQuotaCanonicalJSONMaxDepth = 32
+
+func isCanonicalGrokQuotaJSONValue(value any, depth int) bool {
+	if depth > grokQuotaCanonicalJSONMaxDepth {
+		return false
+	}
+	switch value := value.(type) {
+	case nil, bool:
+		return true
+	case string:
+		return utf8.ValidString(value)
+	case float64:
+		return !math.IsNaN(value) && !math.IsInf(value, 0)
+	case []any:
+		for _, item := range value {
+			if !isCanonicalGrokQuotaJSONValue(item, depth+1) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		for key, item := range value {
+			if !utf8.ValidString(key) || !isCanonicalGrokQuotaJSONValue(item, depth+1) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func isFoldedGrokQuotaJSONField(key string, fields []string) bool {
+	for _, field := range fields {
+		if strings.EqualFold(key, field) {
+			return true
+		}
+	}
+	return false
+}
+
+func grokQuotaSchedulingRetryAfterActive(snapshot grokQuotaSchedulingSnapshot, now time.Time) bool {
+	if !snapshot.hasRetryAfterSeconds || snapshot.retryAfterSeconds <= 0 {
+		return false
+	}
+	if strings.TrimSpace(snapshot.updatedAt) == "" {
+		return true
+	}
+	updatedAt, err := parseTime(snapshot.updatedAt)
+	if err != nil {
+		return true
+	}
+	retryAfterUntil := updatedAt.Add(time.Duration(snapshot.retryAfterSeconds) * time.Second)
+	return now.Before(retryAfterUntil)
+}
+
+func shouldAutoPauseGrokSchedulingWindow(name string, window grokQuotaSchedulingWindow, now time.Time) (bool, openAIQuotaAutoPauseDecision) {
+	if !window.hasLimit || !window.hasRemaining || window.limit <= 0 {
+		return false, openAIQuotaAutoPauseDecision{}
+	}
+	if window.hasResetUnix && window.resetUnix > 0 && !now.Before(time.Unix(window.resetUnix, 0)) {
+		return false, openAIQuotaAutoPauseDecision{}
+	}
+	utilization := float64(window.limit-window.remaining) / float64(window.limit)
+	if window.remaining <= 0 || utilization >= 1 {
+		return true, openAIQuotaAutoPauseDecision{window: name, threshold: 1, utilization: utilization}
+	}
+	return false, openAIQuotaAutoPauseDecision{}
+}
+
+func grokQuotaSchedulingSnapshotStaleForPause(snapshot grokQuotaSchedulingSnapshot, now time.Time) bool {
+	if strings.TrimSpace(snapshot.updatedAt) == "" {
+		return false
+	}
+	updatedAt, err := parseTime(snapshot.updatedAt)
+	if err != nil {
+		return false
+	}
+	return now.Sub(updatedAt) >= openAICodexAutoPauseStaleAfter
 }
 
 func grokQuotaRetryAfterActive(snapshot *xai.QuotaSnapshot, now time.Time) bool {
@@ -647,7 +966,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusions(ctx context.C
 
 	// 2. 获取可调度的 OpenAI 账号
 	// Get schedulable OpenAI accounts
-	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	accounts, err := s.listSchedulableAccountRefs(ctx, groupID, platform)
 	if err != nil {
 		return nil, fmt.Errorf("query accounts failed: %w", err)
 	}
@@ -747,15 +1066,17 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 // Returns nil if no available account. The second return reports whether at
 // least one candidate was filtered out solely because it lacks compact support
 // (only meaningful when requireCompact=true).
-func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, platform string, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (*Account, bool) {
+func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, platform string, accounts []*Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (*Account, bool) {
 	platform = normalizeOpenAICompatiblePlatform(platform)
 	compactBlocked := false
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
 	eligible := make([]*Account, 0, len(accounts))
 	compactTiers := make(map[int64]int, len(accounts))
 
-	for i := range accounts {
-		acc := &accounts[i]
+	for _, acc := range accounts {
+		if acc == nil {
+			continue
+		}
 
 		// 跳过被排除的账号
 		// Skip excluded accounts
@@ -805,6 +1126,19 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		return s.isBetterAccount(a, b)
 	})
 	return eligible[0], compactBlocked
+}
+
+func (s *OpenAIGatewayService) listSchedulableAccountRefs(ctx context.Context, groupID *int64, platform string) ([]*Account, error) {
+	platform = normalizeOpenAICompatiblePlatform(platform)
+	if s.schedulerSnapshot != nil {
+		accounts, _, err := s.schedulerSnapshot.ListSchedulableAccountRefs(ctx, groupID, platform, false)
+		return accounts, err
+	}
+	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	if err != nil {
+		return nil, err
+	}
+	return accountRefs(accounts), nil
 }
 
 // isBetterAccount 判断 candidate 是否比 current 更优。
@@ -891,7 +1225,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		})
 	}
 
-	accounts, err := s.listSchedulableAccounts(ctx, groupID, platform)
+	accounts, err := s.listSchedulableAccountRefs(ctx, groupID, platform)
 	if err != nil {
 		return nil, err
 	}
@@ -972,8 +1306,14 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	}
 	baseCandidateCount := 0
 	candidates := make([]*Account, 0, len(accounts))
-	for i := range accounts {
-		acc := &accounts[i]
+	for _, sharedAccount := range accounts {
+		if sharedAccount == nil {
+			continue
+		}
+		// Snapshot references are shared across requests. Run helpers that may
+		// populate Account-local lazy caches on a request-local shallow copy.
+		accountCopy := *sharedAccount
+		acc := &accountCopy
 		if isExcluded(acc.ID) {
 			continue
 		}
@@ -993,7 +1333,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			continue
 		}
 		baseCandidateCount++
-		candidates = append(candidates, acc)
+		candidates = append(candidates, sharedAccount)
 	}
 
 	if len(candidates) == 0 {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ type stubConcurrencyCacheForTest struct {
 	waitCountErr         error
 	loadBatch            map[int64]*AccountLoadInfo
 	loadBatchErr         error
+	loadBatchFn          func(context.Context, []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error)
 	usersLoadBatch       map[int64]*UserLoadInfo
 	usersLoadErr         error
 	cleanupErr           error
@@ -152,8 +154,11 @@ func (c *stubConcurrencyCacheForTest) IncrementWaitCount(_ context.Context, _ in
 func (c *stubConcurrencyCacheForTest) DecrementWaitCount(_ context.Context, _ int64) error {
 	return nil
 }
-func (c *stubConcurrencyCacheForTest) GetAccountsLoadBatch(_ context.Context, _ []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
+func (c *stubConcurrencyCacheForTest) GetAccountsLoadBatch(ctx context.Context, accounts []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
 	c.loadBatchCalls.Add(1)
+	if c.loadBatchFn != nil {
+		return c.loadBatchFn(ctx, accounts)
+	}
 	return c.loadBatch, c.loadBatchErr
 }
 func (c *stubConcurrencyCacheForTest) GetUsersLoadBatch(_ context.Context, _ []UserWithConcurrency) (map[int64]*UserLoadInfo, error) {
@@ -516,6 +521,155 @@ func TestGetAccountsLoadBatchFresh_BypassesShortTTLCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 4, fresh[int64(1)].CurrentConcurrency)
 	require.Equal(t, int64(2), cache.loadBatchCalls.Load())
+}
+
+func TestGetAccountsLoadBatchFresh_CoalescesConcurrentIdenticalRequests(t *testing.T) {
+	fetchStarted := make(chan struct{})
+	allowFetch := make(chan struct{})
+	cache := &stubConcurrencyCacheForTest{
+		loadBatchFn: func(_ context.Context, _ []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
+			close(fetchStarted)
+			<-allowFetch
+			return map[int64]*AccountLoadInfo{
+				1: {AccountID: 1, CurrentConcurrency: 2, LoadRate: 40},
+			}, nil
+		},
+	}
+	svc := NewConcurrencyService(cache)
+	accounts := []AccountWithConcurrency{{ID: 1, MaxConcurrency: 5}}
+
+	const callers = 16
+	start := make(chan struct{})
+	results := make(chan map[int64]*AccountLoadInfo, callers)
+	errs := make(chan error, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			result, err := svc.GetAccountsLoadBatchFresh(context.Background(), accounts)
+			results <- result
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	<-fetchStarted
+	require.Eventually(t, func() bool {
+		return cache.loadBatchCalls.Load() == 1
+	}, time.Second, time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
+	close(allowFetch)
+
+	for range callers {
+		require.NoError(t, <-errs)
+		result := <-results
+		require.Equal(t, 2, result[int64(1)].CurrentConcurrency)
+	}
+	require.Equal(t, int64(1), cache.loadBatchCalls.Load())
+}
+
+func TestGetAccountsLoadBatchFresh_SequentialCallsAlwaysRefresh(t *testing.T) {
+	cache := &stubConcurrencyCacheForTest{
+		loadBatch: map[int64]*AccountLoadInfo{
+			1: {AccountID: 1, CurrentConcurrency: 1, LoadRate: 20},
+		},
+	}
+	svc := NewConcurrencyService(cache)
+	accounts := []AccountWithConcurrency{{ID: 1, MaxConcurrency: 5}}
+
+	first, err := svc.GetAccountsLoadBatchFresh(context.Background(), accounts)
+	require.NoError(t, err)
+	require.Equal(t, 1, first[int64(1)].CurrentConcurrency)
+
+	cache.loadBatch = map[int64]*AccountLoadInfo{
+		1: {AccountID: 1, CurrentConcurrency: 4, LoadRate: 80},
+	}
+	second, err := svc.GetAccountsLoadBatchFresh(context.Background(), accounts)
+	require.NoError(t, err)
+	require.Equal(t, 4, second[int64(1)].CurrentConcurrency)
+	require.Equal(t, int64(2), cache.loadBatchCalls.Load())
+}
+
+func TestGetAccountsLoadBatchFresh_DoesNotCoalesceDifferentCandidateSets(t *testing.T) {
+	fetchesStarted := make(chan int64, 2)
+	allowFetch := make(chan struct{})
+	cache := &stubConcurrencyCacheForTest{
+		loadBatchFn: func(_ context.Context, accounts []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
+			accountID := accounts[0].ID
+			fetchesStarted <- accountID
+			<-allowFetch
+			return map[int64]*AccountLoadInfo{
+				accountID: {AccountID: accountID},
+			}, nil
+		},
+	}
+	svc := NewConcurrencyService(cache)
+
+	type result struct {
+		loadMap map[int64]*AccountLoadInfo
+		err     error
+	}
+	results := make(chan result, 2)
+	for _, accountID := range []int64{1, 2} {
+		go func(id int64) {
+			loadMap, err := svc.GetAccountsLoadBatchFresh(context.Background(), []AccountWithConcurrency{{ID: id, MaxConcurrency: 5}})
+			results <- result{loadMap: loadMap, err: err}
+		}(accountID)
+	}
+
+	started := map[int64]bool{}
+	for range 2 {
+		started[<-fetchesStarted] = true
+	}
+	require.Equal(t, map[int64]bool{1: true, 2: true}, started)
+	close(allowFetch)
+	for range 2 {
+		result := <-results
+		require.NoError(t, result.err)
+		require.Len(t, result.loadMap, 1)
+	}
+	require.Equal(t, int64(2), cache.loadBatchCalls.Load())
+}
+
+func TestGetAccountsLoadBatchFresh_PropagatesSharedFetchError(t *testing.T) {
+	fetchStarted := make(chan struct{})
+	allowFetch := make(chan struct{})
+	wantErr := errors.New("redis pipeline failed")
+	cache := &stubConcurrencyCacheForTest{
+		loadBatchFn: func(_ context.Context, _ []AccountWithConcurrency) (map[int64]*AccountLoadInfo, error) {
+			close(fetchStarted)
+			<-allowFetch
+			return nil, wantErr
+		},
+	}
+	svc := NewConcurrencyService(cache)
+	accounts := []AccountWithConcurrency{{ID: 1, MaxConcurrency: 5}}
+
+	const callers = 8
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			_, err := svc.GetAccountsLoadBatchFresh(context.Background(), accounts)
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	<-fetchStarted
+	time.Sleep(20 * time.Millisecond)
+	close(allowFetch)
+
+	for range callers {
+		require.ErrorIs(t, <-errs, wantErr)
+	}
+	require.Equal(t, int64(1), cache.loadBatchCalls.Load())
 }
 
 func TestIncrementWaitCount_Success(t *testing.T) {

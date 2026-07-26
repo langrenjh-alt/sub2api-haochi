@@ -13,6 +13,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -28,6 +29,10 @@ const (
 	schedulerGroupLifecycleTimeout        = 30 * time.Second
 	schedulerGroupLifecycleLeaseTTL       = 60 * time.Second
 	schedulerGroupLifecycleReleaseTimeout = 2 * time.Second
+	schedulerAccountRefsFetchTimeout      = 5 * time.Second
+	maxSchedulerAccountRefsCacheTTL       = 500 * time.Millisecond
+	maxSchedulerAccountRefsCacheEntries   = 64
+	maxSchedulerAccountRefsCacheAccounts  = 250000
 	outboxRebuildRetryBaseDelay           = 5 * time.Second
 	outboxRebuildRetryMaxDelay            = 5 * time.Minute
 	outboxMaxIDErrorLogSampleInterval     = time.Minute
@@ -137,12 +142,29 @@ type SchedulerSnapshotService struct {
 	outboxRebuildRetryReason     string
 	outboxLagWarningActive       bool
 	outboxMaxIDErrorLastLoggedAt time.Time
+	accountRefsMu                sync.RWMutex
+	accountRefs                  map[SchedulerBucket]cachedSchedulerAccountRefs
+	accountRefsLoads             map[SchedulerBucket]schedulerAccountRefsLoadState
+	accountRefsCount             int
+	accountRefsStopped           bool
+	accountRefsLoadWG            sync.WaitGroup
+	accountRefsGroup             singleflight.Group
 
 	fullRebuildRunMu     sync.Mutex
 	fullRebuildStateMu   sync.Mutex
 	fullRebuildRequested uint64
 	fullRebuildCompleted uint64
 	fullRebuildLastErr   error
+}
+
+type cachedSchedulerAccountRefs struct {
+	accounts  []*Account
+	expiresAt time.Time
+}
+
+type schedulerAccountRefsLoadState struct {
+	generation uint64
+	active     int
 }
 
 func NewSchedulerSnapshotService(
@@ -157,13 +179,15 @@ func NewSchedulerSnapshotService(
 		maxQPS = cfg.Gateway.Scheduling.DbFallbackMaxQPS
 	}
 	return &SchedulerSnapshotService{
-		cache:         cache,
-		outboxRepo:    outboxRepo,
-		accountRepo:   accountRepo,
-		groupRepo:     groupRepo,
-		cfg:           cfg,
-		stopCh:        make(chan struct{}),
-		fallbackLimit: newFallbackLimiter(maxQPS),
+		cache:            cache,
+		outboxRepo:       outboxRepo,
+		accountRepo:      accountRepo,
+		groupRepo:        groupRepo,
+		cfg:              cfg,
+		stopCh:           make(chan struct{}),
+		fallbackLimit:    newFallbackLimiter(maxQPS),
+		accountRefs:      make(map[SchedulerBucket]cachedSchedulerAccountRefs),
+		accountRefsLoads: make(map[SchedulerBucket]schedulerAccountRefsLoadState),
 	}
 }
 
@@ -195,16 +219,30 @@ func (s *SchedulerSnapshotService) Start() {
 			s.runFullRebuildWorker(fullInterval)
 		}()
 	}
+
+	if ttl := s.accountRefsTTL(); ttl > 0 {
+		cleanupInterval := ttl
+		if cleanupInterval < 50*time.Millisecond {
+			cleanupInterval = 50 * time.Millisecond
+		}
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.runAccountRefsCacheCleanup(cleanupInterval)
+		}()
+	}
 }
 
 func (s *SchedulerSnapshotService) Stop() {
 	if s == nil {
 		return
 	}
+	s.stopAccountRefsCache()
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 	})
 	s.wg.Wait()
+	s.accountRefsLoadWG.Wait()
 }
 
 func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, groupID *int64, platform string, hasForcePlatform bool) ([]Account, bool, error) {
@@ -257,6 +295,327 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 	}
 
 	return accounts, useMixed, nil
+}
+
+// ListSchedulableAccountRefs is the read-only hot-path variant used by the
+// OpenAI-compatible scheduler. Large pools otherwise decode the same Redis
+// snapshot once per concurrent request. Results are shared for the same short
+// interval as load-batch hints; callers must hydrate an account before mutation.
+func (s *SchedulerSnapshotService) ListSchedulableAccountRefs(ctx context.Context, groupID *int64, platform string, hasForcePlatform bool) ([]*Account, bool, error) {
+	useMixed := (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, useMixed, err
+		}
+	}
+	if s.accountRefsCacheStopped() {
+		return nil, useMixed, ErrSchedulerCacheNotReady
+	}
+	mode := s.resolveMode(platform, hasForcePlatform)
+	bucket := s.bucketFor(groupID, platform, mode)
+	now := time.Now()
+	if accounts, ok := s.getCachedAccountRefs(bucket, now); ok {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, useMixed, err
+			}
+		}
+		return accounts, useMixed, nil
+	}
+
+	resultCh := s.accountRefsGroup.DoChan(bucket.String(), func() (any, error) {
+		generation, ok := s.beginAccountRefsLoad(bucket)
+		if !ok {
+			return nil, ErrSchedulerCacheNotReady
+		}
+		defer s.finishAccountRefsLoad(bucket)
+
+		now := time.Now()
+		if accounts, ok := s.getCachedAccountRefs(bucket, now); ok {
+			return accounts, nil
+		}
+
+		baseCtx := context.Background()
+		if ctx != nil {
+			baseCtx = context.WithoutCancel(ctx)
+		}
+		sharedCtx, cancel := context.WithTimeout(baseCtx, schedulerAccountRefsFetchTimeout)
+		defer cancel()
+		accounts, loadErr := s.loadSchedulableAccountRefs(sharedCtx, bucket, useMixed)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		s.storeCachedAccountRefs(bucket, accounts, time.Now(), generation)
+		return accounts, nil
+	})
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	var result singleflight.Result
+	select {
+	case <-waitCtx.Done():
+		return nil, useMixed, waitCtx.Err()
+	case result = <-resultCh:
+	}
+	if result.Err != nil {
+		return nil, useMixed, result.Err
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, useMixed, err
+		}
+	}
+	if s.accountRefsCacheStopped() {
+		return nil, useMixed, ErrSchedulerCacheNotReady
+	}
+	accounts, _ := result.Val.([]*Account)
+	if accounts == nil {
+		accounts = []*Account{}
+	}
+	return accounts, useMixed, nil
+}
+
+func (s *SchedulerSnapshotService) loadSchedulableAccountRefs(ctx context.Context, bucket SchedulerBucket, useMixed bool) ([]*Account, error) {
+	var writeToken SchedulerBucketWriteToken
+	canPublish := false
+	if s.cache != nil {
+		cached, hit, err := s.cache.GetSnapshot(ctx, bucket)
+		if err != nil {
+			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache read failed: bucket=%s err=%v", bucket.String(), err)
+		} else if hit {
+			return prepareSharedSchedulerAccountRefs(cached), nil
+		}
+		token, err := s.cache.CaptureBucketWriteToken(ctx, bucket)
+		if err != nil {
+			if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
+				slog.Debug("[Scheduler] cache publish fenced", "bucket", bucket.String())
+				return nil, err
+			} else {
+				logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache publish token failed: bucket=%s err=%v", bucket.String(), err)
+			}
+		} else {
+			writeToken = token
+			canPublish = true
+		}
+	}
+
+	if err := s.guardFallback(ctx); err != nil {
+		return nil, err
+	}
+	fallbackCtx, cancel := s.withFallbackTimeout(ctx)
+	defer cancel()
+	accounts, err := s.loadAccountsFromDB(fallbackCtx, bucket, useMixed)
+	if err != nil {
+		return nil, err
+	}
+	if s.cache != nil && canPublish {
+		if err := s.cache.SetSnapshot(fallbackCtx, bucket, writeToken, accounts); err != nil {
+			if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
+				slog.Debug("[Scheduler] cache publish fenced", "bucket", bucket.String())
+				return nil, err
+			} else {
+				logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache write failed: bucket=%s err=%v", bucket.String(), err)
+			}
+		}
+	}
+	return prepareSharedSchedulerAccountRefs(accountRefs(accounts)), nil
+}
+
+// Snapshot account references are shared only on the scheduling read path.
+// Warm the one mutable lazy cache used by candidate filtering before publish;
+// callers hydrate the selected account before it can escape the scheduler.
+func prepareSharedSchedulerAccountRefs(accounts []*Account) []*Account {
+	for _, account := range accounts {
+		if account != nil {
+			_ = account.GetModelMapping()
+		}
+	}
+	return accounts
+}
+
+func (s *SchedulerSnapshotService) accountRefsTTL() time.Duration {
+	if s == nil || s.cfg == nil {
+		return 0
+	}
+	ttl := time.Duration(s.cfg.Gateway.Scheduling.LoadBatchCacheTTLMS) * time.Millisecond
+	if ttl < 0 {
+		return 0
+	}
+	if ttl > maxSchedulerAccountRefsCacheTTL {
+		return maxSchedulerAccountRefsCacheTTL
+	}
+	return ttl
+}
+
+func (s *SchedulerSnapshotService) getCachedAccountRefs(bucket SchedulerBucket, now time.Time) ([]*Account, bool) {
+	if s == nil || s.accountRefsTTL() <= 0 {
+		return nil, false
+	}
+	s.accountRefsMu.RLock()
+	if s.accountRefsStopped {
+		s.accountRefsMu.RUnlock()
+		return nil, false
+	}
+	cached, ok := s.accountRefs[bucket]
+	s.accountRefsMu.RUnlock()
+	if !ok || !now.Before(cached.expiresAt) {
+		if ok {
+			s.accountRefsMu.Lock()
+			if current, exists := s.accountRefs[bucket]; exists && !now.Before(current.expiresAt) {
+				s.deleteCachedAccountRefsLocked(bucket)
+			}
+			s.accountRefsMu.Unlock()
+		}
+		return nil, false
+	}
+	return cached.accounts, true
+}
+
+func (s *SchedulerSnapshotService) accountRefsCacheStopped() bool {
+	if s == nil {
+		return true
+	}
+	s.accountRefsMu.RLock()
+	stopped := s.accountRefsStopped
+	s.accountRefsMu.RUnlock()
+	return stopped
+}
+
+func (s *SchedulerSnapshotService) beginAccountRefsLoad(bucket SchedulerBucket) (uint64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.accountRefsMu.Lock()
+	defer s.accountRefsMu.Unlock()
+	if s.accountRefsStopped {
+		return 0, false
+	}
+	if s.accountRefsLoads == nil {
+		s.accountRefsLoads = make(map[SchedulerBucket]schedulerAccountRefsLoadState)
+	}
+	state := s.accountRefsLoads[bucket]
+	state.active++
+	s.accountRefsLoads[bucket] = state
+	s.accountRefsLoadWG.Add(1)
+	return state.generation, true
+}
+
+func (s *SchedulerSnapshotService) finishAccountRefsLoad(bucket SchedulerBucket) {
+	s.accountRefsMu.Lock()
+	state, ok := s.accountRefsLoads[bucket]
+	if ok {
+		state.active--
+		if state.active <= 0 {
+			delete(s.accountRefsLoads, bucket)
+		} else {
+			s.accountRefsLoads[bucket] = state
+		}
+	}
+	s.accountRefsMu.Unlock()
+	s.accountRefsLoadWG.Done()
+}
+
+func (s *SchedulerSnapshotService) storeCachedAccountRefs(bucket SchedulerBucket, accounts []*Account, now time.Time, generation uint64) {
+	ttl := s.accountRefsTTL()
+	if ttl <= 0 || len(accounts) > maxSchedulerAccountRefsCacheAccounts {
+		return
+	}
+	s.accountRefsMu.Lock()
+	defer s.accountRefsMu.Unlock()
+	state, loading := s.accountRefsLoads[bucket]
+	if s.accountRefsStopped || !loading || state.generation != generation {
+		return
+	}
+	if s.accountRefs == nil {
+		s.accountRefs = make(map[SchedulerBucket]cachedSchedulerAccountRefs)
+	}
+	s.pruneCachedAccountRefsLocked(now)
+	s.deleteCachedAccountRefsLocked(bucket)
+	for (len(s.accountRefs) >= maxSchedulerAccountRefsCacheEntries ||
+		s.accountRefsCount+len(accounts) > maxSchedulerAccountRefsCacheAccounts) && len(s.accountRefs) > 0 {
+		for cachedBucket := range s.accountRefs {
+			s.deleteCachedAccountRefsLocked(cachedBucket)
+			break
+		}
+	}
+	s.accountRefs[bucket] = cachedSchedulerAccountRefs{accounts: accounts, expiresAt: now.Add(ttl)}
+	s.accountRefsCount += len(accounts)
+}
+
+func (s *SchedulerSnapshotService) invalidateCachedAccountRefs(bucket SchedulerBucket) {
+	if s == nil {
+		return
+	}
+	s.accountRefsMu.Lock()
+	if state, ok := s.accountRefsLoads[bucket]; ok {
+		state.generation++
+		s.accountRefsLoads[bucket] = state
+	}
+	s.deleteCachedAccountRefsLocked(bucket)
+	s.accountRefsMu.Unlock()
+	s.accountRefsGroup.Forget(bucket.String())
+}
+
+func (s *SchedulerSnapshotService) deleteCachedAccountRefsLocked(bucket SchedulerBucket) {
+	if cached, ok := s.accountRefs[bucket]; ok {
+		delete(s.accountRefs, bucket)
+		s.accountRefsCount -= len(cached.accounts)
+		if s.accountRefsCount < 0 {
+			s.accountRefsCount = 0
+		}
+	}
+}
+
+func (s *SchedulerSnapshotService) pruneCachedAccountRefsLocked(now time.Time) {
+	for bucket, cached := range s.accountRefs {
+		if !now.Before(cached.expiresAt) {
+			s.deleteCachedAccountRefsLocked(bucket)
+		}
+	}
+}
+
+func (s *SchedulerSnapshotService) runAccountRefsCacheCleanup(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.accountRefsMu.Lock()
+			s.pruneCachedAccountRefsLocked(time.Now())
+			s.accountRefsMu.Unlock()
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+func (s *SchedulerSnapshotService) stopAccountRefsCache() {
+	if s == nil {
+		return
+	}
+	s.accountRefsMu.Lock()
+	if !s.accountRefsStopped {
+		s.accountRefsStopped = true
+		for bucket, state := range s.accountRefsLoads {
+			state.generation++
+			s.accountRefsLoads[bucket] = state
+		}
+		s.accountRefs = make(map[SchedulerBucket]cachedSchedulerAccountRefs)
+		s.accountRefsCount = 0
+	}
+	s.accountRefsMu.Unlock()
+}
+
+func accountRefs(accounts []Account) []*Account {
+	if len(accounts) == 0 {
+		return []*Account{}
+	}
+	refs := make([]*Account, 0, len(accounts))
+	for i := range accounts {
+		refs = append(refs, &accounts[i])
+	}
+	return refs
 }
 
 func (s *SchedulerSnapshotService) GetAccount(ctx context.Context, accountID int64) (*Account, error) {
@@ -730,6 +1089,7 @@ func (s *SchedulerSnapshotService) prepareGroupLifecycle(ctx context.Context, gr
 			if err != nil {
 				return schedulerGroupLifecyclePlan{}, err
 			}
+			s.invalidateCachedAccountRefs(bucket)
 			plan.tasks = append(plan.tasks, schedulerBucketWriteTask{bucket: bucket, token: token})
 		}
 	} else {
@@ -750,6 +1110,7 @@ func (s *SchedulerSnapshotService) prepareGroupLifecycle(ctx context.Context, gr
 			if err := s.cache.RetireBucket(lifecycleCtx, bucket); err != nil {
 				return schedulerGroupLifecyclePlan{}, err
 			}
+			s.invalidateCachedAccountRefs(bucket)
 		}
 	}
 
@@ -953,6 +1314,7 @@ func (s *SchedulerSnapshotService) rebuildBucketWithTokenPolicyAndQueryCache(
 		logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] rebuild cache failed: bucket=%s reason=%s err=%v", bucket.String(), reason, err)
 		return err
 	}
+	s.invalidateCachedAccountRefs(bucket)
 	slog.Debug("[Scheduler] rebuild ok", "bucket", bucket.String(), "reason", reason, "size", len(accounts))
 	return nil
 }

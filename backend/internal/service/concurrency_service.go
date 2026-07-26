@@ -231,10 +231,11 @@ const (
 type ConcurrencyService struct {
 	cache ConcurrencyCache
 
-	accountLoadCacheTTL atomic.Int64
-	accountLoadCacheMu  sync.RWMutex
-	accountLoadCache    map[string]cachedAccountLoadBatch
-	accountLoadGroup    singleflight.Group
+	accountLoadCacheTTL   atomic.Int64
+	accountLoadCacheMu    sync.RWMutex
+	accountLoadCache      map[string]cachedAccountLoadBatch
+	accountLoadGroup      singleflight.Group
+	accountLoadFreshGroup singleflight.Group
 }
 
 type cachedAccountLoadBatch struct {
@@ -586,8 +587,23 @@ func (s *ConcurrencyService) getAccountsLoadBatch(ctx context.Context, accounts 
 		return map[int64]*AccountLoadInfo{}, nil
 	}
 
+	if !allowCache {
+		key := accountLoadBatchCacheKey(accounts)
+		value, err, _ := s.accountLoadFreshGroup.Do(key, func() (any, error) {
+			return s.fetchAccountsLoadBatch(ctx, accounts)
+		})
+		if err != nil {
+			return nil, err
+		}
+		loadMap, _ := value.(map[int64]*AccountLoadInfo)
+		if loadMap == nil {
+			return map[int64]*AccountLoadInfo{}, nil
+		}
+		return loadMap, nil
+	}
+
 	ttl := time.Duration(s.accountLoadCacheTTL.Load())
-	if !allowCache || ttl <= 0 {
+	if ttl <= 0 {
 		return s.fetchAccountsLoadBatch(ctx, accounts)
 	}
 

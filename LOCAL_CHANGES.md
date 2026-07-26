@@ -61,6 +61,29 @@ Primary files:
 - `backend/internal/service/ratelimit_service_403_test.go`
 - `backend/internal/service/account_test_service_openai_403_test.go`
 
+## Large OpenAI-Compatible Pool Scheduling Mitigations
+
+Large Grok and other OpenAI-compatible account pools avoid repeating the same
+high-cost scheduler work for every overlapping request:
+
+- observational `grok_usage_snapshot` updates do not enqueue scheduler rebuilds;
+- same-bucket snapshot reads share one bounded load and reuse decoded account
+  references for the configured short load-batch cache interval;
+- overlapping fresh load queries for the same candidate set are coalesced; and
+- Grok quota checks read canonical JSONB maps directly instead of performing a
+  JSON marshal/unmarshal round trip for every candidate.
+
+These changes reduce duplicate work but do not replace the scheduler's full-pool
+load query. Very large pools still require a bounded candidate/index design for
+strictly sublinear selection cost.
+
+Primary files:
+
+- `backend/internal/repository/account_repo.go`
+- `backend/internal/service/concurrency_service.go`
+- `backend/internal/service/openai_gateway_scheduling.go`
+- `backend/internal/service/scheduler_snapshot_service.go`
+
 ## Upgrade Verification
 
 Before upgrading again, verify:
