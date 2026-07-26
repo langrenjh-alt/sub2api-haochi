@@ -1800,6 +1800,9 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatible(ctx context.C
 	if s != nil && s.service != nil && s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {
 		return false
 	}
+	if s != nil && s.service != nil && s.service.isOpenAIProxyStreamQuarantined(account) {
+		return false
+	}
 	// Quota auto-pause must be evaluated during the initial filter too. Without it the
 	// TopK candidate pool can be filled with paused accounts and the later fresh/DB
 	// rechecks won't reach healthy accounts that fell outside TopK — manifesting as
@@ -1824,6 +1827,53 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatible(ctx context.C
 		return false
 	}
 	return accountSupportsOpenAICapabilities(account, req.RequiredCapability, req.RequiredImageCapability)
+}
+
+// isAccountRequestCompatibleReason reports whether the account can serve the
+// request, and when it cannot, names the veto point. The reason feeds
+// openAISelectionFilterStats so that "no available accounts" errors state why
+// each candidate was dropped instead of failing silently (#4599).
+func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx context.Context, account *Account, req OpenAIAccountScheduleRequest) (bool, string) {
+	if account == nil {
+		return false, "account_nil"
+	}
+	if s != nil && s.service != nil && s.service.isOpenAIAccountRequestRuntimeBlocked(account, req.RequestedModel) {
+		return false, "runtime_blocked"
+	}
+	if s != nil && s.service != nil && s.service.isOpenAIProxyStreamQuarantined(account) {
+		return false, "proxy_stream_quarantined"
+	}
+	// Quota auto-pause must be evaluated during the initial filter too. Without it the
+	// TopK candidate pool can be filled with paused accounts and the later fresh/DB
+	// rechecks won't reach healthy accounts that fell outside TopK — manifesting as
+	// "no available accounts" even though healthy ones exist.
+	if paused, decision := shouldAutoPauseOpenAIAccountByQuota(ctx, account); paused {
+		reason := "quota_auto_pause"
+		if decision.window != "" {
+			reason += "_" + decision.window
+		}
+		return false, reason
+	}
+	// 母账号健康联动：影子账号的凭据来自母账号，母账号不可调度时影子也不应被选中。
+	// Parent-health gate: shadow borrows the parent's credentials; an unschedulable
+	// parent must block the shadow across all scheduler paths.
+	if !parentHealthyForShadow(account, func(id int64) *Account {
+		return s.lookupShadowParentAccount(ctx, id)
+	}) {
+		return false, "shadow_parent_unhealthy"
+	}
+	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
+		return false, "model_not_supported"
+	}
+	if req.GroupID != nil && s != nil && s.service != nil &&
+		s.service.needsUpstreamChannelRestrictionCheck(ctx, req.GroupID) &&
+		s.service.isUpstreamModelRestrictedByChannel(ctx, *req.GroupID, account, req.RequestedModel, req.RequireCompact) {
+		return false, "channel_upstream_restricted"
+	}
+	if !accountSupportsOpenAICapabilities(account, req.RequiredCapability, req.RequiredImageCapability) {
+		return false, "capability_mismatch"
+	}
+	return true, ""
 }
 
 func (s *defaultOpenAIAccountScheduler) ReportResult(accountID int64, success bool, firstTokenMs *int) {

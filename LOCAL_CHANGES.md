@@ -1,15 +1,16 @@
-# Local Changes Against Official sub2api v0.1.162
+# Local Changes Against Official sub2api v0.1.164
 
 This repository includes official `Wei-Shaw/sub2api` through release tag
-`v0.1.162` at commit `34b7a5ad7`.
+`v0.1.164` at commit `cd8bb98c4`, plus upstream main version-sync
+commit `cb24522dd`.
 
-- Upstream release commit: `34b7a5ad7` (`v0.1.162`)
-- Upstream merge target: `v0.1.162^{}` (`34b7a5ad7`)
-- Working branch: `merge-user-changes-v0.1.161`
+- Upstream release commit: `cd8bb98c4` (`v0.1.164`)
+- Upstream merge target: `v0.1.164^{}` (`cd8bb98c4`); version sync from `origin/main` (`cb24522dd`)
+- Working branch: `upgrade-v0.1.163-capacity`
 - Original local change bundle: `E:\号池sub2api\改动`
 - Original local commits: `f1a65550`, `66701c1c`, `46781d3a`
-- Last upstream merge: 2026-07-22 (`v0.1.162@34b7a5ad7`)
-- Fork build version: `backend/cmd/server/VERSION` is `0.1.162`.
+- Last upstream merge: 2026-07-24 (`v0.1.164@cd8bb98c4`, version sync `cb24522dd`)
+- Fork build version: `backend/cmd/server/VERSION` is `0.1.164`.
 - Purpose: preserve local behavior when upgrading to a newer official release.
 
 ## Kiro and Compatibility File List
@@ -301,6 +302,18 @@ Upgrade notes:
 - Preserve the Grok-specific QPS/concurrency overrides so scaling Grok does not
   increase refresh traffic for every OAuth provider.
 - Re-run Wire generation after changing the provider signature.
+
+## v0.1.164 Merge Decisions
+
+- Adopted official composite group routing, route registry, alias attribution, concrete forwarded-model billing, admin UI, migrations, and documentation; merged these with the local public capacity-pool `GroupCapacityService` wiring.
+- Adopted official Ollama Cloud usage refresh, admin APIs/UI, audit-log plaintext-session hardening, and service shutdown path; preserved the local `HTTPUpstreamReadyPool` cleanup and Grok token-refresh scaling injection.
+- Adopted official OpenAI OAuth passthrough `input` normalization, concrete GPT-5.6 account test model, and proxy stream-disconnect quarantine; preserved the local branded OpenAI HTML 403 immediate retry and deterministic credential-owner 403 disable path.
+- Retained official group-level OpenAI/Codex reasoning-effort ceiling/mapping policy, Ent schema/migration, auth-cache snapshot fields, and admin UI while keeping the local Kiro and capacity-pool frontend additions.
+- Combined official `gateway.openai_proxy_stream_circuit` config with the local `gateway.dynamic_ready_pool` config and validation.
+- Adopted official Grok 402 cooldown and simple-mode Grok image capability fixes; preserved local Grok cascaded-stream keepalive, cache route markers, reasoning-signature stripping, and request-owner isolation.
+- Adopted official Alipay mobile precreate deep link, model rate-limit reset date display, channel-pricing model normalization, Codex identity import index optimization, sponsor/docs updates, and account/UI polish.
+- Preserved local Kiro balance/redaction, `SetRateLimited` temporary-unschedulable behavior, Gemini non-streaming image account tests, OpenAI image alias validation, public capacity pool, and empty-response retry without persistent cooldown.
+- Advanced `backend/cmd/server/VERSION` to `0.1.164` using the official post-release main version-sync commit.
 
 ## v0.1.162 Merge Decisions
 
