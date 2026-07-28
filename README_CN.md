@@ -216,6 +216,27 @@ underscores_in_headers on;
 
 Nginx 默认会丢弃名称中含下划线的请求头（如 `session_id`），这会导致多账号环境下的粘性会话功能失效。
 
+承载 API 的 `location` 还需要关闭响应缓冲、缓存和压缩，否则 SSE
+分块可能在请求结束时才一次性到达客户端：
+
+```nginx
+location / {
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+    gzip off;
+    proxy_read_timeout 1800s;
+    proxy_send_timeout 1800s;
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
+不要配置 `proxy_ignore_headers X-Accel-Buffering`。Sub2API 会在 SSE
+响应中发送 `X-Accel-Buffering: no` 作为应用层兜底；如果前面还有 CDN、WAF
+或第二层 Nginx，也必须在对应层关闭缓冲、缓存和压缩。完整安全示例见
+[`deploy/EDGE_SECURITY.md`](deploy/EDGE_SECURITY.md)。
+
 ---
 
 ## 部署方式

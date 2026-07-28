@@ -72,17 +72,10 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	}
 
 	if account.Platform == PlatformGrok {
-		if account.IsGrokOAuth() {
-			if eligible, reason := grokChatResponsesBridgeEligibility(body); eligible {
-				return s.forwardGrokChatCompletionsViaResponses(ctx, c, account, body, promptCacheKey, defaultMappedModel)
-			} else {
-				logger.L().Debug("grok chat_completions: using raw fallback",
-					zap.Int64("account_id", account.ID),
-					zap.String("reason", reason),
-				)
-			}
-		}
-		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+		// Grok prompt caching is tied to the native Responses route. Keep every
+		// Chat Completions ingress request on that route, including API-key
+		// accounts and requests without an explicit cache identity.
+		return s.forwardGrokChatCompletionsViaResponses(ctx, c, account, body, promptCacheKey, defaultMappedModel)
 	}
 
 	// 入口分流：APIKey 账号 + 强制或已探测确认上游不支持 Responses，走 CC 直转。

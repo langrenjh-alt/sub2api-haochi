@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -322,6 +323,48 @@ func TestOpenAIGatewayServiceRecordUsage_ZeroUsageStillWritesUsageLog(t *testing
 	require.Zero(t, billingRepo.lastCmd.APIKeyQuotaCost)
 	require.Zero(t, billingRepo.lastCmd.APIKeyRateLimitCost)
 	require.Zero(t, billingRepo.lastCmd.AccountQuotaCost)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_PreservesForwardStreamType(t *testing.T) {
+	tests := []struct {
+		name        string
+		stream      bool
+		requestType RequestType
+	}{
+		{name: "stream", stream: true, requestType: RequestTypeStream},
+		{name: "sync", stream: false, requestType: RequestTypeSync},
+	}
+
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+			billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+			svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(
+				usageRepo,
+				billingRepo,
+				&openAIRecordUsageUserRepoStub{},
+				&openAIRecordUsageSubRepoStub{},
+				nil,
+			)
+
+			err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+				Result: &OpenAIForwardResult{
+					RequestID: fmt.Sprintf("resp_stream_type_%d", index),
+					Model:     "grok",
+					Stream:    tt.stream,
+					Duration:  time.Second,
+				},
+				APIKey:  &APIKey{ID: int64(1100 + index), Group: &Group{RateMultiplier: 1}},
+				User:    &User{ID: int64(2100 + index)},
+				Account: &Account{ID: int64(3100 + index), Platform: PlatformGrok, Type: AccountTypeOAuth},
+			})
+
+			require.NoError(t, err)
+			require.NotNil(t, usageRepo.lastLog)
+			require.Equal(t, tt.stream, usageRepo.lastLog.Stream)
+			require.Equal(t, tt.requestType, usageRepo.lastLog.EffectiveRequestType())
+		})
+	}
 }
 
 func TestOpenAIGatewayServiceRecordUsage_MissingPricingRecordsZeroCostUsageLog(t *testing.T) {

@@ -214,6 +214,30 @@ underscores_in_headers on;
 
 Nginx drops headers containing underscores by default (e.g. `session_id`), which breaks sticky session routing in multi-account setups.
 
+The API `location` must also disable response buffering, caching, and
+compression. Otherwise, SSE chunks may arrive together only after the request
+finishes:
+
+```nginx
+location / {
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+    gzip off;
+    proxy_read_timeout 1800s;
+    proxy_send_timeout 1800s;
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
+Do not configure `proxy_ignore_headers X-Accel-Buffering`. Sub2API sends
+`X-Accel-Buffering: no` on SSE responses as an application-level safeguard. If
+a CDN, WAF, or another Nginx sits in front of this server, disable buffering,
+caching, and compression there as well. See
+[`deploy/EDGE_SECURITY.md`](deploy/EDGE_SECURITY.md) for the complete secure
+baseline.
+
 ---
 
 ## Deployment

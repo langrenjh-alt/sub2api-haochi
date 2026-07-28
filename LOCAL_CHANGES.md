@@ -1,10 +1,11 @@
-# Local Changes Against Official sub2api v0.1.165
+# Local Changes Against Official sub2api v0.1.166
 
-This fork is based on official release tag `v0.1.165` at commit
-`e9a58c1cb8b5ef626a75c93b4d953fde5e67aa29`.
+This fork is based on official release tag `v0.1.166` at commit
+`dc893dd0b8eab41df5be595ae9fcd1aa74a062b8`.
 
-- Fork source version: `backend/cmd/server/VERSION` is `0.1.165`.
-- Upgrade date: 2026-07-26.
+- Fork source version: `backend/cmd/server/VERSION` remains `0.1.165`, matching
+  the file shipped by the official `v0.1.166` tag.
+- Upgrade date: 2026-07-28.
 - Upgrade policy: keep the official tree intact and retain only the documented
   capacity-pool and OpenAI 403 behavior below.
 
@@ -83,6 +84,33 @@ Primary files:
 - `backend/internal/service/concurrency_service.go`
 - `backend/internal/service/openai_gateway_scheduling.go`
 - `backend/internal/service/scheduler_snapshot_service.go`
+
+## Grok Free Prompt Cache Routing
+
+Every Grok Chat Completions ingress request is converted to xAI Responses,
+including API-key accounts, mapped models, and requests without a cache
+identity. The bridge always streams from xAI internally, but the forwarding
+result and usage log retain the client's original `stream` value so dashboard
+request types remain accurate.
+
+Known-Free Grok OAuth requests with client function tools preserve the client
+function declarations and gain non-conflicting native `web_search`/`x_search`
+route markers. Pure client function tools use this mixed route by default.
+
+This intentionally retains commit `649048eac` over the official behavior that
+omits native markers for pure client tools. Without a native marker, xAI routes
+the request to its non-cacheable Free model. A client function named
+`web_search` or `x_search` is not rewritten because doing so changes the tool
+protocol; only the non-conflicting native marker is appended.
+
+Primary files:
+
+- `backend/internal/service/openai_gateway_grok_cache.go`
+- `backend/internal/service/openai_gateway_grok_cache_test.go`
+- `backend/internal/service/openai_gateway_grok_cache_tool_test.go`
+- `backend/internal/service/openai_gateway_chat_completions.go`
+- `backend/internal/service/openai_gateway_grok_chat_bridge.go`
+- `backend/internal/service/openai_gateway_grok_chat_bridge_test.go`
 
 ## Upgrade Verification
 

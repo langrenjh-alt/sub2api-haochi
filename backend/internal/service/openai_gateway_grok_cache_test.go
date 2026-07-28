@@ -5,6 +5,7 @@ package service
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -372,6 +373,59 @@ func TestGrokFreeMessagesClientToolCacheDefaultsOnForKnownFree(t *testing.T) {
 	}
 }
 
+func TestGrokFreeClientSearchFunctionsRemainClientTools(t *testing.T) {
+	account := healthyGrokOAuthGatewayTestAccount(90102, "access-token")
+	account.Credentials["subscription_tier"] = "free"
+	tests := []struct {
+		name      string
+		functions string
+		wantTools []string
+	}{
+		{
+			name:      "web search function keeps x search marker",
+			functions: `[{"type":"function","name":"web_search","parameters":{"type":"object"}},{"type":"function","name":"Read","parameters":{"type":"object"}}]`,
+			wantTools: []string{"function:web_search", "function:Read", "x_search"},
+		},
+		{
+			name:      "x search function keeps web search marker",
+			functions: `[{"type":"function","name":"x_search","parameters":{"type":"object"}}]`,
+			wantTools: []string{"function:x_search", "web_search"},
+		},
+		{
+			name:      "both reserved names remain functions",
+			functions: `[{"type":"function","name":"web_search","parameters":{"type":"object"}},{"type":"function","name":"x_search","parameters":{"type":"object"}}]`,
+			wantTools: []string{"function:web_search", "function:x_search"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			intentBody := []byte(`{"model":"grok","tools":` + tt.functions + `,"tool_choice":"auto"}`)
+			body, err := applyGrokResponsesCacheIdentity(intentBody, intentBody, "isolated-id", true)
+			require.NoError(t, err)
+			body, err = applyGrokFreeMessagesFunctionToolCacheRoute(body, intentBody, account, "isolated-id")
+			require.NoError(t, err)
+
+			tools := gjson.GetBytes(body, "tools").Array()
+			require.Len(t, tools, len(tt.wantTools))
+			for i, want := range tt.wantTools {
+				if strings.HasPrefix(want, "function:") {
+					require.Equal(t, "function", tools[i].Get("type").String())
+					require.Equal(t, strings.TrimPrefix(want, "function:"), tools[i].Get("name").String())
+					continue
+				}
+				require.Equal(t, want, tools[i].Get("type").String())
+			}
+
+			second, err := applyGrokResponsesCacheIdentity(body, intentBody, "isolated-id", true)
+			require.NoError(t, err)
+			second, err = applyGrokFreeMessagesFunctionToolCacheRoute(second, intentBody, account, "isolated-id")
+			require.NoError(t, err)
+			require.JSONEq(t, string(body), string(second))
+		})
+	}
+}
+
 func TestGrokFreeMessagesClientToolCacheDefaultsWithMissingAccountSetting(t *testing.T) {
 	body := []byte(`{"model":"grok","tools":[{"type":"function","name":"view_image","parameters":{"type":"object"}}],"tool_choice":"auto"}`)
 	tests := []struct {
@@ -404,7 +458,8 @@ func TestApplyGrokCacheIdentityAppendsNativeToolsWhenSearchPresent(t *testing.T)
 	account := healthyGrokOAuthGatewayTestAccount(901, "access-token")
 	account.Credentials["subscription_tier"] = " FREE "
 
-	// Function tools INCLUDING web_search → convert + complement with x_search.
+	// Preserve the client web_search function and add only the non-conflicting
+	// x_search native route marker.
 	intentBody := []byte(`{"model":"grok","tools":[{"type":"function","name":"lookup","description":"look up a value","parameters":{"type":"object"}},{"type":"function","name":"web_search","description":"search","parameters":{"type":"object"}}]}`)
 	body, err := applyGrokResponsesCacheIdentity(intentBody, intentBody, "isolated-id", true)
 	require.NoError(t, err)
@@ -412,10 +467,11 @@ func TestApplyGrokCacheIdentityAppendsNativeToolsWhenSearchPresent(t *testing.T)
 	require.NoError(t, err)
 
 	tools := gjson.GetBytes(body, "tools").Array()
-	require.Len(t, tools, 3, "lookup(function) + web_search(native) + x_search(native)")
+	require.Len(t, tools, 3, "lookup(function) + web_search(function) + x_search(native)")
 	require.Equal(t, "function", tools[0].Get("type").String())
 	require.Equal(t, "lookup", tools[0].Get("name").String())
-	require.Equal(t, "web_search", tools[1].Get("type").String())
+	require.Equal(t, "function", tools[1].Get("type").String())
+	require.Equal(t, "web_search", tools[1].Get("name").String())
 	require.Equal(t, "x_search", tools[2].Get("type").String())
 }
 
@@ -678,7 +734,8 @@ func TestGrokFreeRequestClientSearchFunctionUsesDefaultAccountPolicy(t *testing.
 	tools := gjson.GetBytes(patched, "tools").Array()
 	require.Len(t, tools, 3)
 	require.Equal(t, "view_image", tools[0].Get("name").String())
-	require.Equal(t, "web_search", tools[1].Get("type").String())
+	require.Equal(t, "function", tools[1].Get("type").String())
+	require.Equal(t, "web_search", tools[1].Get("name").String())
 	require.Equal(t, "x_search", tools[2].Get("type").String())
 }
 
@@ -893,7 +950,8 @@ func TestGrokFreeMessagesFunctionToolCacheRouteRequiresKnownFreeTier(t *testing.
 			tools := gjson.GetBytes(body, "tools").Array()
 			if tt.wantMix {
 				require.Len(t, tools, 3)
-				require.Equal(t, "web_search", tools[1].Get("type").String())
+				require.Equal(t, "function", tools[1].Get("type").String())
+				require.Equal(t, "web_search", tools[1].Get("name").String())
 				require.Equal(t, "x_search", tools[2].Get("type").String())
 				return
 			}

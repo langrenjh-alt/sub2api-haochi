@@ -410,7 +410,9 @@ func isGrokFreeCacheFunctionToolIntent(tools, toolChoice gjson.Result) bool {
 }
 
 func appendMissingGrokFreeCacheNativeTools(body []byte) ([]byte, error) {
-	return appendGrokFreeCacheNativeTools(body, false)
+	// Keep the fork's established cache behavior for callers that use the
+	// compatibility helper: valid client functions select Grok's mixed route.
+	return appendGrokFreeCacheNativeTools(body, true)
 }
 
 func appendGrokFreeCacheNativeTools(body []byte, allowPureClientTools bool) ([]byte, error) {
@@ -439,6 +441,7 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 	}
 	merged := make([]json.RawMessage, 0, len(items)+2)
 	present := make(map[string]bool, 2)
+	functionNames := make(map[string]bool, len(items))
 	hasCompanionTool := false
 	for _, tool := range items {
 		toolType := strings.TrimSpace(tool.Get("type").String())
@@ -448,28 +451,7 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 			if !tool.IsObject() || name == "" || tool.Get("function").Exists() {
 				return body, nil
 			}
-			// Grok Build may declare search as function tools. Convert to native
-			// entries so Free OAuth stays cache-capable without duplicate names.
-			if (name == "web_search" || name == "x_search") && allowFunctionSearch {
-				if present[name] {
-					continue
-				}
-				raw, err := json.Marshal(map[string]string{"type": name})
-				if err != nil {
-					return nil, err
-				}
-				merged = append(merged, raw)
-				present[name] = true
-				if allowPureClientTools {
-					hasCompanionTool = true
-				}
-				continue
-			}
-			if name == "web_search" || name == "x_search" {
-				// Keep the client function intact and avoid adding a same-named
-				// native tool unless conversion was explicitly enabled.
-				present[name] = true
-			}
+			functionNames[name] = true
 			hasCompanionTool = true
 			merged = append(merged, json.RawMessage(tool.Raw))
 		case "web_search", "x_search":
@@ -489,15 +471,19 @@ func appendGrokFreeCacheNativeToolsWithPolicy(body []byte, allowPureClientTools,
 	if !hasCompanionTool {
 		return body, nil
 	}
-	// Only complement missing native search tools when the request already contains
-	// at least one search tool (native or function-form). Pure client function tools
-	// (e.g. view_image) must not trigger injection to avoid biasing model tool
-	// selection (#4486).
-	if !allowPureClientTools && !present["web_search"] && !present["x_search"] {
+	// An explicit opt-out still permits a request that already declares search
+	// to select the mixed route. Preserve function declarations and add only
+	// non-conflicting native route markers; rewriting a client function changes
+	// its tool-call protocol and breaks subsequent tool outputs.
+	hasFunctionSearch := functionNames["web_search"] || functionNames["x_search"]
+	if !allowPureClientTools && !present["web_search"] && !present["x_search"] &&
+		!(allowFunctionSearch && hasFunctionSearch) {
 		return body, nil
 	}
 	for _, toolType := range []string{"web_search", "x_search"} {
-		if present[toolType] {
+		// xAI assigns native search tools their type as an implicit name. Do not
+		// create a duplicate against a client function with the same name.
+		if present[toolType] || functionNames[toolType] {
 			continue
 		}
 		raw, err := json.Marshal(map[string]string{"type": toolType})

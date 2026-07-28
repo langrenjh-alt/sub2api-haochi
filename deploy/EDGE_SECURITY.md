@@ -121,6 +121,8 @@ server {
         proxy_set_header Connection $connection_upgrade;
         proxy_buffering off;
         proxy_request_buffering off;
+        proxy_cache off;
+        gzip off;
         proxy_read_timeout 1800s;
         proxy_send_timeout 1800s;
         proxy_pass http://127.0.0.1:8080;
