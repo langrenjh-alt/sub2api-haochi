@@ -1323,11 +1323,11 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 	req OpenAIAccountScheduleRequest,
 ) (*AccountSelectionResult, int, int, float64, error) {
 	budget := newOpenAISelectionProbeBudget()
-	accounts, err := s.service.listSchedulableAccounts(ctx, req.GroupID, req.Platform)
+	accountRefs, err := s.service.listSchedulableAccountRefs(ctx, req.GroupID, req.Platform)
 	if err != nil {
 		return nil, 0, 0, 0, err
 	}
-	if len(accounts) == 0 {
+	if len(accountRefs) == 0 {
 		return nil, 0, 0, 0, noAvailableOpenAISelectionError(req.RequestedModel, false, openAISelectionFilterStats{}.summary(""))
 	}
 
@@ -1337,11 +1337,17 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		schedGroup, _ = s.service.schedulerSnapshot.GetGroupByID(ctx, *req.GroupID)
 	}
 
-	filterStats := openAISelectionFilterStats{pool: len(accounts)}
-	filtered := make([]*Account, 0, len(accounts))
-	loadReq := make([]AccountWithConcurrency, 0, len(accounts))
-	for i := range accounts {
-		account := &accounts[i]
+	filterStats := openAISelectionFilterStats{pool: len(accountRefs)}
+	filtered := make([]*Account, 0, len(accountRefs))
+	loadReq := make([]AccountWithConcurrency, 0, len(accountRefs))
+	for _, sharedAccount := range accountRefs {
+		if sharedAccount == nil {
+			continue
+		}
+		// Scheduler snapshots are shared across requests. Use a request-local
+		// shallow copy because compatibility checks may populate lazy caches.
+		accountCopy := *sharedAccount
+		account := &accountCopy
 		if req.ExcludedIDs != nil {
 			if _, excluded := req.ExcludedIDs[account.ID]; excluded {
 				filterStats.exclude("excluded")

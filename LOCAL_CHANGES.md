@@ -1,11 +1,10 @@
-# Local Changes Against Official sub2api v0.1.166
+# Local Changes Against Official sub2api v0.1.169
 
-This fork is based on official release tag `v0.1.166` at commit
-`dc893dd0b8eab41df5be595ae9fcd1aa74a062b8`.
+This fork is based on the official `main` commit
+`b74024c7868ee88a0bf921306cbc22a2f922872a` (source version `0.1.169`).
 
-- Fork source version: `backend/cmd/server/VERSION` remains `0.1.165`, matching
-  the file shipped by the official `v0.1.166` tag.
-- Upgrade date: 2026-07-28.
+- Fork source version: `backend/cmd/server/VERSION` is `0.1.169`.
+- Upgrade date: 2026-08-01.
 - Upgrade policy: keep the official tree intact and retain only the documented
   capacity-pool and OpenAI 403 behavior below.
 
@@ -77,6 +76,17 @@ high-cost scheduler work for every overlapping request:
 These changes reduce duplicate work but do not replace the scheduler's full-pool
 load query. Very large pools still require a bounded candidate/index design for
 strictly sublinear selection cost.
+
+The scheduler now reuses the short-TTL account-reference cache in both the
+advanced OpenAI load-balancer path and the legacy Anthropic/Gemini/Antigravity
+gateway path. The legacy `[]Account` API still receives value copies, while the
+advanced path uses shallow, request-local account copies and rechecks the final
+selected account against the database. This prevents concurrent requests from
+repeatedly decoding the same Redis snapshot without weakening freshness checks.
+
+The per-request `sticky.scheduler_entry` diagnostic is emitted at debug level;
+it is intentionally excluded from the default info log path because it runs for
+every gateway request.
 
 Primary files:
 

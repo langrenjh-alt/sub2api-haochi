@@ -151,6 +151,27 @@ func TestSchedulerSnapshotAccountRefsExpiresAndReloads(t *testing.T) {
 	require.Equal(t, 1, svc.accountRefsCount)
 }
 
+func TestSchedulerSnapshotLegacyListReusesRefsSnapshotAndReturnsValues(t *testing.T) {
+	cache := &accountRefsTestCache{snapshotHydrationCache: snapshotHydrationCache{
+		snapshot: []*Account{{ID: 1, Platform: PlatformGrok}},
+	}}
+	svc := newAccountRefsTestService(cache, 200*time.Millisecond)
+	groupID := int64(20)
+
+	first, _, err := svc.ListSchedulableAccounts(context.Background(), &groupID, PlatformGrok, false)
+	require.NoError(t, err)
+	second, _, err := svc.ListSchedulableAccounts(context.Background(), &groupID, PlatformGrok, false)
+	require.NoError(t, err)
+
+	require.Equal(t, int64(1), cache.calls.Load())
+	require.Len(t, first, 1)
+	require.Len(t, second, 1)
+	require.Equal(t, int64(1), first[0].ID)
+	require.Equal(t, int64(1), second[0].ID)
+	first[0].Name = "request-local mutation"
+	require.NotEqual(t, first[0].Name, second[0].Name)
+}
+
 func TestSchedulerSnapshotAccountRefsCallerCancellationDoesNotCancelSharedRead(t *testing.T) {
 	cache := &accountRefsTestCache{
 		snapshotHydrationCache: snapshotHydrationCache{snapshot: []*Account{{ID: 1, Platform: PlatformGrok}}},

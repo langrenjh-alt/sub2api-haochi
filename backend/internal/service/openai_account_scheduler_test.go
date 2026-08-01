@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ type openAISnapshotCacheStub struct {
 	SchedulerCache
 	snapshotAccounts []*Account
 	accountsByID     map[int64]*Account
+	snapshotCalls    atomic.Int64
 }
 
 type schedulerTestOpenAIAccountRepo struct {
@@ -272,6 +274,7 @@ func newOpenAIAdvancedSchedulerRateLimitService(enabled string, values ...string
 }
 
 func (s *openAISnapshotCacheStub) GetSnapshot(ctx context.Context, bucket SchedulerBucket) ([]*Account, bool, error) {
+	s.snapshotCalls.Add(1)
 	if len(s.snapshotAccounts) == 0 {
 		return nil, false, nil
 	}
@@ -284,6 +287,50 @@ func (s *openAISnapshotCacheStub) GetSnapshot(ctx context.Context, bucket Schedu
 		out = append(out, &cloned)
 	}
 	return out, true, nil
+}
+
+func TestOpenAIGatewayService_AdvancedSchedulerReusesAccountRefsSnapshot(t *testing.T) {
+	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+
+	groupID := int64(10991)
+	account := &Account{
+		ID:          1099101,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Status:      StatusActive,
+		Schedulable: true,
+		Concurrency: 2,
+		GroupIDs:    []int64{groupID},
+	}
+	snapshotCache := &openAISnapshotCacheStub{
+		snapshotAccounts: []*Account{account},
+		accountsByID:     map[int64]*Account{account.ID: account},
+	}
+	cfg := &config.Config{}
+	cfg.Gateway.Scheduling.LoadBatchCacheTTLMS = 200
+	snapshotService := NewSchedulerSnapshotService(snapshotCache, nil, nil, nil, cfg)
+	svc := &OpenAIGatewayService{
+		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: []Account{*account}},
+		cfg:                cfg,
+		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true"),
+		schedulerSnapshot:  snapshotService,
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
+	}
+
+	for _, sessionHash := range []string{"account_refs_first", "account_refs_second"} {
+		selection, _, err := svc.SelectAccountWithScheduler(
+			context.Background(), &groupID, "", sessionHash, "gpt-5.1", nil,
+			OpenAIUpstreamTransportAny, false,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, selection)
+		require.Equal(t, account.ID, selection.Account.ID)
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+	}
+
+	require.Equal(t, int64(1), snapshotCache.snapshotCalls.Load())
 }
 
 func (s *openAISnapshotCacheStub) GetAccount(ctx context.Context, accountID int64) (*Account, error) {

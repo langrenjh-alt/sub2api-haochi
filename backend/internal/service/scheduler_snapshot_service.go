@@ -246,55 +246,29 @@ func (s *SchedulerSnapshotService) Stop() {
 }
 
 func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, groupID *int64, platform string, hasForcePlatform bool) ([]Account, bool, error) {
-	useMixed := (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
-	mode := s.resolveMode(platform, hasForcePlatform)
-	bucket := s.bucketFor(groupID, platform, mode)
-	var writeToken SchedulerBucketWriteToken
-	canPublish := false
-
-	if s.cache != nil {
-		cached, hit, err := s.cache.GetSnapshot(ctx, bucket)
-		if err != nil {
-			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache read failed: bucket=%s err=%v", bucket.String(), err)
-		} else if hit {
-			return derefAccounts(cached), useMixed, nil
-		}
-		token, err := s.cache.CaptureBucketWriteToken(ctx, bucket)
-		if err != nil {
-			if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
-				slog.Debug("[Scheduler] cache publish fenced", "bucket", bucket.String())
-			} else {
-				logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache publish token failed: bucket=%s err=%v", bucket.String(), err)
-			}
-		} else {
-			writeToken = token
-			canPublish = true
-		}
-	}
-
-	if err := s.guardFallback(ctx); err != nil {
-		return nil, useMixed, err
-	}
-
-	fallbackCtx, cancel := s.withFallbackTimeout(ctx)
-	defer cancel()
-
-	accounts, err := s.loadAccountsFromDB(fallbackCtx, bucket, useMixed)
+	accounts, useMixed, err := s.ListSchedulableAccountRefs(ctx, groupID, platform, hasForcePlatform)
 	if err != nil {
+		// Preserve the legacy API's retirement behavior: a retired bucket is a
+		// cache publication fence, not a reason to reject an otherwise valid DB
+		// read. The reference API intentionally remains strict for OpenAI's hot
+		// path so callers cannot use a fenced snapshot accidentally.
+		if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
+			useMixed = (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
+			bucket := s.bucketFor(groupID, platform, s.resolveMode(platform, hasForcePlatform))
+			if fallbackErr := s.guardFallback(ctx); fallbackErr != nil {
+				return nil, useMixed, fallbackErr
+			}
+			fallbackCtx, cancel := s.withFallbackTimeout(ctx)
+			defer cancel()
+			accounts, fallbackErr := s.loadAccountsFromDB(fallbackCtx, bucket, useMixed)
+			return accounts, useMixed, fallbackErr
+		}
 		return nil, useMixed, err
 	}
-
-	if s.cache != nil && canPublish {
-		if err := s.cache.SetSnapshot(fallbackCtx, bucket, writeToken, accounts); err != nil {
-			if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
-				slog.Debug("[Scheduler] cache publish fenced", "bucket", bucket.String())
-			} else {
-				logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache write failed: bucket=%s err=%v", bucket.String(), err)
-			}
-		}
-	}
-
-	return accounts, useMixed, nil
+	// Keep the legacy value-slice API isolated from shared scheduler snapshots.
+	// Callers historically received request-local Account values and may update
+	// fields or lazy caches while selecting an upstream account.
+	return derefAccounts(accounts), useMixed, nil
 }
 
 // ListSchedulableAccountRefs is the read-only hot-path variant used by the

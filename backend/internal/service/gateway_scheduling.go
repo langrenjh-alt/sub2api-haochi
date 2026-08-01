@@ -139,7 +139,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 
 	// [DEBUG-STICKY] 调度器入口日志
-	slog.Info("sticky.scheduler_entry",
+	// This diagnostic runs once per request; keep it off the default info path.
+	slog.Debug("sticky.scheduler_entry",
 		"group_id", derefGroupID(groupID),
 		"session_hash", shortSessionHash(sessionHash),
 		"sticky_account_id", stickyAccountID,
