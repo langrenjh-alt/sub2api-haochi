@@ -692,6 +692,35 @@
           </div>
         </div>
 
+        <div class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <label class="input-label mb-0">{{ t("admin.groups.form.burstMode") }}</label>
+              <p class="input-hint">{{ t("admin.groups.form.burstModeHint") }}</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="createForm.burst_mode_enabled"
+              @click="createForm.burst_mode_enabled = !createForm.burst_mode_enabled"
+              :class="[
+                'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
+                createForm.burst_mode_enabled ? 'bg-primary-500' : 'bg-gray-300 dark:bg-dark-600',
+              ]"
+            >
+              <span :class="['inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform', createForm.burst_mode_enabled ? 'translate-x-6' : 'translate-x-1']" />
+            </button>
+          </div>
+          <div v-if="createForm.burst_mode_enabled">
+            <label class="input-label">{{ t("admin.groups.form.burstModeThreshold") }}</label>
+            <div class="relative">
+              <input v-model.number="createForm.burst_mode_threshold_percent" type="number" min="1" max="100" step="1" required class="input pr-9" />
+              <span class="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm text-gray-500">%</span>
+            </div>
+            <p class="input-hint">{{ t("admin.groups.form.burstModeThresholdHint") }}</p>
+          </div>
+        </div>
+
         <!-- Subscription Configuration -->
         <div class="mt-4 border-t pt-4">
           <div>
@@ -2174,6 +2203,34 @@
             class="input"
             data-tour="edit-group-form-name"
           />
+        </div>
+        <div class="space-y-3 border-t border-gray-200 pt-4 dark:border-dark-600">
+          <div class="flex items-center justify-between gap-4">
+            <div>
+              <label class="input-label mb-0">{{ t("admin.groups.form.burstMode") }}</label>
+              <p class="input-hint">{{ t("admin.groups.form.burstModeHint") }}</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="editForm.burst_mode_enabled"
+              @click="editForm.burst_mode_enabled = !editForm.burst_mode_enabled"
+              :class="[
+                'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
+                editForm.burst_mode_enabled ? 'bg-primary-500' : 'bg-gray-300 dark:bg-dark-600',
+              ]"
+            >
+              <span :class="['inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform', editForm.burst_mode_enabled ? 'translate-x-6' : 'translate-x-1']" />
+            </button>
+          </div>
+          <div v-if="editForm.burst_mode_enabled">
+            <label class="input-label">{{ t("admin.groups.form.burstModeThreshold") }}</label>
+            <div class="relative">
+              <input v-model.number="editForm.burst_mode_threshold_percent" type="number" min="1" max="100" step="1" required class="input pr-9" />
+              <span class="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm text-gray-500">%</span>
+            </div>
+            <p class="input-hint">{{ t("admin.groups.form.burstModeThresholdHint") }}</p>
+          </div>
         </div>
         <div>
           <label class="input-label">{{
@@ -4909,6 +4966,8 @@ const createForm = reactive({
   platform: "anthropic" as GroupPlatform,
   rate_multiplier: 1.0,
   is_exclusive: false,
+  burst_mode_enabled: false,
+  burst_mode_threshold_percent: 90,
   subscription_type: "standard" as SubscriptionType,
   daily_limit_usd: null as number | null,
   weekly_limit_usd: null as number | null,
@@ -5267,6 +5326,8 @@ const editForm = reactive({
   platform: "anthropic" as GroupPlatform,
   rate_multiplier: 1.0,
   is_exclusive: false,
+  burst_mode_enabled: false,
+  burst_mode_threshold_percent: 90,
   status: "active" as "active" | "inactive",
   subscription_type: "standard" as SubscriptionType,
   daily_limit_usd: null as number | null,
@@ -5753,6 +5814,8 @@ const closeCreateModal = () => {
   createForm.peak_start = "";
   createForm.peak_end = "";
   createForm.peak_rate_multiplier = 1.0;
+  createForm.burst_mode_enabled = false;
+  createForm.burst_mode_threshold_percent = 90;
   createForm.profit_control_enabled = false;
   createForm.profit_min_margin_percent = 0;
   createForm.profit_safety_buffer_percent = 0;
@@ -5816,6 +5879,21 @@ const validateProfitControlForm = (form: ProfitControlFormState): boolean => {
   return true;
 };
 
+const validateBurstModeThreshold = (form: {
+  burst_mode_enabled: boolean;
+  burst_mode_threshold_percent: number;
+}) => {
+  if (!form.burst_mode_enabled) {
+    return true;
+  }
+  const threshold = Number(form.burst_mode_threshold_percent);
+  if (!Number.isInteger(threshold) || threshold < 1 || threshold > 100) {
+    appStore.showError(t("admin.groups.form.burstModeThresholdRange"));
+    return false;
+  }
+  return true;
+};
+
 const handleCreateGroup = async () => {
   if (!createForm.name.trim()) {
     appStore.showError(t("admin.groups.nameRequired"));
@@ -5829,6 +5907,9 @@ const handleCreateGroup = async () => {
     return;
   }
   if (!validateProfitControlForm(createForm)) {
+    return;
+  }
+  if (!validateBurstModeThreshold(createForm)) {
     return;
   }
   submitting.value = true;
@@ -5960,6 +6041,8 @@ const handleEdit = async (group: AdminGroup) => {
   editForm.platform = group.platform;
   editForm.rate_multiplier = group.rate_multiplier;
   editForm.is_exclusive = group.is_exclusive;
+  editForm.burst_mode_enabled = group.burst_mode_enabled ?? false;
+  editForm.burst_mode_threshold_percent = group.burst_mode_threshold_percent ?? 90;
   editForm.status = group.status;
   editForm.subscription_type = group.subscription_type || "standard";
   editForm.daily_limit_usd = group.daily_limit_usd;
@@ -6060,6 +6143,8 @@ const closeEditModal = () => {
   editForm.peak_start = "";
   editForm.peak_end = "";
   editForm.peak_rate_multiplier = 1.0;
+  editForm.burst_mode_enabled = false;
+  editForm.burst_mode_threshold_percent = 90;
   editForm.profit_control_enabled = false;
   editForm.profit_min_margin_percent = 0;
   editForm.profit_safety_buffer_percent = 0;
@@ -6093,6 +6178,9 @@ const handleUpdateGroup = async () => {
     return;
   }
   if (!validateProfitControlForm(editForm)) {
+    return;
+  }
+  if (!validateBurstModeThreshold(editForm)) {
     return;
   }
 

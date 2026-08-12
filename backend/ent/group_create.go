@@ -175,6 +175,34 @@ func (_c *GroupCreate) SetNillableIsExclusive(v *bool) *GroupCreate {
 	return _c
 }
 
+// SetBurstModeEnabled sets the "burst_mode_enabled" field.
+func (_c *GroupCreate) SetBurstModeEnabled(v bool) *GroupCreate {
+	_c.mutation.SetBurstModeEnabled(v)
+	return _c
+}
+
+// SetNillableBurstModeEnabled sets the "burst_mode_enabled" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableBurstModeEnabled(v *bool) *GroupCreate {
+	if v != nil {
+		_c.SetBurstModeEnabled(*v)
+	}
+	return _c
+}
+
+// SetBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field.
+func (_c *GroupCreate) SetBurstModeThresholdPercent(v int) *GroupCreate {
+	_c.mutation.SetBurstModeThresholdPercent(v)
+	return _c
+}
+
+// SetNillableBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableBurstModeThresholdPercent(v *int) *GroupCreate {
+	if v != nil {
+		_c.SetBurstModeThresholdPercent(*v)
+	}
+	return _c
+}
+
 // SetStatus sets the "status" field.
 func (_c *GroupCreate) SetStatus(v string) *GroupCreate {
 	_c.mutation.SetStatus(v)
@@ -994,6 +1022,14 @@ func (_c *GroupCreate) defaults() error {
 		v := group.DefaultIsExclusive
 		_c.mutation.SetIsExclusive(v)
 	}
+	if _, ok := _c.mutation.BurstModeEnabled(); !ok {
+		v := group.DefaultBurstModeEnabled
+		_c.mutation.SetBurstModeEnabled(v)
+	}
+	if _, ok := _c.mutation.BurstModeThresholdPercent(); !ok {
+		v := group.DefaultBurstModeThresholdPercent
+		_c.mutation.SetBurstModeThresholdPercent(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := group.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -1160,6 +1196,17 @@ func (_c *GroupCreate) check() error {
 	}
 	if _, ok := _c.mutation.IsExclusive(); !ok {
 		return &ValidationError{Name: "is_exclusive", err: errors.New(`ent: missing required field "Group.is_exclusive"`)}
+	}
+	if _, ok := _c.mutation.BurstModeEnabled(); !ok {
+		return &ValidationError{Name: "burst_mode_enabled", err: errors.New(`ent: missing required field "Group.burst_mode_enabled"`)}
+	}
+	if _, ok := _c.mutation.BurstModeThresholdPercent(); !ok {
+		return &ValidationError{Name: "burst_mode_threshold_percent", err: errors.New(`ent: missing required field "Group.burst_mode_threshold_percent"`)}
+	}
+	if v, ok := _c.mutation.BurstModeThresholdPercent(); ok {
+		if err := group.BurstModeThresholdPercentValidator(v); err != nil {
+			return &ValidationError{Name: "burst_mode_threshold_percent", err: fmt.Errorf(`ent: validator failed for field "Group.burst_mode_threshold_percent": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "Group.status"`)}
@@ -1371,6 +1418,14 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.IsExclusive(); ok {
 		_spec.SetField(group.FieldIsExclusive, field.TypeBool, value)
 		_node.IsExclusive = value
+	}
+	if value, ok := _c.mutation.BurstModeEnabled(); ok {
+		_spec.SetField(group.FieldBurstModeEnabled, field.TypeBool, value)
+		_node.BurstModeEnabled = value
+	}
+	if value, ok := _c.mutation.BurstModeThresholdPercent(); ok {
+		_spec.SetField(group.FieldBurstModeThresholdPercent, field.TypeInt, value)
+		_node.BurstModeThresholdPercent = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(group.FieldStatus, field.TypeString, value)
@@ -1865,6 +1920,36 @@ func (u *GroupUpsert) SetIsExclusive(v bool) *GroupUpsert {
 // UpdateIsExclusive sets the "is_exclusive" field to the value that was provided on create.
 func (u *GroupUpsert) UpdateIsExclusive() *GroupUpsert {
 	u.SetExcluded(group.FieldIsExclusive)
+	return u
+}
+
+// SetBurstModeEnabled sets the "burst_mode_enabled" field.
+func (u *GroupUpsert) SetBurstModeEnabled(v bool) *GroupUpsert {
+	u.Set(group.FieldBurstModeEnabled, v)
+	return u
+}
+
+// UpdateBurstModeEnabled sets the "burst_mode_enabled" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateBurstModeEnabled() *GroupUpsert {
+	u.SetExcluded(group.FieldBurstModeEnabled)
+	return u
+}
+
+// SetBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field.
+func (u *GroupUpsert) SetBurstModeThresholdPercent(v int) *GroupUpsert {
+	u.Set(group.FieldBurstModeThresholdPercent, v)
+	return u
+}
+
+// UpdateBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateBurstModeThresholdPercent() *GroupUpsert {
+	u.SetExcluded(group.FieldBurstModeThresholdPercent)
+	return u
+}
+
+// AddBurstModeThresholdPercent adds v to the "burst_mode_threshold_percent" field.
+func (u *GroupUpsert) AddBurstModeThresholdPercent(v int) *GroupUpsert {
+	u.Add(group.FieldBurstModeThresholdPercent, v)
 	return u
 }
 
@@ -2915,6 +3000,41 @@ func (u *GroupUpsertOne) SetIsExclusive(v bool) *GroupUpsertOne {
 func (u *GroupUpsertOne) UpdateIsExclusive() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateIsExclusive()
+	})
+}
+
+// SetBurstModeEnabled sets the "burst_mode_enabled" field.
+func (u *GroupUpsertOne) SetBurstModeEnabled(v bool) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBurstModeEnabled(v)
+	})
+}
+
+// UpdateBurstModeEnabled sets the "burst_mode_enabled" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateBurstModeEnabled() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBurstModeEnabled()
+	})
+}
+
+// SetBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field.
+func (u *GroupUpsertOne) SetBurstModeThresholdPercent(v int) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBurstModeThresholdPercent(v)
+	})
+}
+
+// AddBurstModeThresholdPercent adds v to the "burst_mode_threshold_percent" field.
+func (u *GroupUpsertOne) AddBurstModeThresholdPercent(v int) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.AddBurstModeThresholdPercent(v)
+	})
+}
+
+// UpdateBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateBurstModeThresholdPercent() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBurstModeThresholdPercent()
 	})
 }
 
@@ -4270,6 +4390,41 @@ func (u *GroupUpsertBulk) SetIsExclusive(v bool) *GroupUpsertBulk {
 func (u *GroupUpsertBulk) UpdateIsExclusive() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateIsExclusive()
+	})
+}
+
+// SetBurstModeEnabled sets the "burst_mode_enabled" field.
+func (u *GroupUpsertBulk) SetBurstModeEnabled(v bool) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBurstModeEnabled(v)
+	})
+}
+
+// UpdateBurstModeEnabled sets the "burst_mode_enabled" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateBurstModeEnabled() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBurstModeEnabled()
+	})
+}
+
+// SetBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field.
+func (u *GroupUpsertBulk) SetBurstModeThresholdPercent(v int) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBurstModeThresholdPercent(v)
+	})
+}
+
+// AddBurstModeThresholdPercent adds v to the "burst_mode_threshold_percent" field.
+func (u *GroupUpsertBulk) AddBurstModeThresholdPercent(v int) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.AddBurstModeThresholdPercent(v)
+	})
+}
+
+// UpdateBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateBurstModeThresholdPercent() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBurstModeThresholdPercent()
 	})
 }
 

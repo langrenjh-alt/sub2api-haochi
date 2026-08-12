@@ -63,6 +63,14 @@ func (Group) Fields() []ent.Field {
 			Comment("高峰时段叠加倍率，仅在 peak_rate_enabled 且处于 [peak_start, peak_end) 时乘入文本倍率"),
 		field.Bool("is_exclusive").
 			Default(false),
+		field.Bool("burst_mode_enabled").
+			Default(false).
+			Comment("启用分组超刷调度策略"),
+		field.Int("burst_mode_threshold_percent").
+			Default(90).
+			Min(1).
+			Max(100).
+			Comment("超刷调度允许的账号并发阈值百分比"),
 		field.String("status").
 			MaxLen(20).
 			Default(domain.StatusActive),

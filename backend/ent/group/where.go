@@ -110,6 +110,16 @@ func IsExclusive(v bool) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldIsExclusive, v))
 }
 
+// BurstModeEnabled applies equality check predicate on the "burst_mode_enabled" field. It's identical to BurstModeEnabledEQ.
+func BurstModeEnabled(v bool) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldBurstModeEnabled, v))
+}
+
+// BurstModeThresholdPercent applies equality check predicate on the "burst_mode_threshold_percent" field. It's identical to BurstModeThresholdPercentEQ.
+func BurstModeThresholdPercent(v int) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldBurstModeThresholdPercent, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldStatus, v))
@@ -823,6 +833,56 @@ func IsExclusiveEQ(v bool) predicate.Group {
 // IsExclusiveNEQ applies the NEQ predicate on the "is_exclusive" field.
 func IsExclusiveNEQ(v bool) predicate.Group {
 	return predicate.Group(sql.FieldNEQ(FieldIsExclusive, v))
+}
+
+// BurstModeEnabledEQ applies the EQ predicate on the "burst_mode_enabled" field.
+func BurstModeEnabledEQ(v bool) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldBurstModeEnabled, v))
+}
+
+// BurstModeEnabledNEQ applies the NEQ predicate on the "burst_mode_enabled" field.
+func BurstModeEnabledNEQ(v bool) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldBurstModeEnabled, v))
+}
+
+// BurstModeThresholdPercentEQ applies the EQ predicate on the "burst_mode_threshold_percent" field.
+func BurstModeThresholdPercentEQ(v int) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldBurstModeThresholdPercent, v))
+}
+
+// BurstModeThresholdPercentNEQ applies the NEQ predicate on the "burst_mode_threshold_percent" field.
+func BurstModeThresholdPercentNEQ(v int) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldBurstModeThresholdPercent, v))
+}
+
+// BurstModeThresholdPercentIn applies the In predicate on the "burst_mode_threshold_percent" field.
+func BurstModeThresholdPercentIn(vs ...int) predicate.Group {
+	return predicate.Group(sql.FieldIn(FieldBurstModeThresholdPercent, vs...))
+}
+
+// BurstModeThresholdPercentNotIn applies the NotIn predicate on the "burst_mode_threshold_percent" field.
+func BurstModeThresholdPercentNotIn(vs ...int) predicate.Group {
+	return predicate.Group(sql.FieldNotIn(FieldBurstModeThresholdPercent, vs...))
+}
+
+// BurstModeThresholdPercentGT applies the GT predicate on the "burst_mode_threshold_percent" field.
+func BurstModeThresholdPercentGT(v int) predicate.Group {
+	return predicate.Group(sql.FieldGT(FieldBurstModeThresholdPercent, v))
+}
+
+// BurstModeThresholdPercentGTE applies the GTE predicate on the "burst_mode_threshold_percent" field.
+func BurstModeThresholdPercentGTE(v int) predicate.Group {
+	return predicate.Group(sql.FieldGTE(FieldBurstModeThresholdPercent, v))
+}
+
+// BurstModeThresholdPercentLT applies the LT predicate on the "burst_mode_threshold_percent" field.
+func BurstModeThresholdPercentLT(v int) predicate.Group {
+	return predicate.Group(sql.FieldLT(FieldBurstModeThresholdPercent, v))
+}
+
+// BurstModeThresholdPercentLTE applies the LTE predicate on the "burst_mode_threshold_percent" field.
+func BurstModeThresholdPercentLTE(v int) predicate.Group {
+	return predicate.Group(sql.FieldLTE(FieldBurstModeThresholdPercent, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

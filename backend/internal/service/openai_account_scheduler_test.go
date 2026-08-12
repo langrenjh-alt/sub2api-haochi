@@ -92,6 +92,8 @@ type schedulerTestConcurrencyCache struct {
 	waitCounts      map[int64]int
 	skipDefaultLoad bool
 	acquiredIDs     *[]int64
+	acquireLimits   *[]int
+	currentCounts   map[int64]int
 	releasedIDs     *[]int64
 }
 
@@ -99,10 +101,16 @@ func (c schedulerTestConcurrencyCache) AcquireAccountSlot(ctx context.Context, a
 	if c.acquiredIDs != nil {
 		*c.acquiredIDs = append(*c.acquiredIDs, accountID)
 	}
+	if c.acquireLimits != nil {
+		*c.acquireLimits = append(*c.acquireLimits, maxConcurrency)
+	}
 	if c.acquireResults != nil {
 		if result, ok := c.acquireResults[accountID]; ok {
 			return result, nil
 		}
+	}
+	if current, ok := c.currentCounts[accountID]; ok {
+		return maxConcurrency <= 0 || current < maxConcurrency, nil
 	}
 	return true, nil
 }

@@ -118,6 +118,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 	ctx = s.withGroupContext(ctx, group)
 	ctx = s.withGatewayProfitControlGate(ctx, groupID)
+	if group != nil && group.BurstModeEnabled {
+		return s.selectAccountInBurstMode(ctx, group, groupID, sessionHash, requestedModel, excludedIDs)
+	}
 
 	// Claude Code 限制可能已将 groupID 解析为 fallback group，
 	// 渠道限制预检查必须使用解析后的分组。
@@ -763,6 +766,99 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			Timeout:        cfg.FallbackWaitTimeout,
 			MaxWaiting:     cfg.FallbackMaxWaiting,
 		})
+	}
+	return nil, ErrNoAvailableAccounts
+}
+
+func (s *GatewayService) selectAccountInBurstMode(ctx context.Context, group *Group, groupID *int64, sessionHash, requestedModel string, excludedIDs map[int64]struct{}) (*AccountSelectionResult, error) {
+	platform, hasForcePlatform, err := s.resolvePlatform(ctx, groupID, group, requestedModel)
+	if err != nil {
+		return nil, err
+	}
+	accounts, useMixed, err := s.listSchedulableAccounts(ctx, groupID, platform, hasForcePlatform)
+	if err != nil {
+		return nil, err
+	}
+	ctx = s.withWindowCostPrefetch(ctx, accounts)
+	ctx = s.withRPMPrefetch(ctx, accounts)
+
+	candidates := make([]*Account, 0, len(accounts))
+	for i := range accounts {
+		account := &accounts[i]
+		if _, excluded := excludedIDs[account.ID]; excluded {
+			continue
+		}
+		if !s.isAccountSchedulableForSelection(account) ||
+			!s.isGatewayAccountProfitEligible(ctx, account) ||
+			!s.isAccountAllowedForPlatform(account, platform, useMixed) ||
+			(requestedModel != "" && !s.isModelSupportedByAccountWithContext(ctx, account, requestedModel)) ||
+			!s.isAccountSchedulableForModelSelection(ctx, account, requestedModel) ||
+			!s.isAccountSchedulableForQuota(account) {
+			continue
+		}
+		candidates = append(candidates, account)
+	}
+	if len(candidates) == 0 {
+		return nil, ErrNoAvailableAccounts
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	stickyAccountID := int64(0)
+	if sessionHash != "" && s.cache != nil {
+		stickyAccountID, _ = s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+	}
+	retryAccountID := burstModeRetryAccountID(ctx)
+	tryAccount := func(account *Account, sticky bool) (*AccountSelectionResult, error) {
+		if !s.isAccountSchedulableForWindowCost(ctx, account, sticky) ||
+			!s.isAccountSchedulableForRPM(ctx, account, sticky) {
+			return nil, nil
+		}
+		limit := burstModeAcquireLimit(account.Concurrency, group.BurstModeThresholdPercent)
+		result, acquireErr := s.tryAcquireAccountSlot(ctx, account.ID, limit)
+		if acquireErr != nil || result == nil || !result.Acquired {
+			return nil, acquireErr
+		}
+		if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+			result.ReleaseFunc()
+			return nil, nil
+		}
+		if sessionHash != "" && s.cache != nil {
+			_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, account.ID)
+		}
+		return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
+	}
+
+	triedFirst := make(map[int64]struct{}, 2)
+	for _, preferred := range []int64{retryAccountID, stickyAccountID} {
+		if preferred <= 0 {
+			continue
+		}
+		for _, account := range candidates {
+			if account.ID != preferred {
+				continue
+			}
+			triedFirst[account.ID] = struct{}{}
+			selection, tryErr := tryAccount(account, true)
+			if tryErr != nil {
+				return nil, tryErr
+			}
+			if selection != nil {
+				return selection, nil
+			}
+			break
+		}
+	}
+	for _, account := range candidates {
+		if _, tried := triedFirst[account.ID]; tried {
+			continue
+		}
+		selection, tryErr := tryAccount(account, false)
+		if tryErr != nil {
+			return nil, tryErr
+		}
+		if selection != nil {
+			return selection, nil
+		}
 	}
 	return nil, ErrNoAvailableAccounts
 }

@@ -23,6 +23,7 @@ const (
 	openAIAccountScheduleLayerPreviousResponse = "previous_response_id"
 	openAIAccountScheduleLayerSessionSticky    = "session_hash"
 	openAIAccountScheduleLayerLoadBalance      = "load_balance"
+	openAIAccountScheduleLayerBurstMode        = "burst_mode"
 	openAIAdvancedSchedulerSettingKey          = "openai_advanced_scheduler_enabled"
 )
 
@@ -2173,6 +2174,19 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	platform = normalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}
+	burstGroup := BurstModeGroupFromContext(ctx)
+	if burstGroup != nil && groupID != nil && burstGroup.ID == *groupID {
+		selection, layer, candidateCount, err := s.selectOpenAIAccountInBurstMode(ctx, burstGroup, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform)
+		decision.Layer = layer
+		decision.CandidateCount = candidateCount
+		if selection != nil && selection.Account != nil {
+			decision.SelectedAccountID = selection.Account.ID
+			decision.SelectedAccountType = selection.Account.Type
+			decision.StickyPreviousHit = layer == openAIAccountScheduleLayerPreviousResponse
+			decision.StickySessionHit = layer == openAIAccountScheduleLayerSessionSticky
+		}
+		return selection, decision, err
+	}
 	scheduler := s.getOpenAIAccountScheduler(ctx)
 	if scheduler == nil {
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
@@ -2266,6 +2280,117 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		RequireCompact:          requireCompact,
 		ExcludedIDs:             excludedIDs,
 	})
+}
+
+func (s *OpenAIGatewayService) selectOpenAIAccountInBurstMode(
+	ctx context.Context,
+	group *Group,
+	groupID *int64,
+	previousResponseID, sessionHash, requestedModel string,
+	excludedIDs map[int64]struct{},
+	requiredTransport OpenAIUpstreamTransport,
+	requiredCapability OpenAIEndpointCapability,
+	requiredImageCapability OpenAIImagesCapability,
+	requireCompact bool,
+	platform string,
+) (*AccountSelectionResult, string, int, error) {
+	accounts, err := s.listSchedulableAccountRefs(ctx, groupID, platform)
+	if err != nil {
+		return nil, openAIAccountScheduleLayerBurstMode, 0, err
+	}
+	candidates := make([]*Account, 0, len(accounts))
+	for _, shared := range accounts {
+		if shared == nil {
+			continue
+		}
+		if _, excluded := excludedIDs[shared.ID]; excluded {
+			continue
+		}
+		copyAccount := *shared
+		account := &copyAccount
+		if !isOpenAICompatibleAccountEligibleForRequest(ctx, account, platform, requestedModel, requireCompact, requiredCapability) ||
+			!accountSupportsOpenAICapabilities(account, requiredCapability, requiredImageCapability) ||
+			!s.isOpenAIAccountTransportCompatible(account, requiredTransport) ||
+			s.isOpenAIAccountRequestRuntimeBlocked(account, requestedModel) ||
+			!parentHealthyForShadow(account, s.parentAccountLookup(ctx)) {
+			continue
+		}
+		candidates = append(candidates, account)
+	}
+	if len(candidates) == 0 {
+		return nil, openAIAccountScheduleLayerBurstMode, 0, ErrNoAvailableAccounts
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+
+	previousAccountID := int64(0)
+	if strings.TrimSpace(previousResponseID) != "" && platform == PlatformOpenAI {
+		previousAccountID = s.ResolveAccountIDByPreviousResponseIDForScheduler(ctx, groupID, previousResponseID, requestedModel, excludedIDs, requiredCapability, requireCompact)
+	}
+	stickyAccountID := int64(0)
+	if sessionHash != "" && s.cache != nil {
+		stickyAccountID, _ = s.getStickySessionAccountID(ctx, groupID, sessionHash)
+	}
+	retryAccountID := burstModeRetryAccountID(ctx)
+	stickyIDs := []struct {
+		id    int64
+		layer string
+	}{{retryAccountID, openAIAccountScheduleLayerBurstMode}, {previousAccountID, openAIAccountScheduleLayerPreviousResponse}, {stickyAccountID, openAIAccountScheduleLayerSessionSticky}}
+
+	tryAccount := func(account *Account, preserveSticky bool) (*AccountSelectionResult, error) {
+		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, account, platform, requestedModel, requireCompact, requiredCapability)
+		if fresh == nil || !s.isOpenAIAccountTransportCompatible(fresh, requiredTransport) || !accountSupportsOpenAICapabilities(fresh, requiredCapability, requiredImageCapability) {
+			return nil, nil
+		}
+		fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, groupID, platform, requestedModel, requireCompact, requiredCapability)
+		if fresh == nil {
+			return nil, nil
+		}
+		result, acquireErr := s.tryAcquireAccountSlot(ctx, fresh.ID, burstModeAcquireLimit(fresh.Concurrency, group.BurstModeThresholdPercent))
+		if acquireErr != nil || result == nil || !result.Acquired {
+			return nil, acquireErr
+		}
+		selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc)
+		if selectErr != nil {
+			return nil, selectErr
+		}
+		if sessionHash != "" && !preserveSticky {
+			_ = s.bindOpenAIStickySessionDuringSelection(ctx, groupID, sessionHash, fresh.ID)
+		}
+		return selection, nil
+	}
+
+	triedSticky := make(map[int64]struct{}, 2)
+	for _, sticky := range stickyIDs {
+		if sticky.id <= 0 {
+			continue
+		}
+		for _, account := range candidates {
+			if account.ID != sticky.id {
+				continue
+			}
+			triedSticky[account.ID] = struct{}{}
+			selection, tryErr := tryAccount(account, true)
+			if tryErr != nil {
+				return nil, sticky.layer, len(candidates), tryErr
+			}
+			if selection != nil {
+				return selection, sticky.layer, len(candidates), nil
+			}
+		}
+	}
+	for _, account := range candidates {
+		if _, tried := triedSticky[account.ID]; tried {
+			continue
+		}
+		selection, tryErr := tryAccount(account, false)
+		if tryErr != nil {
+			return nil, openAIAccountScheduleLayerBurstMode, len(candidates), tryErr
+		}
+		if selection != nil {
+			return selection, openAIAccountScheduleLayerBurstMode, len(candidates), nil
+		}
+	}
+	return nil, openAIAccountScheduleLayerBurstMode, len(candidates), ErrNoAvailableAccounts
 }
 
 func accountSupportsOpenAICapabilities(account *Account, requiredCapability OpenAIEndpointCapability, requiredImageCapability OpenAIImagesCapability) bool {

@@ -78,6 +78,7 @@ type FailoverState struct {
 	SameAccountRetryCount map[int64]int
 	LastFailoverErr       *service.UpstreamFailoverError
 	ForceCacheBilling     bool
+	BurstRetryAccountID   int64
 	hasBoundSession       bool
 
 	// profitVetoedAccountIDs 记录被分组利润门终检否决的账号，是 FailedAccountIDs
@@ -156,6 +157,12 @@ func (s *FailoverState) HandleFailoverError(
 	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() {
 		return FailoverExhausted
 	}
+	burst429 := service.BurstModeHandles429(ctx, failoverErr.StatusCode)
+	if burst429 {
+		failoverErr.RetryableOnSameAccount = true
+		retryLimit = service.BurstModeSameAccount429Retries
+		s.MaxSwitches = int(^uint(0) >> 1)
+	}
 
 	// 同账号重试不算切换账号，粘性会话仅在实际切换时强制缓存计费。
 	sameAccountRetry := failoverErr.RetryableOnSameAccount && s.SameAccountRetryCount[accountID] < retryLimit
@@ -167,6 +174,9 @@ func (s *FailoverState) HandleFailoverError(
 	// 重试次数上限 retryLimit 由调用方传入（账号级 pool_mode_retry_count 配置）。
 	if failoverErr.RetryableOnSameAccount && s.SameAccountRetryCount[accountID] < retryLimit {
 		s.SameAccountRetryCount[accountID]++
+		if burst429 {
+			s.BurstRetryAccountID = accountID
+		}
 		retryDelay := sameAccountRetryDelayFor(failoverErr, s.SameAccountRetryCount[accountID])
 		logger.FromContext(ctx).Warn("gateway.failover_same_account_retry",
 			zap.Int64("account_id", accountID),
@@ -182,9 +192,10 @@ func (s *FailoverState) HandleFailoverError(
 	}
 
 	// 同账号重试用尽，按错误类型执行冷却策略。
-	if failoverErr.RetryableOnSameAccount {
+	if failoverErr.RetryableOnSameAccount && !burst429 {
 		gatewayService.TempUnscheduleRetryableError(ctx, accountID, failoverErr)
 	}
+	s.BurstRetryAccountID = 0
 
 	// 加入失败列表
 	s.FailedAccountIDs[accountID] = struct{}{}
@@ -212,6 +223,13 @@ func (s *FailoverState) HandleFailoverError(
 	}
 
 	return FailoverContinue
+}
+
+func (s *FailoverState) SelectionContext(ctx context.Context) context.Context {
+	if s == nil {
+		return ctx
+	}
+	return service.WithBurstModeRetryAccount(ctx, s.BurstRetryAccountID)
 }
 
 // HandleSelectionExhausted 处理选号失败（所有候选账号都在排除列表中）时的退避重试决策。

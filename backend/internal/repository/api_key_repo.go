@@ -953,6 +953,8 @@ func groupEntityToService(g *dbent.Group) *service.Group {
 		Platform:                        g.Platform,
 		RateMultiplier:                  g.RateMultiplier,
 		IsExclusive:                     g.IsExclusive,
+		BurstModeEnabled:                g.BurstModeEnabled,
+		BurstModeThresholdPercent:       g.BurstModeThresholdPercent,
 		Status:                          g.Status,
 		Hydrated:                        true,
 		DuplicateOperationID:            derefString(g.DuplicateOperationID),

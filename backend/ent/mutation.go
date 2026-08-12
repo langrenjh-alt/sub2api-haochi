@@ -21860,6 +21860,9 @@ type GroupMutation struct {
 	peak_rate_multiplier                    *float64
 	addpeak_rate_multiplier                 *float64
 	is_exclusive                            *bool
+	burst_mode_enabled                      *bool
+	burst_mode_threshold_percent            *int
+	addburst_mode_threshold_percent         *int
 	status                                  *string
 	duplicate_operation_id                  *string
 	platform                                *string
@@ -22518,6 +22521,98 @@ func (m *GroupMutation) OldIsExclusive(ctx context.Context) (v bool, err error) 
 // ResetIsExclusive resets all changes to the "is_exclusive" field.
 func (m *GroupMutation) ResetIsExclusive() {
 	m.is_exclusive = nil
+}
+
+// SetBurstModeEnabled sets the "burst_mode_enabled" field.
+func (m *GroupMutation) SetBurstModeEnabled(b bool) {
+	m.burst_mode_enabled = &b
+}
+
+// BurstModeEnabled returns the value of the "burst_mode_enabled" field in the mutation.
+func (m *GroupMutation) BurstModeEnabled() (r bool, exists bool) {
+	v := m.burst_mode_enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBurstModeEnabled returns the old "burst_mode_enabled" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldBurstModeEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBurstModeEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBurstModeEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBurstModeEnabled: %w", err)
+	}
+	return oldValue.BurstModeEnabled, nil
+}
+
+// ResetBurstModeEnabled resets all changes to the "burst_mode_enabled" field.
+func (m *GroupMutation) ResetBurstModeEnabled() {
+	m.burst_mode_enabled = nil
+}
+
+// SetBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field.
+func (m *GroupMutation) SetBurstModeThresholdPercent(i int) {
+	m.burst_mode_threshold_percent = &i
+	m.addburst_mode_threshold_percent = nil
+}
+
+// BurstModeThresholdPercent returns the value of the "burst_mode_threshold_percent" field in the mutation.
+func (m *GroupMutation) BurstModeThresholdPercent() (r int, exists bool) {
+	v := m.burst_mode_threshold_percent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBurstModeThresholdPercent returns the old "burst_mode_threshold_percent" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldBurstModeThresholdPercent(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBurstModeThresholdPercent is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBurstModeThresholdPercent requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBurstModeThresholdPercent: %w", err)
+	}
+	return oldValue.BurstModeThresholdPercent, nil
+}
+
+// AddBurstModeThresholdPercent adds i to the "burst_mode_threshold_percent" field.
+func (m *GroupMutation) AddBurstModeThresholdPercent(i int) {
+	if m.addburst_mode_threshold_percent != nil {
+		*m.addburst_mode_threshold_percent += i
+	} else {
+		m.addburst_mode_threshold_percent = &i
+	}
+}
+
+// AddedBurstModeThresholdPercent returns the value that was added to the "burst_mode_threshold_percent" field in this mutation.
+func (m *GroupMutation) AddedBurstModeThresholdPercent() (r int, exists bool) {
+	v := m.addburst_mode_threshold_percent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetBurstModeThresholdPercent resets all changes to the "burst_mode_threshold_percent" field.
+func (m *GroupMutation) ResetBurstModeThresholdPercent() {
+	m.burst_mode_threshold_percent = nil
+	m.addburst_mode_threshold_percent = nil
 }
 
 // SetStatus sets the "status" field.
@@ -25435,7 +25530,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 60)
+	fields := make([]string, 0, 62)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -25468,6 +25563,12 @@ func (m *GroupMutation) Fields() []string {
 	}
 	if m.is_exclusive != nil {
 		fields = append(fields, group.FieldIsExclusive)
+	}
+	if m.burst_mode_enabled != nil {
+		fields = append(fields, group.FieldBurstModeEnabled)
+	}
+	if m.burst_mode_threshold_percent != nil {
+		fields = append(fields, group.FieldBurstModeThresholdPercent)
 	}
 	if m.status != nil {
 		fields = append(fields, group.FieldStatus)
@@ -25646,6 +25747,10 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.PeakRateMultiplier()
 	case group.FieldIsExclusive:
 		return m.IsExclusive()
+	case group.FieldBurstModeEnabled:
+		return m.BurstModeEnabled()
+	case group.FieldBurstModeThresholdPercent:
+		return m.BurstModeThresholdPercent()
 	case group.FieldStatus:
 		return m.Status()
 	case group.FieldDuplicateOperationID:
@@ -25775,6 +25880,10 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldPeakRateMultiplier(ctx)
 	case group.FieldIsExclusive:
 		return m.OldIsExclusive(ctx)
+	case group.FieldBurstModeEnabled:
+		return m.OldBurstModeEnabled(ctx)
+	case group.FieldBurstModeThresholdPercent:
+		return m.OldBurstModeThresholdPercent(ctx)
 	case group.FieldStatus:
 		return m.OldStatus(ctx)
 	case group.FieldDuplicateOperationID:
@@ -25958,6 +26067,20 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetIsExclusive(v)
+		return nil
+	case group.FieldBurstModeEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBurstModeEnabled(v)
+		return nil
+	case group.FieldBurstModeThresholdPercent:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBurstModeThresholdPercent(v)
 		return nil
 	case group.FieldStatus:
 		v, ok := value.(string)
@@ -26316,6 +26439,9 @@ func (m *GroupMutation) AddedFields() []string {
 	if m.addpeak_rate_multiplier != nil {
 		fields = append(fields, group.FieldPeakRateMultiplier)
 	}
+	if m.addburst_mode_threshold_percent != nil {
+		fields = append(fields, group.FieldBurstModeThresholdPercent)
+	}
 	if m.adddaily_limit_usd != nil {
 		fields = append(fields, group.FieldDailyLimitUsd)
 	}
@@ -26403,6 +26529,8 @@ func (m *GroupMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedRateMultiplier()
 	case group.FieldPeakRateMultiplier:
 		return m.AddedPeakRateMultiplier()
+	case group.FieldBurstModeThresholdPercent:
+		return m.AddedBurstModeThresholdPercent()
 	case group.FieldDailyLimitUsd:
 		return m.AddedDailyLimitUsd()
 	case group.FieldWeeklyLimitUsd:
@@ -26475,6 +26603,13 @@ func (m *GroupMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddPeakRateMultiplier(v)
+		return nil
+	case group.FieldBurstModeThresholdPercent:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddBurstModeThresholdPercent(v)
 		return nil
 	case group.FieldDailyLimitUsd:
 		v, ok := value.(float64)
@@ -26839,6 +26974,12 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldIsExclusive:
 		m.ResetIsExclusive()
+		return nil
+	case group.FieldBurstModeEnabled:
+		m.ResetBurstModeEnabled()
+		return nil
+	case group.FieldBurstModeThresholdPercent:
+		m.ResetBurstModeThresholdPercent()
 		return nil
 	case group.FieldStatus:
 		m.ResetStatus()

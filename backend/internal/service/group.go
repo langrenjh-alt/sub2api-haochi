@@ -28,8 +28,11 @@ type Group struct {
 	PeakEnd            string
 	PeakRateMultiplier float64
 	IsExclusive        bool
-	Status             string
-	Hydrated           bool // indicates the group was loaded from a trusted repository source
+	BurstModeEnabled   bool
+	// BurstModeThresholdPercent limits current concurrency used by burst scheduling.
+	BurstModeThresholdPercent int
+	Status                    string
+	Hydrated                  bool // indicates the group was loaded from a trusted repository source
 	// DuplicateOperationID is internal persistence metadata used only to recover
 	// an already committed one-click copy. It must never be mapped to API DTOs.
 	DuplicateOperationID string
@@ -126,6 +129,15 @@ type Group struct {
 	AccountCount            int64
 	ActiveAccountCount      int64
 	RateLimitedAccountCount int64
+}
+
+const DefaultBurstModeThresholdPercent = 90
+
+func ValidateBurstModeThresholdPercent(percent int) error {
+	if percent < 1 || percent > 100 {
+		return errors.New("burst_mode_threshold_percent must be between 1 and 100")
+	}
+	return nil
 }
 
 func (g *Group) IsActive() bool {

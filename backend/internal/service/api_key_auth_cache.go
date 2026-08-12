@@ -60,6 +60,8 @@ type APIKeyAuthGroupSnapshot struct {
 	Name                            string                        `json:"name"`
 	Platform                        string                        `json:"platform"`
 	IsExclusive                     bool                          `json:"is_exclusive"`
+	BurstModeEnabled                bool                          `json:"burst_mode_enabled"`
+	BurstModeThresholdPercent       int                           `json:"burst_mode_threshold_percent"`
 	Status                          string                        `json:"status"`
 	SubscriptionType                string                        `json:"subscription_type"`
 	RateMultiplier                  float64                       `json:"rate_multiplier"`

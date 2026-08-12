@@ -109,9 +109,11 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	sameAccountRetryCount := make(map[int64]int)
+	burstRetryAccountID := int64(0)
 	var lastFailoverErr *service.UpstreamFailoverError
 	switchCount := 0
-	maxAccountSwitches := h.maxAccountSwitches
+	maxAccountSwitches := burstModeMaxSwitches(c.Request.Context(), h.maxAccountSwitches)
 	if maxAccountSwitches <= 0 {
 		maxAccountSwitches = 3
 	}
@@ -123,7 +125,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 
 	for {
 		selection, _, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
-			c.Request.Context(),
+			service.WithBurstModeRetryAccount(c.Request.Context(), burstRetryAccountID),
 			apiKey.GroupID,
 			"",
 			"",
@@ -223,6 +225,13 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 					)
 					return
 				}
+				retryableOnSameAccount, retryLimit := burstModeRetryPolicy(c.Request.Context(), failoverErr, account.GetPoolModeRetryCount())
+				if retryableOnSameAccount && sameAccountRetryCount[account.ID] < retryLimit {
+					sameAccountRetryCount[account.ID]++
+					burstRetryAccountID = account.ID
+					continue
+				}
+				burstRetryAccountID = 0
 				h.gatewayService.RecordOpenAIAccountSwitch()
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr

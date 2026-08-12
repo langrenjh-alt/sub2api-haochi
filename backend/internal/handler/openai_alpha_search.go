@@ -109,8 +109,11 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	sessionHash := h.gatewayService.GenerateSessionHashWithFallback(c, nil, searchID)
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
+	sameAccountRetryCount := make(map[int64]int)
+	burstRetryAccountID := int64(0)
 	var lastFailoverErr *service.UpstreamFailoverError
 	switchCount := 0
+	maxAccountSwitches := burstModeMaxSwitches(c.Request.Context(), h.maxAccountSwitches)
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	routingStart := time.Now()
 
@@ -121,7 +124,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 
 	for {
 		selection, _, err := h.gatewayService.SelectAccountWithSchedulerForCapability(
-			c.Request.Context(),
+			service.WithBurstModeRetryAccount(c.Request.Context(), burstRetryAccountID),
 			apiKey.GroupID,
 			"",
 			sessionHash,
@@ -211,15 +214,22 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 			)
 			return
 		}
+		retryableOnSameAccount, retryLimit := burstModeRetryPolicy(c.Request.Context(), failoverErr, account.GetPoolModeRetryCount())
+		if retryableOnSameAccount && sameAccountRetryCount[account.ID] < retryLimit {
+			sameAccountRetryCount[account.ID]++
+			burstRetryAccountID = account.ID
+			continue
+		}
+		burstRetryAccountID = 0
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		lastFailoverErr = failoverErr
-		if switchCount >= h.maxAccountSwitches {
+		if switchCount >= maxAccountSwitches {
 			h.handleFailoverExhausted(c, failoverErr, false)
 			return
 		}
 		switchCount++
-		if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
+		if shouldStopOpenAI429FailoverInMode(c.Request.Context()) && h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 			h.handleFailoverExhausted(c, failoverErr, false)
 			return
 		}

@@ -194,6 +194,41 @@ func (_u *GroupUpdate) SetNillableIsExclusive(v *bool) *GroupUpdate {
 	return _u
 }
 
+// SetBurstModeEnabled sets the "burst_mode_enabled" field.
+func (_u *GroupUpdate) SetBurstModeEnabled(v bool) *GroupUpdate {
+	_u.mutation.SetBurstModeEnabled(v)
+	return _u
+}
+
+// SetNillableBurstModeEnabled sets the "burst_mode_enabled" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableBurstModeEnabled(v *bool) *GroupUpdate {
+	if v != nil {
+		_u.SetBurstModeEnabled(*v)
+	}
+	return _u
+}
+
+// SetBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field.
+func (_u *GroupUpdate) SetBurstModeThresholdPercent(v int) *GroupUpdate {
+	_u.mutation.ResetBurstModeThresholdPercent()
+	_u.mutation.SetBurstModeThresholdPercent(v)
+	return _u
+}
+
+// SetNillableBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableBurstModeThresholdPercent(v *int) *GroupUpdate {
+	if v != nil {
+		_u.SetBurstModeThresholdPercent(*v)
+	}
+	return _u
+}
+
+// AddBurstModeThresholdPercent adds value to the "burst_mode_threshold_percent" field.
+func (_u *GroupUpdate) AddBurstModeThresholdPercent(v int) *GroupUpdate {
+	_u.mutation.AddBurstModeThresholdPercent(v)
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *GroupUpdate) SetStatus(v string) *GroupUpdate {
 	_u.mutation.SetStatus(v)
@@ -1409,6 +1444,11 @@ func (_u *GroupUpdate) check() error {
 			return &ValidationError{Name: "peak_end", err: fmt.Errorf(`ent: validator failed for field "Group.peak_end": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.BurstModeThresholdPercent(); ok {
+		if err := group.BurstModeThresholdPercentValidator(v); err != nil {
+			return &ValidationError{Name: "burst_mode_threshold_percent", err: fmt.Errorf(`ent: validator failed for field "Group.burst_mode_threshold_percent": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := group.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Group.status": %w`, err)}
@@ -1510,6 +1550,15 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.IsExclusive(); ok {
 		_spec.SetField(group.FieldIsExclusive, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.BurstModeEnabled(); ok {
+		_spec.SetField(group.FieldBurstModeEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.BurstModeThresholdPercent(); ok {
+		_spec.SetField(group.FieldBurstModeThresholdPercent, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedBurstModeThresholdPercent(); ok {
+		_spec.AddField(group.FieldBurstModeThresholdPercent, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(group.FieldStatus, field.TypeString, value)
@@ -2266,6 +2315,41 @@ func (_u *GroupUpdateOne) SetNillableIsExclusive(v *bool) *GroupUpdateOne {
 	if v != nil {
 		_u.SetIsExclusive(*v)
 	}
+	return _u
+}
+
+// SetBurstModeEnabled sets the "burst_mode_enabled" field.
+func (_u *GroupUpdateOne) SetBurstModeEnabled(v bool) *GroupUpdateOne {
+	_u.mutation.SetBurstModeEnabled(v)
+	return _u
+}
+
+// SetNillableBurstModeEnabled sets the "burst_mode_enabled" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableBurstModeEnabled(v *bool) *GroupUpdateOne {
+	if v != nil {
+		_u.SetBurstModeEnabled(*v)
+	}
+	return _u
+}
+
+// SetBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field.
+func (_u *GroupUpdateOne) SetBurstModeThresholdPercent(v int) *GroupUpdateOne {
+	_u.mutation.ResetBurstModeThresholdPercent()
+	_u.mutation.SetBurstModeThresholdPercent(v)
+	return _u
+}
+
+// SetNillableBurstModeThresholdPercent sets the "burst_mode_threshold_percent" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableBurstModeThresholdPercent(v *int) *GroupUpdateOne {
+	if v != nil {
+		_u.SetBurstModeThresholdPercent(*v)
+	}
+	return _u
+}
+
+// AddBurstModeThresholdPercent adds value to the "burst_mode_threshold_percent" field.
+func (_u *GroupUpdateOne) AddBurstModeThresholdPercent(v int) *GroupUpdateOne {
+	_u.mutation.AddBurstModeThresholdPercent(v)
 	return _u
 }
 
@@ -3497,6 +3581,11 @@ func (_u *GroupUpdateOne) check() error {
 			return &ValidationError{Name: "peak_end", err: fmt.Errorf(`ent: validator failed for field "Group.peak_end": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.BurstModeThresholdPercent(); ok {
+		if err := group.BurstModeThresholdPercentValidator(v); err != nil {
+			return &ValidationError{Name: "burst_mode_threshold_percent", err: fmt.Errorf(`ent: validator failed for field "Group.burst_mode_threshold_percent": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := group.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Group.status": %w`, err)}
@@ -3615,6 +3704,15 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.IsExclusive(); ok {
 		_spec.SetField(group.FieldIsExclusive, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.BurstModeEnabled(); ok {
+		_spec.SetField(group.FieldBurstModeEnabled, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.BurstModeThresholdPercent(); ok {
+		_spec.SetField(group.FieldBurstModeThresholdPercent, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedBurstModeThresholdPercent(); ok {
+		_spec.AddField(group.FieldBurstModeThresholdPercent, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(group.FieldStatus, field.TypeString, value)

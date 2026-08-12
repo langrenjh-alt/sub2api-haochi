@@ -375,6 +375,13 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	if err := ValidatePeakRateConfig(subscriptionType, peakRateEnabled, peakStart, peakEnd, peakRateMultiplier); err != nil {
 		return nil, err
 	}
+	burstModeThresholdPercent := DefaultBurstModeThresholdPercent
+	if input.BurstModeThresholdPercent != nil {
+		burstModeThresholdPercent = *input.BurstModeThresholdPercent
+	}
+	if err := ValidateBurstModeThresholdPercent(burstModeThresholdPercent); err != nil {
+		return nil, err
+	}
 
 	profitMinMargin := 0.0
 	if input.ProfitMinMargin != nil {
@@ -454,6 +461,8 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		Platform:                        platform,
 		RateMultiplier:                  input.RateMultiplier,
 		IsExclusive:                     input.IsExclusive,
+		BurstModeEnabled:                input.BurstModeEnabled,
+		BurstModeThresholdPercent:       burstModeThresholdPercent,
 		Status:                          StatusActive,
 		SubscriptionType:                subscriptionType,
 		DailyLimitUSD:                   dailyLimit,
@@ -652,6 +661,15 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	}
 	if input.IsExclusive != nil {
 		group.IsExclusive = *input.IsExclusive
+	}
+	if input.BurstModeEnabled != nil {
+		group.BurstModeEnabled = *input.BurstModeEnabled
+	}
+	if input.BurstModeThresholdPercent != nil {
+		group.BurstModeThresholdPercent = *input.BurstModeThresholdPercent
+	}
+	if err := ValidateBurstModeThresholdPercent(group.BurstModeThresholdPercent); err != nil {
+		return nil, err
 	}
 	if input.Status != "" {
 		group.Status = input.Status

@@ -112,6 +112,9 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 	var nativeResp *websearch.SearchResponse
 	var providerName string
 	var err error
+	burstMode := service.BurstModeEnabled(c.Request.Context())
+	burstRetryAccountID := int64(0)
+	sameAccountRetryCount := make(map[int64]int)
 
 	// Acquire + release holder for the whole handler (including failover retries).
 	defer func() {
@@ -120,10 +123,12 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		}
 	}()
 
-	// First attempt + up to 3 failover accounts (max 4 total).
-	for attempt := 0; attempt < 4; attempt++ {
+	// Default mode keeps the existing four-attempt ceiling. Burst mode can walk
+	// the full group after exhausting five same-account retries for each 429.
+	for attempt := 0; burstMode || attempt < 4; attempt++ {
 		selected, selectErr := h.gatewayService.SelectAccountWithLoadAwareness(
-			c.Request.Context(), groupID, "", xai.DefaultTextModel, failedAccounts, "", 0,
+			service.WithBurstModeRetryAccount(c.Request.Context(), burstRetryAccountID),
+			groupID, "", xai.DefaultTextModel, failedAccounts, "", 0,
 		)
 		if selectErr != nil {
 			if attempt == 0 {
@@ -167,11 +172,18 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 		if !errors.As(err, &failoverErr) || !failoverErr.ShouldRetryNextAccount() {
 			break
 		}
-		failedAccounts[account.ID] = struct{}{}
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
 			accountReleaseFunc = nil
 		}
+		if service.BurstModeHandles429(c.Request.Context(), failoverErr.StatusCode) &&
+			sameAccountRetryCount[account.ID] < service.BurstModeSameAccount429Retries {
+			sameAccountRetryCount[account.ID]++
+			burstRetryAccountID = account.ID
+			continue
+		}
+		burstRetryAccountID = 0
+		failedAccounts[account.ID] = struct{}{}
 		account = nil
 	}
 	if err != nil || nativeResp == nil {

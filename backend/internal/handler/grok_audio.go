@@ -174,13 +174,16 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 	}
 
 	failed := map[int64]struct{}{}
+	sameAccountRetryCount := make(map[int64]int)
+	burstRetryAccountID := int64(0)
 	var last *service.UpstreamFailoverError
 	reqLog := requestLogger(c, "handler.openai_gateway.grok_voice", zap.String("endpoint", endpoint))
 	selectionModel := "grok-4.5"
+	burstMode := service.BurstModeEnabled(c.Request.Context())
 
-	for attempts := 0; attempts < 4; attempts++ {
+	for attempts := 0; burstMode || attempts < 4; attempts++ {
 		selection, _, selectErr := h.gatewayService.SelectAccountWithSchedulerForCapability(
-			c.Request.Context(),
+			service.WithBurstModeRetryAccount(c.Request.Context(), burstRetryAccountID),
 			apiKey.GroupID,
 			"",
 			"",
@@ -227,6 +230,13 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		}
 		var failoverErr *service.UpstreamFailoverError
 		if errors.As(forwardErr, &failoverErr) && failoverErr.ShouldRetryNextAccount() {
+			if service.BurstModeHandles429(c.Request.Context(), failoverErr.StatusCode) &&
+				sameAccountRetryCount[account.ID] < service.BurstModeSameAccount429Retries {
+				sameAccountRetryCount[account.ID]++
+				burstRetryAccountID = account.ID
+				continue
+			}
+			burstRetryAccountID = 0
 			failed[account.ID] = struct{}{}
 			last = failoverErr
 			continue

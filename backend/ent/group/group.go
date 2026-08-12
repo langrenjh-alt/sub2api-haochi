@@ -38,6 +38,10 @@ const (
 	FieldPeakRateMultiplier = "peak_rate_multiplier"
 	// FieldIsExclusive holds the string denoting the is_exclusive field in the database.
 	FieldIsExclusive = "is_exclusive"
+	// FieldBurstModeEnabled holds the string denoting the burst_mode_enabled field in the database.
+	FieldBurstModeEnabled = "burst_mode_enabled"
+	// FieldBurstModeThresholdPercent holds the string denoting the burst_mode_threshold_percent field in the database.
+	FieldBurstModeThresholdPercent = "burst_mode_threshold_percent"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldDuplicateOperationID holds the string denoting the duplicate_operation_id field in the database.
@@ -222,6 +226,8 @@ var Columns = []string{
 	FieldPeakEnd,
 	FieldPeakRateMultiplier,
 	FieldIsExclusive,
+	FieldBurstModeEnabled,
+	FieldBurstModeThresholdPercent,
 	FieldStatus,
 	FieldDuplicateOperationID,
 	FieldPlatform,
@@ -324,6 +330,12 @@ var (
 	DefaultPeakRateMultiplier float64
 	// DefaultIsExclusive holds the default value on creation for the "is_exclusive" field.
 	DefaultIsExclusive bool
+	// DefaultBurstModeEnabled holds the default value on creation for the "burst_mode_enabled" field.
+	DefaultBurstModeEnabled bool
+	// DefaultBurstModeThresholdPercent holds the default value on creation for the "burst_mode_threshold_percent" field.
+	DefaultBurstModeThresholdPercent int
+	// BurstModeThresholdPercentValidator is a validator for the "burst_mode_threshold_percent" field. It is called by the builders before save.
+	BurstModeThresholdPercentValidator func(int) error
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// StatusValidator is a validator for the "status" field. It is called by the builders before save.
@@ -467,6 +479,16 @@ func ByPeakRateMultiplier(opts ...sql.OrderTermOption) OrderOption {
 // ByIsExclusive orders the results by the is_exclusive field.
 func ByIsExclusive(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldIsExclusive, opts...).ToFunc()
+}
+
+// ByBurstModeEnabled orders the results by the burst_mode_enabled field.
+func ByBurstModeEnabled(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBurstModeEnabled, opts...).ToFunc()
+}
+
+// ByBurstModeThresholdPercent orders the results by the burst_mode_threshold_percent field.
+func ByBurstModeThresholdPercent(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBurstModeThresholdPercent, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.
