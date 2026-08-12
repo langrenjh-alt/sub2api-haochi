@@ -750,6 +750,14 @@
             aria-labelledby="bulk-edit-rate-multiplier-label"
           />
           <p class="input-hint">{{ t('admin.accounts.billingRateMultiplierHint') }}</p>
+          <p
+            v-if="enableRateMultiplier"
+            class="mt-2 flex items-start gap-1 text-xs text-amber-700 dark:text-amber-300"
+            data-testid="bulk-rate-sync-warning"
+          >
+            <Icon name="exclamationTriangle" size="xs" class="mt-0.5 flex-shrink-0" />
+            <span>{{ t('admin.accounts.bulkEdit.rateSyncWarning') }}</span>
+          </p>
         </div>
       </div>
 
@@ -905,8 +913,26 @@
         </div>
       </div>
 
-      <!-- Upstream billing auto probe (OpenAI API Key only) -->
-      <div v-if="allOpenAIAPIKey" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
+      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-3 flex items-center justify-between">
+          <label class="input-label mb-0">{{ t('admin.accounts.openai.codexFingerprintMode') }}</label>
+          <input
+            v-model="enableCodexFingerprintMode"
+            type="checkbox"
+            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+        <div :class="!enableCodexFingerprintMode && 'pointer-events-none opacity-50'">
+          <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.openai.codexFingerprintModeDesc') }}
+          </p>
+          <Select v-model="codexFingerprintMode" data-testid="bulk-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
+        </div>
+      </div>
+
+      <!-- Upstream billing auto probe (any API-key platform) -->
+      <div v-if="allBillingProbeCapable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex-1 pr-4">
             <label
@@ -1401,6 +1427,15 @@ const allOpenAIAPIKey = computed(() => {
   )
 })
 
+// 上游倍率自动探测已放宽到全部 API-key 平台：只要求所选类型全为 apikey，
+// 平台不限（sub2api 上游即可应答 /v1/sub2api/billing）。
+const allBillingProbeCapable = computed(() => {
+  return (
+    targetSelectedTypes.value.length > 0 &&
+    targetSelectedTypes.value.every(t => t === 'apikey')
+  )
+})
+
 // 是否全部为 anthropic/openai 平台的 apikey 账号（请求头覆写仅在此条件下显示）
 // 所选平台 × 所选类型的全组合均需具备覆写资格（实际选中账号是该组合的子集，
 // 按交叉积判定偏保守但绝不放行不合资格的账号）
@@ -1498,6 +1533,15 @@ const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OF
 const upstreamBillingAutoProbeMode = ref<'enabled' | 'disabled'>('enabled')
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
+type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
+const enableCodexFingerprintMode = ref(false)
+const codexFingerprintMode = ref<CodexFingerprintMode>('session')
+const codexFingerprintModeOptions = computed(() => [
+  { value: 'off' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintOff') },
+  { value: 'device' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintDevice') },
+  { value: 'session' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintSession') },
+  { value: 'full' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintFull') },
+])
 const openAICompactMode = ref<OpenAICompactMode>('auto')
 const openAICompactModelMappings = ref<ModelMapping[]>([])
 const rpmLimitEnabled = ref(false)
@@ -1783,6 +1827,15 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.codex_cli_only_allow_app_server = codexCLIOnlyAppServerEnabled.value
   }
 
+  if (enableCodexFingerprintMode.value) {
+    const extra = ensureExtra()
+    if (codexFingerprintMode.value !== 'session') {
+      extra.codex_fingerprint_mode = codexFingerprintMode.value
+    } else {
+      delete extra.codex_fingerprint_mode
+    }
+  }
+
   if (enableOpenAICompactMode.value) {
     const extra = ensureExtra()
     extra.openai_compact_mode = openAICompactMode.value
@@ -1893,6 +1946,7 @@ const handleSubmit = async () => {
     enableUpstreamBillingAutoProbe.value ||
     enableCodexCLIOnly.value ||
     enableCodexCLIOnlyAppServer.value ||
+    enableCodexFingerprintMode.value ||
     enableOpenAICompactMode.value ||
     enableOpenAICompactModelMapping.value ||
     enableRpmLimit.value ||
@@ -1976,6 +2030,10 @@ const submitBulkUpdate = async (baseUpdates: Record<string, unknown>) => {
       pendingUpdatesForConfirm.value = baseUpdates
       mixedChannelWarningMessage.value = error.message
       showMixedChannelWarning.value = true
+    } else if (error.reason === 'UPSTREAM_BILLING_RATE_SYNC_BULK_CONFLICT') {
+      appStore.showError(t('admin.accounts.bulkEdit.rateSyncConflict', {
+        count: error.metadata?.count ?? 1
+      }))
     } else {
       appStore.showError(error.message || t('admin.accounts.bulkEdit.failed'))
       console.error('Error bulk updating accounts:', error)
@@ -2023,6 +2081,8 @@ watch(
       enableUpstreamBillingAutoProbe.value = false
       enableCodexCLIOnly.value = false
       enableCodexCLIOnlyAppServer.value = false
+      enableCodexFingerprintMode.value = false
+      codexFingerprintMode.value = 'session'
       enableOpenAICompactMode.value = false
       enableOpenAICompactModelMapping.value = false
       enableRpmLimit.value = false

@@ -8,19 +8,19 @@ import GroupsView from '@/views/admin/GroupsView.vue'
 const {
   listGroups,
   duplicateGroup,
-  getLiveCapability,
   getModelsListCandidates,
   getUsageSummary,
   getCapacitySummary,
+  getLiveCapability,
   showSuccess,
   showError
 } = vi.hoisted(() => ({
   listGroups: vi.fn(),
   duplicateGroup: vi.fn(),
-  getLiveCapability: vi.fn(),
   getModelsListCandidates: vi.fn(),
   getUsageSummary: vi.fn(),
   getCapacitySummary: vi.fn(),
+  getLiveCapability: vi.fn(),
   showSuccess: vi.fn(),
   showError: vi.fn()
 }))
@@ -30,10 +30,10 @@ vi.mock('@/api/admin', () => ({
     groups: {
       list: listGroups,
       duplicate: duplicateGroup,
-      getLiveCapability,
       getModelsListCandidates,
       getUsageSummary,
       getCapacitySummary,
+      getLiveCapability,
       getAll: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
@@ -166,10 +166,10 @@ describe('GroupsView duplicate action', () => {
     for (const fn of [
       listGroups,
       duplicateGroup,
-      getLiveCapability,
       getModelsListCandidates,
       getUsageSummary,
       getCapacitySummary,
+      getLiveCapability,
       showSuccess,
       showError
     ]) {
@@ -189,10 +189,10 @@ describe('GroupsView duplicate action', () => {
       name: 'Primary (Copy)',
       status: 'inactive'
     })
-    getLiveCapability.mockResolvedValue({ supported: false })
     getModelsListCandidates.mockResolvedValue([])
     getUsageSummary.mockResolvedValue([])
     getCapacitySummary.mockResolvedValue([])
+    getLiveCapability.mockResolvedValue({ supported: false })
   })
 
   afterEach(() => {

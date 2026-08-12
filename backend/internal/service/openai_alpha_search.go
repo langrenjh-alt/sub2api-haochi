@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -248,7 +249,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 	if originator := openAIAlphaSearchInboundHeader(c, "Originator"); originator != "" {
 		req.Header.Set("Originator", originator)
 	} else {
-		req.Header.Set("Originator", "codex_cli_rs")
+		req.Header.Set("Originator", openai.CodexDefaultOriginator)
 	}
 	if customUA := account.GetOpenAIUserAgent(); customUA != "" {
 		req.Header.Set("User-Agent", customUA)
@@ -266,8 +267,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchResponsesWebSearchRequest(c
 		req.Header.Set("Session_ID", isolated)
 		req.Header.Set("Conversation_ID", isolated)
 	}
-	s.overrideBrowserUserAgent(ctx, account, req)
-	enforceCodexIdentityHeaders(req.Header)
+	enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
 	account.ApplyHeaderOverrides(req.Header)
 	return req, nil
 }
@@ -392,7 +392,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 		if originator := openAIAlphaSearchInboundHeader(c, "Originator"); originator != "" {
 			req.Header.Set("Originator", originator)
 		} else {
-			req.Header.Set("Originator", "codex_cli_rs")
+			req.Header.Set("Originator", openai.CodexDefaultOriginator)
 		}
 		if customUA := account.GetOpenAIUserAgent(); customUA != "" {
 			req.Header.Set("User-Agent", customUA)
@@ -404,8 +404,7 @@ func (s *OpenAIGatewayService) buildOpenAIAlphaSearchRequest(ctx context.Context
 		if s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
 			req.Header.Set("User-Agent", codexCLIUserAgent)
 		}
-		s.overrideBrowserUserAgent(ctx, account, req)
-		enforceCodexIdentityHeaders(req.Header)
+		enforceCodexIdentityHeadersWithUA(req.Header, s.codexIdentityOverrideUA(account))
 	}
 
 	account.ApplyHeaderOverrides(req.Header)

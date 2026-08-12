@@ -1,12 +1,31 @@
-# Local Changes Against Official sub2api v0.1.169
+# Local Changes Against Official sub2api v0.1.175
 
 This fork is based on the official `main` commit
-`b74024c7868ee88a0bf921306cbc22a2f922872a` (source version `0.1.169`).
+`5935e674a84341c3536e27e6a968384f67d9062b` (source version `0.1.175`).
 
-- Fork source version: `backend/cmd/server/VERSION` is `0.1.169`.
-- Upgrade date: 2026-08-01.
-- Upgrade policy: keep the official tree intact and retain only the documented
-  capacity-pool and OpenAI 403 behavior below.
+- Fork source version: `backend/cmd/server/VERSION` is `0.1.175`.
+- Upgrade date: 2026-08-12.
+- Upgrade policy: retain the documented fork behavior while adopting official
+  fixes, API contracts, cancellation checks, and generated dependency wiring.
+
+## v0.1.175 Merge Decisions
+
+- Channel Monitor v2 and its V1/V2 mode switch come from official. The fork's
+  capacity-pool card moved into `ChannelStatusV1View.vue`, so it remains visible
+  only when the legacy monitor mode and its matching API are active.
+- Official generic HTML 403 protection is retained. The fork's deterministic
+  inactive-workspace credential-owner classification still runs first, and its
+  branded transient HTML path remains retryable on the same account.
+- Official scheduler cancellation checks and filter diagnostics are retained.
+  The fork's short-TTL shared account-reference cache remains the OpenAI hot
+  path; Grok's official quota gates operate on one request-local value copy.
+- Official Grok CLI identity headers are retained. The fork still converts all
+  Grok Chat Completions ingress to Responses and accepts both JSON and SSE from
+  that internally streaming upstream route.
+- Official request-scoped transient protection is retained for capacity-shed
+  failover. The fork's empty-response policy still keeps unmarked 502 failures
+  schedulable after same-account retries, while unmarked 400 configuration
+  failures retain their cooldown behavior.
 
 ## Public Group Capacity Pool
 
@@ -29,7 +48,8 @@ Primary files:
 - `backend/internal/server/routes/user.go`
 - `frontend/src/api/channelMonitor.ts`
 - `frontend/src/components/user/monitor/ChannelCapacityPoolCard.vue`
-- `frontend/src/views/user/ChannelStatusView.vue`
+- `frontend/src/views/user/ChannelStatusV1View.vue`
+- `frontend/src/views/user/__tests__/ChannelStatusV1View.capacity.spec.ts`
 
 ## OpenAI 403 Classification
 
@@ -38,10 +58,10 @@ OpenAI 403 responses are classified before account state is mutated:
 1. `biscuit_baker_service_auth_credential_error_status`, or the equivalent
    inactive-workspace-member message, immediately marks the credential owner as
    error. This takes precedence over broad custom temporary-unschedulable rules.
-2. OpenAI's branded transient HTML 403 shell does not increment the persistent
-   403 counter and does not write a new error or temporary-unschedulable state.
-   HTTP and WebSocket paths classify it as retryable on the same account before
-   normal account failover.
+2. HTML 403 responses do not increment the persistent 403 counter and do not
+   write a new error or temporary-unschedulable state. The fork's branded
+   transient HTML classifier additionally marks the response retryable on the
+   same account before normal account failover.
 3. Other OpenAI 403 responses keep official behavior: the first two failures
    apply a 10-minute temporary cooldown, the third failure in the 180-minute
    counter window marks the account as error, and counter-backend failures fail

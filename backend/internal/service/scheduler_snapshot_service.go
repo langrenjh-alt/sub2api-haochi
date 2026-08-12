@@ -315,7 +315,7 @@ func (s *SchedulerSnapshotService) ListSchedulableAccountRefs(ctx context.Contex
 		}
 		sharedCtx, cancel := context.WithTimeout(baseCtx, schedulerAccountRefsFetchTimeout)
 		defer cancel()
-		accounts, loadErr := s.loadSchedulableAccountRefs(sharedCtx, bucket, useMixed)
+		accounts, loadErr := s.loadSchedulableAccountRefs(sharedCtx, ctx, bucket, useMixed)
 		if loadErr != nil {
 			return nil, loadErr
 		}
@@ -350,17 +350,32 @@ func (s *SchedulerSnapshotService) ListSchedulableAccountRefs(ctx context.Contex
 	return accounts, useMixed, nil
 }
 
-func (s *SchedulerSnapshotService) loadSchedulableAccountRefs(ctx context.Context, bucket SchedulerBucket, useMixed bool) ([]*Account, error) {
+func (s *SchedulerSnapshotService) loadSchedulableAccountRefs(ctx, requestCtx context.Context, bucket SchedulerBucket, useMixed bool) ([]*Account, error) {
 	var writeToken SchedulerBucketWriteToken
 	canPublish := false
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if s.cache != nil {
 		cached, hit, err := s.cache.GetSnapshot(ctx, bucket)
+		if requestCtx != nil {
+			if requestErr := requestCtx.Err(); requestErr != nil {
+				return nil, requestErr
+			}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if err != nil {
 			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache read failed: bucket=%s err=%v", bucket.String(), err)
 		} else if hit {
 			return prepareSharedSchedulerAccountRefs(cached), nil
 		}
 		token, err := s.cache.CaptureBucketWriteToken(ctx, bucket)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if err != nil {
 			if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
 				slog.Debug("[Scheduler] cache publish fenced", "bucket", bucket.String())
@@ -374,6 +389,11 @@ func (s *SchedulerSnapshotService) loadSchedulableAccountRefs(ctx context.Contex
 		}
 	}
 
+	if requestCtx != nil {
+		if requestErr := requestCtx.Err(); requestErr != nil {
+			return nil, requestErr
+		}
+	}
 	if err := s.guardFallback(ctx); err != nil {
 		return nil, err
 	}
@@ -383,6 +403,15 @@ func (s *SchedulerSnapshotService) loadSchedulableAccountRefs(ctx context.Contex
 	if err != nil {
 		return nil, err
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if requestCtx != nil {
+		if requestErr := requestCtx.Err(); requestErr != nil {
+			return nil, requestErr
+		}
+	}
+
 	if s.cache != nil && canPublish {
 		if err := s.cache.SetSnapshot(fallbackCtx, bucket, writeToken, accounts); err != nil {
 			if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
@@ -596,8 +625,14 @@ func (s *SchedulerSnapshotService) GetAccount(ctx context.Context, accountID int
 	if accountID <= 0 {
 		return nil, nil
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s.cache != nil {
 		account, err := s.cache.GetAccount(ctx, accountID)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if err != nil {
 			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] account cache read failed: id=%d err=%v", accountID, err)
 		} else if account != nil {
@@ -619,6 +654,17 @@ func (s *SchedulerSnapshotService) GetGroupByID(ctx context.Context, groupID int
 		return nil, nil
 	}
 	return s.groupRepo.GetByID(ctx, groupID)
+}
+
+// GetGroupByIDLite 获取分组配置但不加载账号计数聚合。
+// 利润门只需要平台、倍率、利润与高峰字段，GetByID 附带的那条账号计数聚合
+// 查询纯属浪费——composite / 模型路由 / fallback 每次装门都要付一次，WS 更是
+// 每个 turn 一次，且发生在「是否启用利润控制」判定之前。
+func (s *SchedulerSnapshotService) GetGroupByIDLite(ctx context.Context, groupID int64) (*Group, error) {
+	if s.groupRepo == nil {
+		return nil, nil
+	}
+	return s.groupRepo.GetByIDLite(ctx, groupID)
 }
 
 // UpdateAccountInCache 立即更新 Redis 中单个账号的数据（用于模型限流后立即生效）
