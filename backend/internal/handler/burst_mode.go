@@ -11,7 +11,7 @@ func burstModeRetryPolicy(ctx context.Context, failoverErr *service.UpstreamFail
 		return false, configuredLimit
 	}
 	if service.BurstModeHandles429(ctx, failoverErr.StatusCode) {
-		return true, service.BurstModeSameAccount429Retries
+		return true, service.BurstMode429RetryLimit(ctx)
 	}
 	return failoverErr.RetryableOnSameAccount, configuredLimit
 }

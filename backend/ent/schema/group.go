@@ -71,6 +71,14 @@ func (Group) Fields() []ent.Field {
 			Min(1).
 			Max(100).
 			Comment("超刷调度允许的账号并发阈值百分比"),
+		field.Int("burst_mode_429_retry_count").
+			Default(10).
+			Min(1).
+			Max(100).
+			Comment("超刷模式同账号 429 重试次数"),
+		field.Bool("burst_mode_high_usage_enabled").
+			Default(false).
+			Comment("超刷模式是否优先将请求集中到用量 95% 以上的账号"),
 		field.String("status").
 			MaxLen(20).
 			Default(domain.StatusActive),

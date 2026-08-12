@@ -803,17 +803,27 @@ func (s *GatewayService) selectAccountInBurstMode(ctx context.Context, group *Gr
 	}
 
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	highUsageMode := burstModeHighUsageEnabledForGroup(group)
+	if highUsageMode {
+		sort.SliceStable(candidates, func(i, j int) bool {
+			hi, hj := BurstModeHighUsageAccount(candidates[i]), BurstModeHighUsageAccount(candidates[j])
+			if hi != hj {
+				return hi
+			}
+			return candidates[i].ID < candidates[j].ID
+		})
+	}
 	stickyAccountID := int64(0)
-	if sessionHash != "" && s.cache != nil {
+	if sessionHash != "" && s.cache != nil && !highUsageMode {
 		stickyAccountID, _ = s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 	}
 	retryAccountID := burstModeRetryAccountID(ctx)
-	tryAccount := func(account *Account, sticky bool) (*AccountSelectionResult, error) {
-		if !s.isAccountSchedulableForWindowCost(ctx, account, sticky) ||
-			!s.isAccountSchedulableForRPM(ctx, account, sticky) {
+	tryAccount := func(account *Account, stickyChecks, allowStickyReserve bool) (*AccountSelectionResult, error) {
+		if !s.isAccountSchedulableForWindowCost(ctx, account, stickyChecks) ||
+			!s.isAccountSchedulableForRPM(ctx, account, stickyChecks) {
 			return nil, nil
 		}
-		limit := burstModeAcquireLimit(account.Concurrency, group.BurstModeThresholdPercent)
+		limit := burstModeAcquireLimit(account.Concurrency, group.BurstModeThresholdPercent, allowStickyReserve)
 		result, acquireErr := s.tryAcquireAccountSlot(ctx, account.ID, limit)
 		if acquireErr != nil || result == nil || !result.Acquired {
 			return nil, acquireErr
@@ -822,23 +832,33 @@ func (s *GatewayService) selectAccountInBurstMode(ctx context.Context, group *Gr
 			result.ReleaseFunc()
 			return nil, nil
 		}
-		if sessionHash != "" && s.cache != nil {
+		if sessionHash != "" && s.cache != nil && !highUsageMode {
 			_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, account.ID)
 		}
 		return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
 	}
 
 	triedFirst := make(map[int64]struct{}, 2)
-	for _, preferred := range []int64{retryAccountID, stickyAccountID} {
-		if preferred <= 0 {
+	preferredAccounts := []struct {
+		id                 int64
+		allowStickyReserve bool
+	}{{id: retryAccountID}}
+	if !highUsageMode {
+		preferredAccounts = append(preferredAccounts, struct {
+			id                 int64
+			allowStickyReserve bool
+		}{id: stickyAccountID, allowStickyReserve: true})
+	}
+	for _, preferred := range preferredAccounts {
+		if preferred.id <= 0 {
 			continue
 		}
 		for _, account := range candidates {
-			if account.ID != preferred {
+			if account.ID != preferred.id {
 				continue
 			}
 			triedFirst[account.ID] = struct{}{}
-			selection, tryErr := tryAccount(account, true)
+			selection, tryErr := tryAccount(account, true, preferred.allowStickyReserve)
 			if tryErr != nil {
 				return nil, tryErr
 			}
@@ -852,7 +872,7 @@ func (s *GatewayService) selectAccountInBurstMode(ctx context.Context, group *Gr
 		if _, tried := triedFirst[account.ID]; tried {
 			continue
 		}
-		selection, tryErr := tryAccount(account, false)
+		selection, tryErr := tryAccount(account, false, false)
 		if tryErr != nil {
 			return nil, tryErr
 		}

@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 20 // v20: group burst scheduling fields
+const apiKeyAuthSnapshotVersion = 21 // v21: configurable burst 429 retries and high-usage routing
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
@@ -384,6 +384,8 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			IsExclusive:                     apiKey.Group.IsExclusive,
 			BurstModeEnabled:                apiKey.Group.BurstModeEnabled,
 			BurstModeThresholdPercent:       apiKey.Group.BurstModeThresholdPercent,
+			BurstMode429RetryCount:          burstMode429RetryCount(apiKey.Group),
+			BurstModeHighUsageEnabled:       apiKey.Group.BurstModeHighUsageEnabled,
 			Status:                          apiKey.Group.Status,
 			SubscriptionType:                apiKey.Group.SubscriptionType,
 			RateMultiplier:                  apiKey.Group.RateMultiplier,
@@ -480,6 +482,8 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			IsExclusive:                     snapshot.Group.IsExclusive,
 			BurstModeEnabled:                snapshot.Group.BurstModeEnabled,
 			BurstModeThresholdPercent:       snapshot.Group.BurstModeThresholdPercent,
+			BurstMode429RetryCount:          snapshot.Group.BurstMode429RetryCount,
+			BurstModeHighUsageEnabled:       snapshot.Group.BurstModeHighUsageEnabled,
 			Status:                          snapshot.Group.Status,
 			Hydrated:                        true,
 			SubscriptionType:                snapshot.Group.SubscriptionType,

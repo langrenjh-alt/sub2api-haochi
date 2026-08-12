@@ -21863,6 +21863,9 @@ type GroupMutation struct {
 	burst_mode_enabled                      *bool
 	burst_mode_threshold_percent            *int
 	addburst_mode_threshold_percent         *int
+	burst_mode_429_retry_count              *int
+	addburst_mode_429_retry_count           *int
+	burst_mode_high_usage_enabled           *bool
 	status                                  *string
 	duplicate_operation_id                  *string
 	platform                                *string
@@ -22613,6 +22616,98 @@ func (m *GroupMutation) AddedBurstModeThresholdPercent() (r int, exists bool) {
 func (m *GroupMutation) ResetBurstModeThresholdPercent() {
 	m.burst_mode_threshold_percent = nil
 	m.addburst_mode_threshold_percent = nil
+}
+
+// SetBurstMode429RetryCount sets the "burst_mode_429_retry_count" field.
+func (m *GroupMutation) SetBurstMode429RetryCount(i int) {
+	m.burst_mode_429_retry_count = &i
+	m.addburst_mode_429_retry_count = nil
+}
+
+// BurstMode429RetryCount returns the value of the "burst_mode_429_retry_count" field in the mutation.
+func (m *GroupMutation) BurstMode429RetryCount() (r int, exists bool) {
+	v := m.burst_mode_429_retry_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBurstMode429RetryCount returns the old "burst_mode_429_retry_count" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldBurstMode429RetryCount(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBurstMode429RetryCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBurstMode429RetryCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBurstMode429RetryCount: %w", err)
+	}
+	return oldValue.BurstMode429RetryCount, nil
+}
+
+// AddBurstMode429RetryCount adds i to the "burst_mode_429_retry_count" field.
+func (m *GroupMutation) AddBurstMode429RetryCount(i int) {
+	if m.addburst_mode_429_retry_count != nil {
+		*m.addburst_mode_429_retry_count += i
+	} else {
+		m.addburst_mode_429_retry_count = &i
+	}
+}
+
+// AddedBurstMode429RetryCount returns the value that was added to the "burst_mode_429_retry_count" field in this mutation.
+func (m *GroupMutation) AddedBurstMode429RetryCount() (r int, exists bool) {
+	v := m.addburst_mode_429_retry_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetBurstMode429RetryCount resets all changes to the "burst_mode_429_retry_count" field.
+func (m *GroupMutation) ResetBurstMode429RetryCount() {
+	m.burst_mode_429_retry_count = nil
+	m.addburst_mode_429_retry_count = nil
+}
+
+// SetBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field.
+func (m *GroupMutation) SetBurstModeHighUsageEnabled(b bool) {
+	m.burst_mode_high_usage_enabled = &b
+}
+
+// BurstModeHighUsageEnabled returns the value of the "burst_mode_high_usage_enabled" field in the mutation.
+func (m *GroupMutation) BurstModeHighUsageEnabled() (r bool, exists bool) {
+	v := m.burst_mode_high_usage_enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBurstModeHighUsageEnabled returns the old "burst_mode_high_usage_enabled" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldBurstModeHighUsageEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBurstModeHighUsageEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBurstModeHighUsageEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBurstModeHighUsageEnabled: %w", err)
+	}
+	return oldValue.BurstModeHighUsageEnabled, nil
+}
+
+// ResetBurstModeHighUsageEnabled resets all changes to the "burst_mode_high_usage_enabled" field.
+func (m *GroupMutation) ResetBurstModeHighUsageEnabled() {
+	m.burst_mode_high_usage_enabled = nil
 }
 
 // SetStatus sets the "status" field.
@@ -25530,7 +25625,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 62)
+	fields := make([]string, 0, 64)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -25569,6 +25664,12 @@ func (m *GroupMutation) Fields() []string {
 	}
 	if m.burst_mode_threshold_percent != nil {
 		fields = append(fields, group.FieldBurstModeThresholdPercent)
+	}
+	if m.burst_mode_429_retry_count != nil {
+		fields = append(fields, group.FieldBurstMode429RetryCount)
+	}
+	if m.burst_mode_high_usage_enabled != nil {
+		fields = append(fields, group.FieldBurstModeHighUsageEnabled)
 	}
 	if m.status != nil {
 		fields = append(fields, group.FieldStatus)
@@ -25751,6 +25852,10 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.BurstModeEnabled()
 	case group.FieldBurstModeThresholdPercent:
 		return m.BurstModeThresholdPercent()
+	case group.FieldBurstMode429RetryCount:
+		return m.BurstMode429RetryCount()
+	case group.FieldBurstModeHighUsageEnabled:
+		return m.BurstModeHighUsageEnabled()
 	case group.FieldStatus:
 		return m.Status()
 	case group.FieldDuplicateOperationID:
@@ -25884,6 +25989,10 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldBurstModeEnabled(ctx)
 	case group.FieldBurstModeThresholdPercent:
 		return m.OldBurstModeThresholdPercent(ctx)
+	case group.FieldBurstMode429RetryCount:
+		return m.OldBurstMode429RetryCount(ctx)
+	case group.FieldBurstModeHighUsageEnabled:
+		return m.OldBurstModeHighUsageEnabled(ctx)
 	case group.FieldStatus:
 		return m.OldStatus(ctx)
 	case group.FieldDuplicateOperationID:
@@ -26081,6 +26190,20 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetBurstModeThresholdPercent(v)
+		return nil
+	case group.FieldBurstMode429RetryCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBurstMode429RetryCount(v)
+		return nil
+	case group.FieldBurstModeHighUsageEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBurstModeHighUsageEnabled(v)
 		return nil
 	case group.FieldStatus:
 		v, ok := value.(string)
@@ -26442,6 +26565,9 @@ func (m *GroupMutation) AddedFields() []string {
 	if m.addburst_mode_threshold_percent != nil {
 		fields = append(fields, group.FieldBurstModeThresholdPercent)
 	}
+	if m.addburst_mode_429_retry_count != nil {
+		fields = append(fields, group.FieldBurstMode429RetryCount)
+	}
 	if m.adddaily_limit_usd != nil {
 		fields = append(fields, group.FieldDailyLimitUsd)
 	}
@@ -26531,6 +26657,8 @@ func (m *GroupMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedPeakRateMultiplier()
 	case group.FieldBurstModeThresholdPercent:
 		return m.AddedBurstModeThresholdPercent()
+	case group.FieldBurstMode429RetryCount:
+		return m.AddedBurstMode429RetryCount()
 	case group.FieldDailyLimitUsd:
 		return m.AddedDailyLimitUsd()
 	case group.FieldWeeklyLimitUsd:
@@ -26610,6 +26738,13 @@ func (m *GroupMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddBurstModeThresholdPercent(v)
+		return nil
+	case group.FieldBurstMode429RetryCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddBurstMode429RetryCount(v)
 		return nil
 	case group.FieldDailyLimitUsd:
 		v, ok := value.(float64)
@@ -26980,6 +27115,12 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldBurstModeThresholdPercent:
 		m.ResetBurstModeThresholdPercent()
+		return nil
+	case group.FieldBurstMode429RetryCount:
+		m.ResetBurstMode429RetryCount()
+		return nil
+	case group.FieldBurstModeHighUsageEnabled:
+		m.ResetBurstModeHighUsageEnabled()
 		return nil
 	case group.FieldStatus:
 		m.ResetStatus()

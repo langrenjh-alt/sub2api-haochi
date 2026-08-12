@@ -231,7 +231,7 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 		var failoverErr *service.UpstreamFailoverError
 		if errors.As(forwardErr, &failoverErr) && failoverErr.ShouldRetryNextAccount() {
 			if service.BurstModeHandles429(c.Request.Context(), failoverErr.StatusCode) &&
-				sameAccountRetryCount[account.ID] < service.BurstModeSameAccount429Retries {
+				sameAccountRetryCount[account.ID] < service.BurstMode429RetryLimit(c.Request.Context()) {
 				sameAccountRetryCount[account.ID]++
 				burstRetryAccountID = account.ID
 				continue

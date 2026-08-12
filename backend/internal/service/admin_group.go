@@ -382,6 +382,13 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	if err := ValidateBurstModeThresholdPercent(burstModeThresholdPercent); err != nil {
 		return nil, err
 	}
+	burstMode429RetryCount := DefaultBurstMode429RetryCount
+	if input.BurstMode429RetryCount != nil {
+		burstMode429RetryCount = *input.BurstMode429RetryCount
+	}
+	if err := ValidateBurstMode429RetryCount(burstMode429RetryCount); err != nil {
+		return nil, err
+	}
 
 	profitMinMargin := 0.0
 	if input.ProfitMinMargin != nil {
@@ -463,6 +470,8 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		IsExclusive:                     input.IsExclusive,
 		BurstModeEnabled:                input.BurstModeEnabled,
 		BurstModeThresholdPercent:       burstModeThresholdPercent,
+		BurstMode429RetryCount:          burstMode429RetryCount,
+		BurstModeHighUsageEnabled:       platform == PlatformOpenAI && input.BurstModeHighUsageEnabled,
 		Status:                          StatusActive,
 		SubscriptionType:                subscriptionType,
 		DailyLimitUSD:                   dailyLimit,
@@ -668,7 +677,21 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	if input.BurstModeThresholdPercent != nil {
 		group.BurstModeThresholdPercent = *input.BurstModeThresholdPercent
 	}
+	if input.BurstMode429RetryCount != nil {
+		group.BurstMode429RetryCount = *input.BurstMode429RetryCount
+	} else if group.BurstMode429RetryCount < 1 {
+		group.BurstMode429RetryCount = DefaultBurstMode429RetryCount
+	}
+	if input.BurstModeHighUsageEnabled != nil {
+		group.BurstModeHighUsageEnabled = *input.BurstModeHighUsageEnabled
+	}
+	if group.Platform != PlatformOpenAI {
+		group.BurstModeHighUsageEnabled = false
+	}
 	if err := ValidateBurstModeThresholdPercent(group.BurstModeThresholdPercent); err != nil {
+		return nil, err
+	}
+	if err := ValidateBurstMode429RetryCount(group.BurstMode429RetryCount); err != nil {
 		return nil, err
 	}
 	if input.Status != "" {

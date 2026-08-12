@@ -555,6 +555,8 @@ export interface Group {
   is_exclusive: boolean
   burst_mode_enabled: boolean
   burst_mode_threshold_percent: number
+  burst_mode_429_retry_count: number
+  burst_mode_high_usage_enabled: boolean
   status: 'active' | 'inactive'
   subscription_type: SubscriptionType
   daily_limit_usd: number | null
@@ -766,6 +768,8 @@ export interface CreateGroupRequest {
   is_exclusive?: boolean
   burst_mode_enabled?: boolean
   burst_mode_threshold_percent?: number
+  burst_mode_429_retry_count?: number
+  burst_mode_high_usage_enabled?: boolean
   subscription_type?: SubscriptionType
   daily_limit_usd?: number | null
   weekly_limit_usd?: number | null
@@ -827,6 +831,8 @@ export interface UpdateGroupRequest {
   is_exclusive?: boolean
   burst_mode_enabled?: boolean
   burst_mode_threshold_percent?: number
+  burst_mode_429_retry_count?: number
+  burst_mode_high_usage_enabled?: boolean
   status?: 'active' | 'inactive'
   subscription_type?: SubscriptionType
   daily_limit_usd?: number | null

@@ -229,6 +229,41 @@ func (_u *GroupUpdate) AddBurstModeThresholdPercent(v int) *GroupUpdate {
 	return _u
 }
 
+// SetBurstMode429RetryCount sets the "burst_mode_429_retry_count" field.
+func (_u *GroupUpdate) SetBurstMode429RetryCount(v int) *GroupUpdate {
+	_u.mutation.ResetBurstMode429RetryCount()
+	_u.mutation.SetBurstMode429RetryCount(v)
+	return _u
+}
+
+// SetNillableBurstMode429RetryCount sets the "burst_mode_429_retry_count" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableBurstMode429RetryCount(v *int) *GroupUpdate {
+	if v != nil {
+		_u.SetBurstMode429RetryCount(*v)
+	}
+	return _u
+}
+
+// AddBurstMode429RetryCount adds value to the "burst_mode_429_retry_count" field.
+func (_u *GroupUpdate) AddBurstMode429RetryCount(v int) *GroupUpdate {
+	_u.mutation.AddBurstMode429RetryCount(v)
+	return _u
+}
+
+// SetBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field.
+func (_u *GroupUpdate) SetBurstModeHighUsageEnabled(v bool) *GroupUpdate {
+	_u.mutation.SetBurstModeHighUsageEnabled(v)
+	return _u
+}
+
+// SetNillableBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableBurstModeHighUsageEnabled(v *bool) *GroupUpdate {
+	if v != nil {
+		_u.SetBurstModeHighUsageEnabled(*v)
+	}
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *GroupUpdate) SetStatus(v string) *GroupUpdate {
 	_u.mutation.SetStatus(v)
@@ -1449,6 +1484,11 @@ func (_u *GroupUpdate) check() error {
 			return &ValidationError{Name: "burst_mode_threshold_percent", err: fmt.Errorf(`ent: validator failed for field "Group.burst_mode_threshold_percent": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.BurstMode429RetryCount(); ok {
+		if err := group.BurstMode429RetryCountValidator(v); err != nil {
+			return &ValidationError{Name: "burst_mode_429_retry_count", err: fmt.Errorf(`ent: validator failed for field "Group.burst_mode_429_retry_count": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := group.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Group.status": %w`, err)}
@@ -1559,6 +1599,15 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedBurstModeThresholdPercent(); ok {
 		_spec.AddField(group.FieldBurstModeThresholdPercent, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.BurstMode429RetryCount(); ok {
+		_spec.SetField(group.FieldBurstMode429RetryCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedBurstMode429RetryCount(); ok {
+		_spec.AddField(group.FieldBurstMode429RetryCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.BurstModeHighUsageEnabled(); ok {
+		_spec.SetField(group.FieldBurstModeHighUsageEnabled, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(group.FieldStatus, field.TypeString, value)
@@ -2350,6 +2399,41 @@ func (_u *GroupUpdateOne) SetNillableBurstModeThresholdPercent(v *int) *GroupUpd
 // AddBurstModeThresholdPercent adds value to the "burst_mode_threshold_percent" field.
 func (_u *GroupUpdateOne) AddBurstModeThresholdPercent(v int) *GroupUpdateOne {
 	_u.mutation.AddBurstModeThresholdPercent(v)
+	return _u
+}
+
+// SetBurstMode429RetryCount sets the "burst_mode_429_retry_count" field.
+func (_u *GroupUpdateOne) SetBurstMode429RetryCount(v int) *GroupUpdateOne {
+	_u.mutation.ResetBurstMode429RetryCount()
+	_u.mutation.SetBurstMode429RetryCount(v)
+	return _u
+}
+
+// SetNillableBurstMode429RetryCount sets the "burst_mode_429_retry_count" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableBurstMode429RetryCount(v *int) *GroupUpdateOne {
+	if v != nil {
+		_u.SetBurstMode429RetryCount(*v)
+	}
+	return _u
+}
+
+// AddBurstMode429RetryCount adds value to the "burst_mode_429_retry_count" field.
+func (_u *GroupUpdateOne) AddBurstMode429RetryCount(v int) *GroupUpdateOne {
+	_u.mutation.AddBurstMode429RetryCount(v)
+	return _u
+}
+
+// SetBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field.
+func (_u *GroupUpdateOne) SetBurstModeHighUsageEnabled(v bool) *GroupUpdateOne {
+	_u.mutation.SetBurstModeHighUsageEnabled(v)
+	return _u
+}
+
+// SetNillableBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableBurstModeHighUsageEnabled(v *bool) *GroupUpdateOne {
+	if v != nil {
+		_u.SetBurstModeHighUsageEnabled(*v)
+	}
 	return _u
 }
 
@@ -3586,6 +3670,11 @@ func (_u *GroupUpdateOne) check() error {
 			return &ValidationError{Name: "burst_mode_threshold_percent", err: fmt.Errorf(`ent: validator failed for field "Group.burst_mode_threshold_percent": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.BurstMode429RetryCount(); ok {
+		if err := group.BurstMode429RetryCountValidator(v); err != nil {
+			return &ValidationError{Name: "burst_mode_429_retry_count", err: fmt.Errorf(`ent: validator failed for field "Group.burst_mode_429_retry_count": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Status(); ok {
 		if err := group.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "Group.status": %w`, err)}
@@ -3713,6 +3802,15 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.AddedBurstModeThresholdPercent(); ok {
 		_spec.AddField(group.FieldBurstModeThresholdPercent, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.BurstMode429RetryCount(); ok {
+		_spec.SetField(group.FieldBurstMode429RetryCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedBurstMode429RetryCount(); ok {
+		_spec.AddField(group.FieldBurstMode429RetryCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.BurstModeHighUsageEnabled(); ok {
+		_spec.SetField(group.FieldBurstModeHighUsageEnabled, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(group.FieldStatus, field.TypeString, value)

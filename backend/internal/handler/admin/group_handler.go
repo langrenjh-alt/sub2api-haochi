@@ -103,6 +103,8 @@ type CreateGroupRequest struct {
 	IsExclusive               bool               `json:"is_exclusive"`
 	BurstModeEnabled          bool               `json:"burst_mode_enabled"`
 	BurstModeThresholdPercent *int               `json:"burst_mode_threshold_percent" binding:"omitempty,min=1,max=100"`
+	BurstMode429RetryCount    *int               `json:"burst_mode_429_retry_count" binding:"omitempty,min=1,max=100"`
+	BurstModeHighUsageEnabled bool               `json:"burst_mode_high_usage_enabled"`
 	SubscriptionType          string             `json:"subscription_type" binding:"omitempty,oneof=standard subscription"`
 	DailyLimitUSD             optionalLimitField `json:"daily_limit_usd"`
 	WeeklyLimitUSD            optionalLimitField `json:"weekly_limit_usd"`
@@ -171,6 +173,8 @@ type UpdateGroupRequest struct {
 	IsExclusive               *bool              `json:"is_exclusive"`
 	BurstModeEnabled          *bool              `json:"burst_mode_enabled"`
 	BurstModeThresholdPercent *int               `json:"burst_mode_threshold_percent" binding:"omitempty,min=1,max=100"`
+	BurstMode429RetryCount    *int               `json:"burst_mode_429_retry_count" binding:"omitempty,min=1,max=100"`
+	BurstModeHighUsageEnabled *bool              `json:"burst_mode_high_usage_enabled"`
 	Status                    string             `json:"status" binding:"omitempty,oneof=active inactive"`
 	SubscriptionType          string             `json:"subscription_type" binding:"omitempty,oneof=standard subscription"`
 	DailyLimitUSD             optionalLimitField `json:"daily_limit_usd"`
@@ -510,6 +514,8 @@ func (h *GroupHandler) Create(c *gin.Context) {
 		IsExclusive:                     req.IsExclusive,
 		BurstModeEnabled:                req.BurstModeEnabled,
 		BurstModeThresholdPercent:       req.BurstModeThresholdPercent,
+		BurstMode429RetryCount:          req.BurstMode429RetryCount,
+		BurstModeHighUsageEnabled:       req.BurstModeHighUsageEnabled,
 		SubscriptionType:                req.SubscriptionType,
 		DailyLimitUSD:                   req.DailyLimitUSD.ToServiceInput(),
 		WeeklyLimitUSD:                  req.WeeklyLimitUSD.ToServiceInput(),
@@ -638,6 +644,8 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		IsExclusive:                     req.IsExclusive,
 		BurstModeEnabled:                req.BurstModeEnabled,
 		BurstModeThresholdPercent:       req.BurstModeThresholdPercent,
+		BurstMode429RetryCount:          req.BurstMode429RetryCount,
+		BurstModeHighUsageEnabled:       req.BurstModeHighUsageEnabled,
 		Status:                          req.Status,
 		SubscriptionType:                req.SubscriptionType,
 		DailyLimitUSD:                   req.DailyLimitUSD.ToServiceInput(),

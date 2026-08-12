@@ -718,6 +718,29 @@
               <span class="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm text-gray-500">%</span>
             </div>
             <p class="input-hint">{{ t("admin.groups.form.burstModeThresholdHint") }}</p>
+            <div class="mt-3">
+              <label class="input-label">{{ t("admin.groups.form.burstMode429RetryCount") }}</label>
+              <input v-model.number="createForm.burst_mode_429_retry_count" type="number" min="1" max="100" step="1" required class="input" />
+              <p class="input-hint">{{ t("admin.groups.form.burstMode429RetryCountHint") }}</p>
+            </div>
+            <div v-if="createForm.platform === 'openai'" class="mt-3 flex items-center justify-between gap-4">
+              <div>
+                <label class="input-label mb-0">{{ t("admin.groups.form.burstModeHighUsage") }}</label>
+                <p class="input-hint">{{ t("admin.groups.form.burstModeHighUsageHint") }}</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="createForm.burst_mode_high_usage_enabled"
+                @click="createForm.burst_mode_high_usage_enabled = !createForm.burst_mode_high_usage_enabled"
+                :class="[
+                  'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
+                  createForm.burst_mode_high_usage_enabled ? 'bg-primary-500' : 'bg-gray-300 dark:bg-dark-600',
+                ]"
+              >
+                <span :class="['inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform', createForm.burst_mode_high_usage_enabled ? 'translate-x-6' : 'translate-x-1']" />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -2230,6 +2253,29 @@
               <span class="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm text-gray-500">%</span>
             </div>
             <p class="input-hint">{{ t("admin.groups.form.burstModeThresholdHint") }}</p>
+            <div class="mt-3">
+              <label class="input-label">{{ t("admin.groups.form.burstMode429RetryCount") }}</label>
+              <input v-model.number="editForm.burst_mode_429_retry_count" type="number" min="1" max="100" step="1" required class="input" />
+              <p class="input-hint">{{ t("admin.groups.form.burstMode429RetryCountHint") }}</p>
+            </div>
+            <div v-if="editForm.platform === 'openai'" class="mt-3 flex items-center justify-between gap-4">
+              <div>
+                <label class="input-label mb-0">{{ t("admin.groups.form.burstModeHighUsage") }}</label>
+                <p class="input-hint">{{ t("admin.groups.form.burstModeHighUsageHint") }}</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="editForm.burst_mode_high_usage_enabled"
+                @click="editForm.burst_mode_high_usage_enabled = !editForm.burst_mode_high_usage_enabled"
+                :class="[
+                  'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
+                  editForm.burst_mode_high_usage_enabled ? 'bg-primary-500' : 'bg-gray-300 dark:bg-dark-600',
+                ]"
+              >
+                <span :class="['inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform', editForm.burst_mode_high_usage_enabled ? 'translate-x-6' : 'translate-x-1']" />
+              </button>
+            </div>
           </div>
         </div>
         <div>
@@ -4968,6 +5014,8 @@ const createForm = reactive({
   is_exclusive: false,
   burst_mode_enabled: false,
   burst_mode_threshold_percent: 90,
+  burst_mode_429_retry_count: 10,
+  burst_mode_high_usage_enabled: false,
   subscription_type: "standard" as SubscriptionType,
   daily_limit_usd: null as number | null,
   weekly_limit_usd: null as number | null,
@@ -5328,6 +5376,8 @@ const editForm = reactive({
   is_exclusive: false,
   burst_mode_enabled: false,
   burst_mode_threshold_percent: 90,
+  burst_mode_429_retry_count: 10,
+  burst_mode_high_usage_enabled: false,
   status: "active" as "active" | "inactive",
   subscription_type: "standard" as SubscriptionType,
   daily_limit_usd: null as number | null,
@@ -5816,6 +5866,8 @@ const closeCreateModal = () => {
   createForm.peak_rate_multiplier = 1.0;
   createForm.burst_mode_enabled = false;
   createForm.burst_mode_threshold_percent = 90;
+  createForm.burst_mode_429_retry_count = 10;
+  createForm.burst_mode_high_usage_enabled = false;
   createForm.profit_control_enabled = false;
   createForm.profit_min_margin_percent = 0;
   createForm.profit_safety_buffer_percent = 0;
@@ -5882,6 +5934,7 @@ const validateProfitControlForm = (form: ProfitControlFormState): boolean => {
 const validateBurstModeThreshold = (form: {
   burst_mode_enabled: boolean;
   burst_mode_threshold_percent: number;
+  burst_mode_429_retry_count: number;
 }) => {
   if (!form.burst_mode_enabled) {
     return true;
@@ -5889,6 +5942,11 @@ const validateBurstModeThreshold = (form: {
   const threshold = Number(form.burst_mode_threshold_percent);
   if (!Number.isInteger(threshold) || threshold < 1 || threshold > 100) {
     appStore.showError(t("admin.groups.form.burstModeThresholdRange"));
+    return false;
+  }
+  const retryCount = Number(form.burst_mode_429_retry_count);
+  if (!Number.isInteger(retryCount) || retryCount < 1 || retryCount > 100) {
+    appStore.showError(t("admin.groups.form.burstMode429RetryCountRange"));
     return false;
   }
   return true;
@@ -5924,6 +5982,9 @@ const handleCreateGroup = async () => {
     // 构建请求数据，包含模型路由配置
     const requestData = {
       ...createGroupForm,
+      burst_mode_high_usage_enabled:
+        createForm.platform === "openai" &&
+        createForm.burst_mode_high_usage_enabled,
       daily_limit_usd: normalizeOptionalLimit(
         createForm.daily_limit_usd as number | string | null,
       ),
@@ -6043,6 +6104,8 @@ const handleEdit = async (group: AdminGroup) => {
   editForm.is_exclusive = group.is_exclusive;
   editForm.burst_mode_enabled = group.burst_mode_enabled ?? false;
   editForm.burst_mode_threshold_percent = group.burst_mode_threshold_percent ?? 90;
+  editForm.burst_mode_429_retry_count = group.burst_mode_429_retry_count ?? 10;
+  editForm.burst_mode_high_usage_enabled = group.burst_mode_high_usage_enabled ?? false;
   editForm.status = group.status;
   editForm.subscription_type = group.subscription_type || "standard";
   editForm.daily_limit_usd = group.daily_limit_usd;
@@ -6145,6 +6208,8 @@ const closeEditModal = () => {
   editForm.peak_rate_multiplier = 1.0;
   editForm.burst_mode_enabled = false;
   editForm.burst_mode_threshold_percent = 90;
+  editForm.burst_mode_429_retry_count = 10;
+  editForm.burst_mode_high_usage_enabled = false;
   editForm.profit_control_enabled = false;
   editForm.profit_min_margin_percent = 0;
   editForm.profit_safety_buffer_percent = 0;
@@ -6189,6 +6254,9 @@ const handleUpdateGroup = async () => {
     // 转换 fallback_group_id: null -> 0 (后端使用 0 表示清除)
     const payload = {
       ...editForm,
+      burst_mode_high_usage_enabled:
+        editForm.platform === "openai" &&
+        editForm.burst_mode_high_usage_enabled,
       daily_limit_usd: normalizeOptionalLimit(
         editForm.daily_limit_usd as number | string | null,
       ),
@@ -6597,6 +6665,7 @@ watch(
     if (newVal !== "openai") {
       resetMessagesDispatchFormState(createForm);
       createForm.allow_live = false;
+      createForm.burst_mode_high_usage_enabled = false;
     }
     if (!isProfitControlPlatform(newVal)) {
       createForm.profit_control_enabled = false;
@@ -6645,6 +6714,7 @@ watch(
     if (newVal !== "openai") {
       resetMessagesDispatchFormState(editForm);
       editForm.allow_live = false;
+      editForm.burst_mode_high_usage_enabled = false;
     }
     if (!isProfitControlPlatform(newVal)) {
       editForm.profit_control_enabled = false;

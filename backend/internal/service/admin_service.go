@@ -216,6 +216,8 @@ type CreateGroupInput struct {
 	IsExclusive               bool
 	BurstModeEnabled          bool
 	BurstModeThresholdPercent *int
+	BurstMode429RetryCount    *int
+	BurstModeHighUsageEnabled bool
 	SubscriptionType          string   // standard/subscription
 	DailyLimitUSD             *float64 // 日限额 (USD)
 	WeeklyLimitUSD            *float64 // 周限额 (USD)
@@ -290,6 +292,8 @@ type UpdateGroupInput struct {
 	IsExclusive               *bool
 	BurstModeEnabled          *bool
 	BurstModeThresholdPercent *int
+	BurstMode429RetryCount    *int
+	BurstModeHighUsageEnabled *bool
 	Status                    string
 	SubscriptionType          string   // standard/subscription
 	DailyLimitUSD             *float64 // 日限额 (USD)

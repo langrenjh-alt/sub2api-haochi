@@ -42,6 +42,10 @@ const (
 	FieldBurstModeEnabled = "burst_mode_enabled"
 	// FieldBurstModeThresholdPercent holds the string denoting the burst_mode_threshold_percent field in the database.
 	FieldBurstModeThresholdPercent = "burst_mode_threshold_percent"
+	// FieldBurstMode429RetryCount holds the string denoting the burst_mode_429_retry_count field in the database.
+	FieldBurstMode429RetryCount = "burst_mode_429_retry_count"
+	// FieldBurstModeHighUsageEnabled holds the string denoting the burst_mode_high_usage_enabled field in the database.
+	FieldBurstModeHighUsageEnabled = "burst_mode_high_usage_enabled"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldDuplicateOperationID holds the string denoting the duplicate_operation_id field in the database.
@@ -228,6 +232,8 @@ var Columns = []string{
 	FieldIsExclusive,
 	FieldBurstModeEnabled,
 	FieldBurstModeThresholdPercent,
+	FieldBurstMode429RetryCount,
+	FieldBurstModeHighUsageEnabled,
 	FieldStatus,
 	FieldDuplicateOperationID,
 	FieldPlatform,
@@ -336,6 +342,12 @@ var (
 	DefaultBurstModeThresholdPercent int
 	// BurstModeThresholdPercentValidator is a validator for the "burst_mode_threshold_percent" field. It is called by the builders before save.
 	BurstModeThresholdPercentValidator func(int) error
+	// DefaultBurstMode429RetryCount holds the default value on creation for the "burst_mode_429_retry_count" field.
+	DefaultBurstMode429RetryCount int
+	// BurstMode429RetryCountValidator is a validator for the "burst_mode_429_retry_count" field. It is called by the builders before save.
+	BurstMode429RetryCountValidator func(int) error
+	// DefaultBurstModeHighUsageEnabled holds the default value on creation for the "burst_mode_high_usage_enabled" field.
+	DefaultBurstModeHighUsageEnabled bool
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// StatusValidator is a validator for the "status" field. It is called by the builders before save.
@@ -489,6 +501,16 @@ func ByBurstModeEnabled(opts ...sql.OrderTermOption) OrderOption {
 // ByBurstModeThresholdPercent orders the results by the burst_mode_threshold_percent field.
 func ByBurstModeThresholdPercent(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldBurstModeThresholdPercent, opts...).ToFunc()
+}
+
+// ByBurstMode429RetryCount orders the results by the burst_mode_429_retry_count field.
+func ByBurstMode429RetryCount(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBurstMode429RetryCount, opts...).ToFunc()
+}
+
+// ByBurstModeHighUsageEnabled orders the results by the burst_mode_high_usage_enabled field.
+func ByBurstModeHighUsageEnabled(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBurstModeHighUsageEnabled, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

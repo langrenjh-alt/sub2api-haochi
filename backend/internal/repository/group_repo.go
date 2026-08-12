@@ -65,6 +65,8 @@ func createGroupRecord(ctx context.Context, client *dbent.Client, groupIn *servi
 		SetIsExclusive(groupIn.IsExclusive).
 		SetBurstModeEnabled(groupIn.BurstModeEnabled).
 		SetBurstModeThresholdPercent(groupIn.BurstModeThresholdPercent).
+		SetBurstMode429RetryCount(groupIn.BurstMode429RetryCount).
+		SetBurstModeHighUsageEnabled(groupIn.BurstModeHighUsageEnabled).
 		SetStatus(groupIn.Status).
 		SetSubscriptionType(groupIn.SubscriptionType).
 		SetNillableDailyLimitUsd(groupIn.DailyLimitUSD).
@@ -244,6 +246,8 @@ func (r *groupRepository) Update(ctx context.Context, groupIn *service.Group) er
 		SetIsExclusive(groupIn.IsExclusive).
 		SetBurstModeEnabled(groupIn.BurstModeEnabled).
 		SetBurstModeThresholdPercent(groupIn.BurstModeThresholdPercent).
+		SetBurstMode429RetryCount(groupIn.BurstMode429RetryCount).
+		SetBurstModeHighUsageEnabled(groupIn.BurstModeHighUsageEnabled).
 		SetStatus(groupIn.Status).
 		SetSubscriptionType(groupIn.SubscriptionType).
 		SetNillableDailyLimitUsd(groupIn.DailyLimitUSD).

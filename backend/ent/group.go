@@ -45,6 +45,10 @@ type Group struct {
 	BurstModeEnabled bool `json:"burst_mode_enabled,omitempty"`
 	// 超刷调度允许的账号并发阈值百分比
 	BurstModeThresholdPercent int `json:"burst_mode_threshold_percent,omitempty"`
+	// 超刷模式同账号 429 重试次数
+	BurstMode429RetryCount int `json:"burst_mode_429_retry_count,omitempty"`
+	// 超刷模式是否优先将请求集中到用量 95% 以上的账号
+	BurstModeHighUsageEnabled bool `json:"burst_mode_high_usage_enabled,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
 	// 内部幂等恢复标识，不对 API 暴露
@@ -251,11 +255,11 @@ func (*Group) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case group.FieldVideoModelPrices, group.FieldModelRouting, group.FieldSupportedModelScopes, group.FieldMessagesDispatchModelConfig, group.FieldModelsListConfig, group.FieldReasoningEffortMappings:
 			values[i] = new([]byte)
-		case group.FieldPeakRateEnabled, group.FieldIsExclusive, group.FieldBurstModeEnabled, group.FieldAllowImageGeneration, group.FieldAllowBatchImageGeneration, group.FieldImageRateIndependent, group.FieldVideoRateIndependent, group.FieldClaudeCodeOnly, group.FieldModelRoutingEnabled, group.FieldMcpXMLInject, group.FieldAllowMessagesDispatch, group.FieldAllowLive, group.FieldRequireOauthOnly, group.FieldRequirePrivacySet, group.FieldProfitControlEnabled:
+		case group.FieldPeakRateEnabled, group.FieldIsExclusive, group.FieldBurstModeEnabled, group.FieldBurstModeHighUsageEnabled, group.FieldAllowImageGeneration, group.FieldAllowBatchImageGeneration, group.FieldImageRateIndependent, group.FieldVideoRateIndependent, group.FieldClaudeCodeOnly, group.FieldModelRoutingEnabled, group.FieldMcpXMLInject, group.FieldAllowMessagesDispatch, group.FieldAllowLive, group.FieldRequireOauthOnly, group.FieldRequirePrivacySet, group.FieldProfitControlEnabled:
 			values[i] = new(sql.NullBool)
 		case group.FieldRateMultiplier, group.FieldPeakRateMultiplier, group.FieldDailyLimitUsd, group.FieldWeeklyLimitUsd, group.FieldMonthlyLimitUsd, group.FieldImageRateMultiplier, group.FieldImagePrice1k, group.FieldImagePrice2k, group.FieldImagePrice4k, group.FieldBatchImageDiscountMultiplier, group.FieldBatchImageHoldMultiplier, group.FieldVideoRateMultiplier, group.FieldVideoPrice480p, group.FieldVideoPrice720p, group.FieldVideoPrice1080p, group.FieldWebSearchPricePerCall, group.FieldSearchPricePer1k, group.FieldAudioRealtimePricePerMin, group.FieldAudioTtsPricePerMillionChars, group.FieldAudioSttPricePerHour, group.FieldProfitMinMargin, group.FieldProfitSafetyBuffer:
 			values[i] = new(sql.NullFloat64)
-		case group.FieldID, group.FieldBurstModeThresholdPercent, group.FieldDefaultValidityDays, group.FieldFallbackGroupID, group.FieldFallbackGroupIDOnInvalidRequest, group.FieldSortOrder, group.FieldRpmLimit:
+		case group.FieldID, group.FieldBurstModeThresholdPercent, group.FieldBurstMode429RetryCount, group.FieldDefaultValidityDays, group.FieldFallbackGroupID, group.FieldFallbackGroupIDOnInvalidRequest, group.FieldSortOrder, group.FieldRpmLimit:
 			values[i] = new(sql.NullInt64)
 		case group.FieldName, group.FieldDescription, group.FieldPeakStart, group.FieldPeakEnd, group.FieldStatus, group.FieldDuplicateOperationID, group.FieldPlatform, group.FieldSubscriptionType, group.FieldDefaultMappedModel, group.FieldMaxReasoningEffort:
 			values[i] = new(sql.NullString)
@@ -361,6 +365,18 @@ func (_m *Group) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field burst_mode_threshold_percent", values[i])
 			} else if value.Valid {
 				_m.BurstModeThresholdPercent = int(value.Int64)
+			}
+		case group.FieldBurstMode429RetryCount:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field burst_mode_429_retry_count", values[i])
+			} else if value.Valid {
+				_m.BurstMode429RetryCount = int(value.Int64)
+			}
+		case group.FieldBurstModeHighUsageEnabled:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field burst_mode_high_usage_enabled", values[i])
+			} else if value.Valid {
+				_m.BurstModeHighUsageEnabled = value.Bool
 			}
 		case group.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -803,6 +819,12 @@ func (_m *Group) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("burst_mode_threshold_percent=")
 	builder.WriteString(fmt.Sprintf("%v", _m.BurstModeThresholdPercent))
+	builder.WriteString(", ")
+	builder.WriteString("burst_mode_429_retry_count=")
+	builder.WriteString(fmt.Sprintf("%v", _m.BurstMode429RetryCount))
+	builder.WriteString(", ")
+	builder.WriteString("burst_mode_high_usage_enabled=")
+	builder.WriteString(fmt.Sprintf("%v", _m.BurstModeHighUsageEnabled))
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)

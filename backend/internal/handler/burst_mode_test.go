@@ -21,12 +21,18 @@ func burstModeTestContext() context.Context {
 	})
 }
 
-func TestBurstModeRetryPolicyForcesFive429Retries(t *testing.T) {
+func TestBurstModeRetryPolicyUsesConfigured429Retries(t *testing.T) {
+	ctx := burstModeTestContext()
 	retryable, limit := burstModeRetryPolicy(burstModeTestContext(), &service.UpstreamFailoverError{
 		StatusCode: http.StatusTooManyRequests,
 	}, 0)
 	require.True(t, retryable)
 	require.Equal(t, service.BurstModeSameAccount429Retries, limit)
+	group := ctx.Value(ctxkey.Group).(*service.Group)
+	group.BurstMode429RetryCount = 17
+	retryable, limit = burstModeRetryPolicy(ctx, &service.UpstreamFailoverError{StatusCode: http.StatusTooManyRequests}, 0)
+	require.True(t, retryable)
+	require.Equal(t, 17, limit)
 }
 
 func TestBurstModeRetryPolicyKeepsDefaultForOtherErrors(t *testing.T) {
@@ -38,13 +44,15 @@ func TestBurstModeRetryPolicyKeepsDefaultForOtherErrors(t *testing.T) {
 	require.Equal(t, 3, limit)
 }
 
-func TestBurstModeFailoverRetriesFive429sBeforeSwitching(t *testing.T) {
+func TestBurstModeFailoverUsesConfigured429RetriesBeforeSwitching(t *testing.T) {
 	ctx := burstModeTestContext()
+	group := ctx.Value(ctxkey.Group).(*service.Group)
+	group.BurstMode429RetryCount = 2
 	state := NewFailoverState(0, false)
 	unscheduler := &mockTempUnscheduler{}
 	accountID := int64(41)
 
-	for retry := 1; retry <= service.BurstModeSameAccount429Retries; retry++ {
+	for retry := 1; retry <= group.BurstMode429RetryCount; retry++ {
 		action := state.HandleFailoverError(ctx, unscheduler, accountID, service.PlatformOpenAI, 0, &service.UpstreamFailoverError{
 			StatusCode: http.StatusTooManyRequests,
 		})

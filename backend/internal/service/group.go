@@ -31,6 +31,10 @@ type Group struct {
 	BurstModeEnabled   bool
 	// BurstModeThresholdPercent limits current concurrency used by burst scheduling.
 	BurstModeThresholdPercent int
+	// BurstMode429RetryCount limits same-account 429 retries in burst mode.
+	BurstMode429RetryCount int
+	// BurstModeHighUsageEnabled prioritizes accounts whose current usage is at least 95%.
+	BurstModeHighUsageEnabled bool
 	Status                    string
 	Hydrated                  bool // indicates the group was loaded from a trusted repository source
 	// DuplicateOperationID is internal persistence metadata used only to recover
@@ -132,10 +136,19 @@ type Group struct {
 }
 
 const DefaultBurstModeThresholdPercent = 90
+const DefaultBurstMode429RetryCount = 10
+const BurstModeHighUsagePercent = 95
 
 func ValidateBurstModeThresholdPercent(percent int) error {
 	if percent < 1 || percent > 100 {
 		return errors.New("burst_mode_threshold_percent must be between 1 and 100")
+	}
+	return nil
+}
+
+func ValidateBurstMode429RetryCount(count int) error {
+	if count < 1 || count > 100 {
+		return errors.New("burst_mode_429_retry_count must be between 1 and 100")
 	}
 	return nil
 }

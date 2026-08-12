@@ -109,6 +109,8 @@ func cloneGroupForDuplicate(source *Group, operationID string) *Group {
 		IsExclusive:                     source.IsExclusive,
 		BurstModeEnabled:                source.BurstModeEnabled,
 		BurstModeThresholdPercent:       source.BurstModeThresholdPercent,
+		BurstMode429RetryCount:          source.BurstMode429RetryCount,
+		BurstModeHighUsageEnabled:       source.Platform == PlatformOpenAI && source.BurstModeHighUsageEnabled,
 		Status:                          duplicateGroupInactiveStatus,
 		DuplicateOperationID:            operationID,
 		SubscriptionType:                source.SubscriptionType,

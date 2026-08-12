@@ -2321,22 +2321,47 @@ func (s *OpenAIGatewayService) selectOpenAIAccountInBurstMode(
 		return nil, openAIAccountScheduleLayerBurstMode, 0, ErrNoAvailableAccounts
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	highUsageMode := burstModeHighUsageEnabledForGroup(group)
+	if highUsageMode {
+		sort.SliceStable(candidates, func(i, j int) bool {
+			hi, hj := BurstModeHighUsageAccount(candidates[i]), BurstModeHighUsageAccount(candidates[j])
+			if hi != hj {
+				return hi
+			}
+			return candidates[i].ID < candidates[j].ID
+		})
+	}
 
 	previousAccountID := int64(0)
-	if strings.TrimSpace(previousResponseID) != "" && platform == PlatformOpenAI {
+	if !highUsageMode && strings.TrimSpace(previousResponseID) != "" && platform == PlatformOpenAI {
 		previousAccountID = s.ResolveAccountIDByPreviousResponseIDForScheduler(ctx, groupID, previousResponseID, requestedModel, excludedIDs, requiredCapability, requireCompact)
 	}
 	stickyAccountID := int64(0)
-	if sessionHash != "" && s.cache != nil {
+	if sessionHash != "" && s.cache != nil && !highUsageMode {
 		stickyAccountID, _ = s.getStickySessionAccountID(ctx, groupID, sessionHash)
 	}
 	retryAccountID := burstModeRetryAccountID(ctx)
 	stickyIDs := []struct {
-		id    int64
-		layer string
-	}{{retryAccountID, openAIAccountScheduleLayerBurstMode}, {previousAccountID, openAIAccountScheduleLayerPreviousResponse}, {stickyAccountID, openAIAccountScheduleLayerSessionSticky}}
+		id                 int64
+		layer              string
+		allowStickyReserve bool
+	}{{id: retryAccountID, layer: openAIAccountScheduleLayerBurstMode}}
+	if !highUsageMode {
+		stickyIDs = append(stickyIDs,
+			struct {
+				id                 int64
+				layer              string
+				allowStickyReserve bool
+			}{id: previousAccountID, layer: openAIAccountScheduleLayerPreviousResponse, allowStickyReserve: true},
+			struct {
+				id                 int64
+				layer              string
+				allowStickyReserve bool
+			}{id: stickyAccountID, layer: openAIAccountScheduleLayerSessionSticky, allowStickyReserve: true},
+		)
+	}
 
-	tryAccount := func(account *Account, preserveSticky bool) (*AccountSelectionResult, error) {
+	tryAccount := func(account *Account, preserveSticky, allowStickyReserve bool) (*AccountSelectionResult, error) {
 		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, account, platform, requestedModel, requireCompact, requiredCapability)
 		if fresh == nil || !s.isOpenAIAccountTransportCompatible(fresh, requiredTransport) || !accountSupportsOpenAICapabilities(fresh, requiredCapability, requiredImageCapability) {
 			return nil, nil
@@ -2345,7 +2370,7 @@ func (s *OpenAIGatewayService) selectOpenAIAccountInBurstMode(
 		if fresh == nil {
 			return nil, nil
 		}
-		result, acquireErr := s.tryAcquireAccountSlot(ctx, fresh.ID, burstModeAcquireLimit(fresh.Concurrency, group.BurstModeThresholdPercent))
+		result, acquireErr := s.tryAcquireAccountSlot(ctx, fresh.ID, burstModeAcquireLimit(fresh.Concurrency, group.BurstModeThresholdPercent, allowStickyReserve))
 		if acquireErr != nil || result == nil || !result.Acquired {
 			return nil, acquireErr
 		}
@@ -2353,7 +2378,7 @@ func (s *OpenAIGatewayService) selectOpenAIAccountInBurstMode(
 		if selectErr != nil {
 			return nil, selectErr
 		}
-		if sessionHash != "" && !preserveSticky {
+		if sessionHash != "" && !preserveSticky && !highUsageMode {
 			_ = s.bindOpenAIStickySessionDuringSelection(ctx, groupID, sessionHash, fresh.ID)
 		}
 		return selection, nil
@@ -2369,7 +2394,7 @@ func (s *OpenAIGatewayService) selectOpenAIAccountInBurstMode(
 				continue
 			}
 			triedSticky[account.ID] = struct{}{}
-			selection, tryErr := tryAccount(account, true)
+			selection, tryErr := tryAccount(account, true, sticky.allowStickyReserve)
 			if tryErr != nil {
 				return nil, sticky.layer, len(candidates), tryErr
 			}
@@ -2382,7 +2407,7 @@ func (s *OpenAIGatewayService) selectOpenAIAccountInBurstMode(
 		if _, tried := triedSticky[account.ID]; tried {
 			continue
 		}
-		selection, tryErr := tryAccount(account, false)
+		selection, tryErr := tryAccount(account, false, false)
 		if tryErr != nil {
 			return nil, openAIAccountScheduleLayerBurstMode, len(candidates), tryErr
 		}

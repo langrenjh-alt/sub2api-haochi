@@ -181,6 +181,8 @@ func groupFromServiceBase(g *service.Group) Group {
 		IsExclusive:                     g.IsExclusive,
 		BurstModeEnabled:                g.BurstModeEnabled,
 		BurstModeThresholdPercent:       g.BurstModeThresholdPercent,
+		BurstMode429RetryCount:          g.BurstMode429RetryCount,
+		BurstModeHighUsageEnabled:       g.BurstModeHighUsageEnabled,
 		Status:                          g.Status,
 		SubscriptionType:                g.SubscriptionType,
 		DailyLimitUSD:                   g.DailyLimitUSD,

@@ -955,6 +955,8 @@ func groupEntityToService(g *dbent.Group) *service.Group {
 		IsExclusive:                     g.IsExclusive,
 		BurstModeEnabled:                g.BurstModeEnabled,
 		BurstModeThresholdPercent:       g.BurstModeThresholdPercent,
+		BurstMode429RetryCount:          g.BurstMode429RetryCount,
+		BurstModeHighUsageEnabled:       g.BurstModeHighUsageEnabled,
 		Status:                          g.Status,
 		Hydrated:                        true,
 		DuplicateOperationID:            derefString(g.DuplicateOperationID),

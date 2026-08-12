@@ -203,6 +203,34 @@ func (_c *GroupCreate) SetNillableBurstModeThresholdPercent(v *int) *GroupCreate
 	return _c
 }
 
+// SetBurstMode429RetryCount sets the "burst_mode_429_retry_count" field.
+func (_c *GroupCreate) SetBurstMode429RetryCount(v int) *GroupCreate {
+	_c.mutation.SetBurstMode429RetryCount(v)
+	return _c
+}
+
+// SetNillableBurstMode429RetryCount sets the "burst_mode_429_retry_count" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableBurstMode429RetryCount(v *int) *GroupCreate {
+	if v != nil {
+		_c.SetBurstMode429RetryCount(*v)
+	}
+	return _c
+}
+
+// SetBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field.
+func (_c *GroupCreate) SetBurstModeHighUsageEnabled(v bool) *GroupCreate {
+	_c.mutation.SetBurstModeHighUsageEnabled(v)
+	return _c
+}
+
+// SetNillableBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableBurstModeHighUsageEnabled(v *bool) *GroupCreate {
+	if v != nil {
+		_c.SetBurstModeHighUsageEnabled(*v)
+	}
+	return _c
+}
+
 // SetStatus sets the "status" field.
 func (_c *GroupCreate) SetStatus(v string) *GroupCreate {
 	_c.mutation.SetStatus(v)
@@ -1030,6 +1058,14 @@ func (_c *GroupCreate) defaults() error {
 		v := group.DefaultBurstModeThresholdPercent
 		_c.mutation.SetBurstModeThresholdPercent(v)
 	}
+	if _, ok := _c.mutation.BurstMode429RetryCount(); !ok {
+		v := group.DefaultBurstMode429RetryCount
+		_c.mutation.SetBurstMode429RetryCount(v)
+	}
+	if _, ok := _c.mutation.BurstModeHighUsageEnabled(); !ok {
+		v := group.DefaultBurstModeHighUsageEnabled
+		_c.mutation.SetBurstModeHighUsageEnabled(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := group.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -1207,6 +1243,17 @@ func (_c *GroupCreate) check() error {
 		if err := group.BurstModeThresholdPercentValidator(v); err != nil {
 			return &ValidationError{Name: "burst_mode_threshold_percent", err: fmt.Errorf(`ent: validator failed for field "Group.burst_mode_threshold_percent": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.BurstMode429RetryCount(); !ok {
+		return &ValidationError{Name: "burst_mode_429_retry_count", err: errors.New(`ent: missing required field "Group.burst_mode_429_retry_count"`)}
+	}
+	if v, ok := _c.mutation.BurstMode429RetryCount(); ok {
+		if err := group.BurstMode429RetryCountValidator(v); err != nil {
+			return &ValidationError{Name: "burst_mode_429_retry_count", err: fmt.Errorf(`ent: validator failed for field "Group.burst_mode_429_retry_count": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.BurstModeHighUsageEnabled(); !ok {
+		return &ValidationError{Name: "burst_mode_high_usage_enabled", err: errors.New(`ent: missing required field "Group.burst_mode_high_usage_enabled"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "Group.status"`)}
@@ -1426,6 +1473,14 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.BurstModeThresholdPercent(); ok {
 		_spec.SetField(group.FieldBurstModeThresholdPercent, field.TypeInt, value)
 		_node.BurstModeThresholdPercent = value
+	}
+	if value, ok := _c.mutation.BurstMode429RetryCount(); ok {
+		_spec.SetField(group.FieldBurstMode429RetryCount, field.TypeInt, value)
+		_node.BurstMode429RetryCount = value
+	}
+	if value, ok := _c.mutation.BurstModeHighUsageEnabled(); ok {
+		_spec.SetField(group.FieldBurstModeHighUsageEnabled, field.TypeBool, value)
+		_node.BurstModeHighUsageEnabled = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(group.FieldStatus, field.TypeString, value)
@@ -1950,6 +2005,36 @@ func (u *GroupUpsert) UpdateBurstModeThresholdPercent() *GroupUpsert {
 // AddBurstModeThresholdPercent adds v to the "burst_mode_threshold_percent" field.
 func (u *GroupUpsert) AddBurstModeThresholdPercent(v int) *GroupUpsert {
 	u.Add(group.FieldBurstModeThresholdPercent, v)
+	return u
+}
+
+// SetBurstMode429RetryCount sets the "burst_mode_429_retry_count" field.
+func (u *GroupUpsert) SetBurstMode429RetryCount(v int) *GroupUpsert {
+	u.Set(group.FieldBurstMode429RetryCount, v)
+	return u
+}
+
+// UpdateBurstMode429RetryCount sets the "burst_mode_429_retry_count" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateBurstMode429RetryCount() *GroupUpsert {
+	u.SetExcluded(group.FieldBurstMode429RetryCount)
+	return u
+}
+
+// AddBurstMode429RetryCount adds v to the "burst_mode_429_retry_count" field.
+func (u *GroupUpsert) AddBurstMode429RetryCount(v int) *GroupUpsert {
+	u.Add(group.FieldBurstMode429RetryCount, v)
+	return u
+}
+
+// SetBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field.
+func (u *GroupUpsert) SetBurstModeHighUsageEnabled(v bool) *GroupUpsert {
+	u.Set(group.FieldBurstModeHighUsageEnabled, v)
+	return u
+}
+
+// UpdateBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateBurstModeHighUsageEnabled() *GroupUpsert {
+	u.SetExcluded(group.FieldBurstModeHighUsageEnabled)
 	return u
 }
 
@@ -3035,6 +3120,41 @@ func (u *GroupUpsertOne) AddBurstModeThresholdPercent(v int) *GroupUpsertOne {
 func (u *GroupUpsertOne) UpdateBurstModeThresholdPercent() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateBurstModeThresholdPercent()
+	})
+}
+
+// SetBurstMode429RetryCount sets the "burst_mode_429_retry_count" field.
+func (u *GroupUpsertOne) SetBurstMode429RetryCount(v int) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBurstMode429RetryCount(v)
+	})
+}
+
+// AddBurstMode429RetryCount adds v to the "burst_mode_429_retry_count" field.
+func (u *GroupUpsertOne) AddBurstMode429RetryCount(v int) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.AddBurstMode429RetryCount(v)
+	})
+}
+
+// UpdateBurstMode429RetryCount sets the "burst_mode_429_retry_count" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateBurstMode429RetryCount() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBurstMode429RetryCount()
+	})
+}
+
+// SetBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field.
+func (u *GroupUpsertOne) SetBurstModeHighUsageEnabled(v bool) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBurstModeHighUsageEnabled(v)
+	})
+}
+
+// UpdateBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateBurstModeHighUsageEnabled() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBurstModeHighUsageEnabled()
 	})
 }
 
@@ -4425,6 +4545,41 @@ func (u *GroupUpsertBulk) AddBurstModeThresholdPercent(v int) *GroupUpsertBulk {
 func (u *GroupUpsertBulk) UpdateBurstModeThresholdPercent() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateBurstModeThresholdPercent()
+	})
+}
+
+// SetBurstMode429RetryCount sets the "burst_mode_429_retry_count" field.
+func (u *GroupUpsertBulk) SetBurstMode429RetryCount(v int) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBurstMode429RetryCount(v)
+	})
+}
+
+// AddBurstMode429RetryCount adds v to the "burst_mode_429_retry_count" field.
+func (u *GroupUpsertBulk) AddBurstMode429RetryCount(v int) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.AddBurstMode429RetryCount(v)
+	})
+}
+
+// UpdateBurstMode429RetryCount sets the "burst_mode_429_retry_count" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateBurstMode429RetryCount() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBurstMode429RetryCount()
+	})
+}
+
+// SetBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field.
+func (u *GroupUpsertBulk) SetBurstModeHighUsageEnabled(v bool) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetBurstModeHighUsageEnabled(v)
+	})
+}
+
+// UpdateBurstModeHighUsageEnabled sets the "burst_mode_high_usage_enabled" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateBurstModeHighUsageEnabled() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateBurstModeHighUsageEnabled()
 	})
 }
 

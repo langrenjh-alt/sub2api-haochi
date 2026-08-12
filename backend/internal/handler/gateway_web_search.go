@@ -177,7 +177,7 @@ func (h *GatewayHandler) WebSearch(c *gin.Context) {
 			accountReleaseFunc = nil
 		}
 		if service.BurstModeHandles429(c.Request.Context(), failoverErr.StatusCode) &&
-			sameAccountRetryCount[account.ID] < service.BurstModeSameAccount429Retries {
+			sameAccountRetryCount[account.ID] < service.BurstMode429RetryLimit(c.Request.Context()) {
 			sameAccountRetryCount[account.ID]++
 			burstRetryAccountID = account.ID
 			continue

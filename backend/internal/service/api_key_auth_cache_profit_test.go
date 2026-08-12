@@ -39,6 +39,8 @@ func profitAuthTestAPIKey() *APIKey {
 			PeakRateEnabled:           false,
 			BurstModeEnabled:          true,
 			BurstModeThresholdPercent: 73,
+			BurstMode429RetryCount:    17,
+			BurstModeHighUsageEnabled: true,
 			ProfitControlEnabled:      true,
 			ProfitMinMargin:           0.2,
 			ProfitSafetyBuffer:        0.05,
@@ -55,7 +57,7 @@ func TestAPIKeyAuthSnapshotProfitControlRoundtrip(t *testing.T) {
 	snapshot := svc.snapshotFromAPIKey(context.Background(), apiKey)
 	require.NotNil(t, snapshot)
 	require.Equal(t, apiKeyAuthSnapshotVersion, snapshot.Version)
-	require.Equal(t, 20, snapshot.Version, "v20 authentication snapshots carry burst scheduling fields")
+	require.Equal(t, 21, snapshot.Version, "v21 authentication snapshots carry configurable burst scheduling fields")
 
 	// 模拟 L2 缓存的完整 JSON 往返（与 apiKeyCache.SetAuthCache/GetAuthCache 同构）。
 	payload, err := json.Marshal(&APIKeyAuthCacheEntry{Snapshot: snapshot})
@@ -70,6 +72,8 @@ func TestAPIKeyAuthSnapshotProfitControlRoundtrip(t *testing.T) {
 	require.True(t, materialized.Group.Hydrated)
 	require.True(t, materialized.Group.BurstModeEnabled)
 	require.Equal(t, 73, materialized.Group.BurstModeThresholdPercent)
+	require.Equal(t, 17, materialized.Group.BurstMode429RetryCount)
+	require.True(t, materialized.Group.BurstModeHighUsageEnabled)
 	require.True(t, materialized.Group.ProfitControlEnabled)
 	require.InDelta(t, 0.2, materialized.Group.ProfitMinMargin, 1e-12)
 	require.InDelta(t, 0.05, materialized.Group.ProfitSafetyBuffer, 1e-12)

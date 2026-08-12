@@ -120,6 +120,16 @@ func BurstModeThresholdPercent(v int) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldBurstModeThresholdPercent, v))
 }
 
+// BurstMode429RetryCount applies equality check predicate on the "burst_mode_429_retry_count" field. It's identical to BurstMode429RetryCountEQ.
+func BurstMode429RetryCount(v int) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldBurstMode429RetryCount, v))
+}
+
+// BurstModeHighUsageEnabled applies equality check predicate on the "burst_mode_high_usage_enabled" field. It's identical to BurstModeHighUsageEnabledEQ.
+func BurstModeHighUsageEnabled(v bool) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldBurstModeHighUsageEnabled, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldStatus, v))
@@ -883,6 +893,56 @@ func BurstModeThresholdPercentLT(v int) predicate.Group {
 // BurstModeThresholdPercentLTE applies the LTE predicate on the "burst_mode_threshold_percent" field.
 func BurstModeThresholdPercentLTE(v int) predicate.Group {
 	return predicate.Group(sql.FieldLTE(FieldBurstModeThresholdPercent, v))
+}
+
+// BurstMode429RetryCountEQ applies the EQ predicate on the "burst_mode_429_retry_count" field.
+func BurstMode429RetryCountEQ(v int) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldBurstMode429RetryCount, v))
+}
+
+// BurstMode429RetryCountNEQ applies the NEQ predicate on the "burst_mode_429_retry_count" field.
+func BurstMode429RetryCountNEQ(v int) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldBurstMode429RetryCount, v))
+}
+
+// BurstMode429RetryCountIn applies the In predicate on the "burst_mode_429_retry_count" field.
+func BurstMode429RetryCountIn(vs ...int) predicate.Group {
+	return predicate.Group(sql.FieldIn(FieldBurstMode429RetryCount, vs...))
+}
+
+// BurstMode429RetryCountNotIn applies the NotIn predicate on the "burst_mode_429_retry_count" field.
+func BurstMode429RetryCountNotIn(vs ...int) predicate.Group {
+	return predicate.Group(sql.FieldNotIn(FieldBurstMode429RetryCount, vs...))
+}
+
+// BurstMode429RetryCountGT applies the GT predicate on the "burst_mode_429_retry_count" field.
+func BurstMode429RetryCountGT(v int) predicate.Group {
+	return predicate.Group(sql.FieldGT(FieldBurstMode429RetryCount, v))
+}
+
+// BurstMode429RetryCountGTE applies the GTE predicate on the "burst_mode_429_retry_count" field.
+func BurstMode429RetryCountGTE(v int) predicate.Group {
+	return predicate.Group(sql.FieldGTE(FieldBurstMode429RetryCount, v))
+}
+
+// BurstMode429RetryCountLT applies the LT predicate on the "burst_mode_429_retry_count" field.
+func BurstMode429RetryCountLT(v int) predicate.Group {
+	return predicate.Group(sql.FieldLT(FieldBurstMode429RetryCount, v))
+}
+
+// BurstMode429RetryCountLTE applies the LTE predicate on the "burst_mode_429_retry_count" field.
+func BurstMode429RetryCountLTE(v int) predicate.Group {
+	return predicate.Group(sql.FieldLTE(FieldBurstMode429RetryCount, v))
+}
+
+// BurstModeHighUsageEnabledEQ applies the EQ predicate on the "burst_mode_high_usage_enabled" field.
+func BurstModeHighUsageEnabledEQ(v bool) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldBurstModeHighUsageEnabled, v))
+}
+
+// BurstModeHighUsageEnabledNEQ applies the NEQ predicate on the "burst_mode_high_usage_enabled" field.
+func BurstModeHighUsageEnabledNEQ(v bool) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldBurstModeHighUsageEnabled, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

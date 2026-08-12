@@ -160,7 +160,7 @@ func (s *FailoverState) HandleFailoverError(
 	burst429 := service.BurstModeHandles429(ctx, failoverErr.StatusCode)
 	if burst429 {
 		failoverErr.RetryableOnSameAccount = true
-		retryLimit = service.BurstModeSameAccount429Retries
+		retryLimit = service.BurstMode429RetryLimit(ctx)
 		s.MaxSwitches = int(^uint(0) >> 1)
 	}
 

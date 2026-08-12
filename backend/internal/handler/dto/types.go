@@ -96,6 +96,8 @@ type Group struct {
 	IsExclusive               bool    `json:"is_exclusive"`
 	BurstModeEnabled          bool    `json:"burst_mode_enabled"`
 	BurstModeThresholdPercent int     `json:"burst_mode_threshold_percent"`
+	BurstMode429RetryCount    int     `json:"burst_mode_429_retry_count"`
+	BurstModeHighUsageEnabled bool    `json:"burst_mode_high_usage_enabled"`
 	Status                    string  `json:"status"`
 
 	SubscriptionType string   `json:"subscription_type"`
