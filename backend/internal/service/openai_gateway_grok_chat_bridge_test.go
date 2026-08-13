@@ -66,6 +66,11 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			reason: "invalid_service_tier",
 		},
 		{
+			name:   "unknown service tier falls back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"service_tier":"turbo"}`,
+			reason: "unsupported_service_tier",
+		},
+		{
 			name:   "stop falls back",
 			body:   `{"model":"grok","messages":[{"role":"user","content":"hi"}],"stop":"done"}`,
 			reason: "unsupported_stop",
@@ -91,6 +96,31 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			want: true,
 		},
 		{
+			name:   "responses input image part falls back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.com/a.png"}]}]}`,
+			reason: "unsupported_content_part_input_image",
+		},
+		{
+			name:   "missing image URL falls back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":[{"type":"image_url","image_url":{}}]}]}`,
+			reason: "invalid_image_url_content",
+		},
+		{
+			name:   "extra image part fields fall back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png"},"vendor_option":true}]}]}`,
+			reason: "unsupported_image_content_fields",
+		},
+		{
+			name:   "image detail falls back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png","detail":"high"}}]}]}`,
+			reason: "unsupported_image_url_field_detail",
+		},
+		{
+			name:   "empty base64 image falls back",
+			body:   `{"model":"grok","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,"}}]}]}`,
+			reason: "invalid_image_url_content",
+		},
+		{
 			name:   "unknown content part falls back",
 			body:   `{"model":"grok","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AA=="}}]}]}`,
 			reason: "unsupported_content_part_input_audio",
@@ -99,6 +129,11 @@ func TestGrokChatResponsesBridgeEligibility(t *testing.T) {
 			name:   "empty content array falls back",
 			body:   `{"model":"grok","messages":[{"role":"user","content":[]}]}`,
 			reason: "empty_message_content",
+		},
+		{
+			name:   "assistant structured image falls back",
+			body:   `{"model":"grok","messages":[{"role":"assistant","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]},{"role":"user","content":"continue"}]}`,
+			reason: "unsupported_assistant_structured_content",
 		},
 		{
 			name: "function tools bridge",
@@ -515,7 +550,7 @@ func TestForwardGrokChatViaResponsesStreamingPropagatesCachedUsage(t *testing.T)
 	require.Contains(t, recorder.Body.String(), "data: [DONE]")
 }
 
-func TestForwardGrokChatAlwaysUsesResponsesAndPreservesStreamType(t *testing.T) {
+func TestForwardCompatibleGrokChatUsesResponsesAndPreservesStreamType(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	tests := []struct {
@@ -582,6 +617,123 @@ func TestForwardGrokChatAlwaysUsesResponsesAndPreservesStreamType(t *testing.T) 
 	}
 }
 
+func TestForwardIncompatibleGrokChatUsesRawFallback(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name        string
+		body        string
+		accountType string
+	}{
+		{
+			name: "OAuth stop",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"stop":"done","stream":false}`,
+		},
+		{
+			name: "OAuth developer role",
+			body: `{"model":"grok","messages":[{"role":"developer","content":"rules"},{"role":"user","content":"hi"}],"stream":false}`,
+		},
+		{
+			name: "OAuth input audio",
+			body: `{"model":"grok","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AA=="}}]}],"stream":false}`,
+		},
+		{
+			name: "OAuth legacy functions",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"functions":[{"name":"lookup","parameters":{"type":"object"}}],"stream":false}`,
+		},
+		{
+			name: "OAuth named tool choice",
+			body: `{"model":"grok","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":{"type":"function","function":{"name":"lookup"}},"stream":false}`,
+		},
+		{
+			name:        "API key seed",
+			body:        `{"model":"grok","messages":[{"role":"user","content":"hi"}],"seed":7,"stream":false}`,
+			accountType: AccountTypeAPIKey,
+		},
+	}
+
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(tt.body)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
+
+			account := grokChatBridgeTestAccount(int64(79 + index))
+			if tt.accountType == AccountTypeAPIKey {
+				account.Type = AccountTypeAPIKey
+				account.Credentials = map[string]any{
+					"api_key":  "grok-api-key",
+					"base_url": xai.DefaultCLIBaseURL,
+				}
+			}
+			repo := &grokQuotaAccountRepo{mockAccountRepoForPlatform: &mockAccountRepoForPlatform{
+				accountsByID: map[int64]*Account{account.ID: account},
+			}}
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"id":"chat_raw","object":"chat.completion","model":"grok-4.5","choices":[{"index":0,"message":{"role":"assistant","content":"raw ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`,
+				)),
+			}}
+			svc := &OpenAIGatewayService{
+				httpUpstream:      upstream,
+				grokTokenProvider: NewGrokTokenProvider(repo, nil),
+				accountRepo:       repo,
+			}
+
+			result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
+			require.Equal(t, grokChatRawEndpoint, result.UpstreamEndpoint)
+			expected := ReplaceModelInBody(body, "grok-4.5")
+			require.JSONEq(t, string(expected), string(upstream.lastBody))
+			require.Equal(t, "raw ok", gjson.Get(recorder.Body.String(), "choices.0.message.content").String())
+		})
+	}
+}
+
+func TestForwardGrokChatViaResponsesRejectsImageModelBeforeUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"grok-imagine-image","messages":[{"role":"user","content":"draw a cat"}],"stream":false}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
+	account := grokChatBridgeTestAccount(789)
+	upstream := &httpUpstreamRecorder{}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
+
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "image model")
+	require.ErrorContains(t, err, "/v1/images/generations")
+	require.Nil(t, upstream.lastReq)
+}
+
+func TestForwardGrokChatViaResponsesRejectsMappedVideoModelBeforeUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"custom-video","messages":[{"role":"user","content":"make a clip"}],"stream":false}`)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
+	account := grokChatBridgeTestAccount(790)
+	account.Credentials["model_mapping"] = map[string]any{"custom-video": "xai/grok-imagine-video-1.5"}
+	upstream := &httpUpstreamRecorder{}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+
+	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
+
+	require.Nil(t, result)
+	require.ErrorContains(t, err, "video model")
+	require.ErrorContains(t, err, "/v1/videos/generations")
+	require.Nil(t, upstream.lastReq)
+}
+
 func TestForwardGrokChatViaResponses429UsesGrokRateLimitPolicy(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -628,7 +780,7 @@ func TestForwardGrokChatViaResponses429UsesGrokRateLimitPolicy(t *testing.T) {
 func TestForwardGrokChatResponses429PreservesRetryAfter(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	body := []byte(`{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":false,"stop":"done"}`)
+	body := []byte(`{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":false}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))
@@ -667,7 +819,7 @@ func TestForwardGrokChatResponses429PreservesRetryAfter(t *testing.T) {
 func TestForwardGrokChatResponsesErrorRecordsActualEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	body := []byte(`{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":false,"stop":"done"}`)
+	body := []byte(`{"model":"grok","messages":[{"role":"user","content":"hi"}],"stream":false}`)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, grokChatRawEndpoint, bytes.NewReader(body))

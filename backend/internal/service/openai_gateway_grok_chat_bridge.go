@@ -42,9 +42,10 @@ var grokChatResponsesBridgeTopLevelFields = map[string]struct{}{
 	"service_tier":          {},
 }
 
-// grokChatResponsesBridgeEligibility reports how closely a Chat Completions
-// body matches the lossless Responses subset. It is retained for compatibility
-// diagnostics and converter tests; Grok routing itself always uses Responses.
+// grokChatResponsesBridgeEligibility deliberately accepts only request shapes
+// whose Chat Completions semantics are preserved by the Responses bridge.
+// Everything else stays on raw Chat Completions rather than being silently
+// dropped or rewritten.
 func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil || root == nil {
@@ -74,8 +75,13 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 	}
 	if raw, exists := root["service_tier"]; exists {
 		var serviceTier string
-		if !grokChatJSONNull(raw) && json.Unmarshal(raw, &serviceTier) != nil {
-			return false, "invalid_service_tier"
+		if !grokChatJSONNull(raw) {
+			if json.Unmarshal(raw, &serviceTier) != nil {
+				return false, "invalid_service_tier"
+			}
+			if normalizedOpenAIServiceTierValue(serviceTier) == "" {
+				return false, "unsupported_service_tier"
+			}
 		}
 	}
 	if raw, exists := root["tools"]; exists {
@@ -220,14 +226,14 @@ func grokChatResponsesBridgeEligibility(body []byte) (bool, string) {
 				}
 				continue
 			}
-			if ok, reason := grokChatStructuredContentBridgeable(raw); !ok {
-				// The converter can still emit a standalone reasoning part when
-				// an otherwise empty content array accompanies reasoning_content.
-				// Do not broaden this exception to unsupported/malformed parts.
-				if !hasReasoningContent || reason != "empty_message_content" {
-					return false, reason
-				}
+			var parts []map[string]json.RawMessage
+			if json.Unmarshal(raw, &parts) != nil {
+				return false, "non_text_message_content"
 			}
+			if len(parts) == 0 && hasReasoningContent {
+				continue
+			}
+			return false, "unsupported_assistant_structured_content"
 		case "tool":
 			if ok, reason := grokChatMessageFieldsBridgeable(message, "role", "content", "tool_call_id"); !ok {
 				return false, reason
@@ -438,13 +444,36 @@ func grokChatStructuredContentBridgeable(raw json.RawMessage) (bool, string) {
 		}
 		switch strings.TrimSpace(partType) {
 		case "text":
+			if len(part) != 2 {
+				return false, "unsupported_text_content_fields"
+			}
 			var text string
-			if raw, ok := part["text"]; ok && json.Unmarshal(raw, &text) == nil {
-				if strings.TrimSpace(text) != "" {
-					hasContent = true
+			rawText, ok := part["text"]
+			if !ok || json.Unmarshal(rawText, &text) != nil {
+				return false, "invalid_text_content"
+			}
+			if strings.TrimSpace(text) != "" {
+				hasContent = true
+			}
+		case "image_url":
+			if len(part) != 2 {
+				return false, "unsupported_image_content_fields"
+			}
+			var image map[string]json.RawMessage
+			rawImage, ok := part["image_url"]
+			if !ok || json.Unmarshal(rawImage, &image) != nil || image == nil {
+				return false, "invalid_image_url_content"
+			}
+			for field := range image {
+				if field != "url" {
+					return false, "unsupported_image_url_field_" + field
 				}
 			}
-		case "image_url", "input_image":
+			var imageURL string
+			rawURL, ok := image["url"]
+			if !ok || json.Unmarshal(rawURL, &imageURL) != nil || strings.TrimSpace(imageURL) == "" || grokChatEmptyBase64DataURI(imageURL) {
+				return false, "invalid_image_url_content"
+			}
 			hasContent = true
 		default:
 			return false, "unsupported_content_part_" + strings.TrimSpace(partType)
@@ -454,6 +483,22 @@ func grokChatStructuredContentBridgeable(raw json.RawMessage) (bool, string) {
 		return false, "empty_message_content"
 	}
 	return true, ""
+}
+
+func grokChatEmptyBase64DataURI(raw string) bool {
+	if !strings.HasPrefix(raw, "data:") {
+		return false
+	}
+	rest := strings.TrimPrefix(raw, "data:")
+	semicolon := strings.Index(rest, ";")
+	if semicolon < 0 {
+		return false
+	}
+	rest = rest[semicolon+1:]
+	if !strings.HasPrefix(rest, "base64,") {
+		return false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(rest, "base64,")) == ""
 }
 
 func grokChatNullOrNone(raw json.RawMessage) bool {
@@ -518,6 +563,12 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	clientStream := chatReq.Stream
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
+	if isGrokImageGenerationModel(upstreamModel) {
+		return nil, fmt.Errorf("model %s is an image model and is not available on the Responses endpoint; use /v1/images/generations instead", upstreamModel)
+	}
+	if isGrokVideoGenerationModel(upstreamModel) {
+		return nil, fmt.Errorf("model %s is a video model and is not available on the Responses endpoint; use /v1/videos/generations instead", upstreamModel)
+	}
 	cacheIdentity := resolveGrokCacheIdentity(c, originalBody, promptCacheKey, upstreamModel)
 
 	token, tokenKind, err := s.getRequestCredential(ctx, c, account)
@@ -527,6 +578,7 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("account %d missing %s credential", account.ID, tokenKind)
 	}
+	requestAccount := grokAccountWithRequestAccessToken(account, token)
 
 	// Composer cannot consume image_url content directly. Preserve its vision
 	// description bridge, then convert the rewritten Chat turn to Responses.
@@ -595,7 +647,7 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 	if err != nil {
 		return nil, fmt.Errorf("apply grok responses bridge cache identity: %w", err)
 	}
-	responsesBody, err = applyGrokFreeRequestToolCacheRoute(c, responsesBody, intentBody, account, cacheIdentity)
+	responsesBody, err = applyGrokFreeRequestToolCacheRoute(c, responsesBody, intentBody, requestAccount, cacheIdentity)
 	if err != nil {
 		return nil, fmt.Errorf("apply grok responses bridge function-tool cache route: %w", err)
 	}
@@ -647,7 +699,7 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 			Kind:               kind,
 			Message:            upstreamMsg,
 		})
-		s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		s.handleGrokAccountUpstreamError(withGrokTeamRateLimitModel(ctx, upstreamModel), account, resp.StatusCode, resp.Header, respBody)
 		if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
@@ -659,7 +711,7 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 		return s.handleChatCompletionsErrorResponse(resp, c, account, billingModel)
 	}
 
-	s.updateGrokUsageFromResponse(ctx, account, resp.Header, resp.StatusCode)
+	s.updateGrokUsageFromResponse(withGrokTeamRateLimitModel(ctx, upstreamModel), account, resp.Header, resp.StatusCode)
 
 	var result *OpenAIForwardResult
 	if clientStream {

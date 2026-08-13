@@ -3,6 +3,8 @@
 package service
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,6 +25,43 @@ func newGrokCacheTestContext(apiKeyID int64) *gin.Context {
 		c.Set("api_key", &APIKey{ID: apiKeyID, Group: &Group{Platform: PlatformGrok}})
 	}
 	return c
+}
+
+func grokCacheJWT(t *testing.T, tier int) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"tier": tier})
+	require.NoError(t, err)
+	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+func TestGrokAccountWithRequestAccessTokenUsesCurrentJWTTier(t *testing.T) {
+	tests := []struct {
+		name       string
+		storedTier string
+		storedJWT  int
+		requestJWT int
+		wantTools  int
+	}{
+		{name: "paid to free first request", storedTier: "supergrok", storedJWT: 1, requestJWT: 0, wantTools: 3},
+		{name: "free to paid first request", storedTier: "free", storedJWT: 0, requestJWT: 1, wantTools: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := healthyGrokOAuthGatewayTestAccount(90190, grokCacheJWT(t, tt.storedJWT))
+			account.Credentials["subscription_tier"] = tt.storedTier
+			requestToken := grokCacheJWT(t, tt.requestJWT)
+
+			requestAccount := grokAccountWithRequestAccessToken(account, requestToken)
+			body := []byte(`{"model":"grok","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":"auto"}`)
+			patched, err := applyGrokFreeRequestToolCacheRoute(newGrokCacheTestContext(90190), body, body, requestAccount, "isolated-id")
+
+			require.NoError(t, err)
+			require.Len(t, gjson.GetBytes(patched, "tools").Array(), tt.wantTools)
+			require.Equal(t, grokCacheJWT(t, tt.storedJWT), account.GetCredential("access_token"), "scheduler account must remain unchanged")
+			require.Equal(t, requestToken, requestAccount.GetCredential("access_token"))
+		})
+	}
 }
 
 func TestGrokPreviousResponseSessionSeed(t *testing.T) {

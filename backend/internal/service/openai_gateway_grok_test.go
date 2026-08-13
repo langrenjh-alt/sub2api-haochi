@@ -56,6 +56,8 @@ func TestPatchGrokResponsesBodySanitizesComposerReasoningParameters(t *testing.T
 		{name: "composer legacy alias", upstreamModel: "composer-2.5"},
 		{name: "provider-prefixed composer", upstreamModel: "xai/grok-composer-2.5-fast"},
 		{name: "grok 4.5", upstreamModel: "grok-4.5", wantReasoning: true},
+		{name: "grok 4.6", upstreamModel: "grok-4.6", wantReasoning: true},
+		{name: "grok 4.6 latest", upstreamModel: "grok-4.6-latest", wantReasoning: true},
 	}
 
 	bodyTemplate := []byte(`{
@@ -445,6 +447,71 @@ func TestForwardGrokResponsesCodexAdditionalToolsUsesMixedCacheIntent(t *testing
 	require.NotEmpty(t, identity)
 	require.Equal(t, identity, upstream.lastReq.Header.Get(grokConversationIDHeader))
 	require.Empty(t, upstream.lastReq.Header.Get(grokClientToolCacheOptInHeader))
+}
+
+func TestForwardGrokResponsesRefreshUsesCurrentJWTTierForFirstRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name          string
+		storedTier    string
+		storedJWT     int
+		refreshedTier string
+		refreshedJWT  int
+		wantTools     int
+	}{
+		{name: "paid to free", storedTier: "supergrok", storedJWT: 1, refreshedTier: "free", refreshedJWT: 0, wantTools: 3},
+		{name: "free to paid", storedTier: "free", storedJWT: 0, refreshedTier: "supergrok", refreshedJWT: 1, wantTools: 1},
+	}
+
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			accountID := int64(4510 + index)
+			storedToken := grokCacheJWT(t, tt.storedJWT)
+			refreshedToken := grokCacheJWT(t, tt.refreshedJWT)
+			durable := healthyGrokOAuthGatewayTestAccount(accountID, storedToken)
+			durable.Credentials["subscription_tier"] = tt.storedTier
+			durable.Credentials["expires_at"] = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+			selected := snapshotOAuthRefreshAccount(durable)
+
+			repo := &tokenRefreshAccountRepo{snapshotReads: true}
+			repo.accountsByID = map[int64]*Account{accountID: durable}
+			cache := &grokTokenCacheForProviderTest{lockResult: true}
+			provider := NewGrokTokenProvider(repo, cache)
+			provider.SetRefreshAPI(NewOAuthRefreshAPI(repo, cache), &tokenRefresherStub{credentials: map[string]any{
+				"access_token":      refreshedToken,
+				"refresh_token":     "refreshed-token",
+				"expires_at":        time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+				"base_url":          xai.DefaultCLIBaseURL,
+				"subscription_tier": tt.refreshedTier,
+			}})
+
+			body := []byte(`{"model":"grok","input":"hi","stream":false,"prompt_cache_key":"refresh-session","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":"auto"}`)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+			c.Set("api_key", &APIKey{ID: accountID})
+			upstream := &httpUpstreamRecorder{resp: &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"id":"resp_refresh_tier","object":"response","model":"grok-4.5","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}`)),
+			}}
+			svc := &OpenAIGatewayService{
+				httpUpstream:      upstream,
+				grokTokenProvider: provider,
+				accountRepo:       repo,
+			}
+
+			result, err := svc.forwardGrokResponses(context.Background(), c, selected, body, "grok", false, time.Now())
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, "Bearer "+refreshedToken, upstream.lastReq.Header.Get("Authorization"))
+			require.Len(t, gjson.GetBytes(upstream.lastBody, "tools").Array(), tt.wantTools)
+			require.Equal(t, storedToken, selected.GetGrokAccessToken(), "scheduler snapshot must remain unchanged")
+			require.Equal(t, refreshedToken, repo.accountsByID[accountID].GetGrokAccessToken())
+		})
+	}
 }
 
 func TestForwardGrokResponsesClaudeDesktopClientToolsUseCacheRoute(t *testing.T) {
@@ -1644,7 +1711,7 @@ func healthyGrokOAuthGatewayTestAccount(id int64, token string) *Account {
 	}
 }
 
-func TestForwardAsChatCompletionsForGrokStopStillUsesXAIResponses(t *testing.T) {
+func TestForwardAsChatCompletionsForGrokStopUsesRawFallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
@@ -1659,7 +1726,13 @@ func TestForwardAsChatCompletionsForGrokStopStillUsesXAIResponses(t *testing.T) 
 			accountsByID: map[int64]*Account{51: account},
 		},
 	}
-	upstream := &httpUpstreamRecorder{resp: grokChatBridgeCompletedResponse("resp_stop_responses", 1)}
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(
+			`{"id":"chat_stop","object":"chat.completion","model":"grok-4.5","choices":[{"index":0,"message":{"role":"assistant","content":"raw stop ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		)),
+	}}
 	svc := &OpenAIGatewayService{
 		httpUpstream:      upstream,
 		grokTokenProvider: NewGrokTokenProvider(repo, nil),
@@ -1668,20 +1741,16 @@ func TestForwardAsChatCompletionsForGrokStopStillUsesXAIResponses(t *testing.T) 
 
 	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
 	require.NoError(t, err)
-	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
+	require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
 	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
-	identity := upstream.lastReq.Header.Get(grokConversationIDHeader)
-	require.NotEmpty(t, identity)
-	require.NotEqual(t, "raw-client-cache-key", identity)
 	require.Equal(t, "grok-4.5", gjson.GetBytes(upstream.lastBody, "model").String())
-	require.Equal(t, identity, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").String())
-	require.False(t, gjson.GetBytes(upstream.lastBody, "stop").Exists())
+	require.False(t, gjson.GetBytes(upstream.lastBody, "prompt_cache_key").Exists())
+	require.Equal(t, "done", gjson.GetBytes(upstream.lastBody, "stop").String())
 	require.Equal(t, "grok", result.Model)
 	require.Equal(t, "grok-4.5", result.UpstreamModel)
-	require.Equal(t, 9908, result.Usage.InputTokens)
-	require.Equal(t, 12, result.Usage.OutputTokens)
-	require.Equal(t, 1, result.Usage.CacheReadInputTokens)
-	require.NotNil(t, repo.updates[51][grokQuotaSnapshotExtraKey])
+	require.Equal(t, 3, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+	require.Zero(t, result.Usage.CacheReadInputTokens)
 	require.Equal(t, http.StatusOK, recorder.Code)
 }
 
@@ -2350,7 +2419,7 @@ func TestForwardGrokResponsesFailoverKeepsCacheIdentityAcrossAccounts(t *testing
 	require.Equal(t, "Bearer access-token-b", upstream.requests[1].Header.Get("Authorization"))
 }
 
-func TestForwardAsChatCompletionsForGrokStreamingStopUsesXAIResponses(t *testing.T) {
+func TestForwardAsChatCompletionsForGrokStreamingStopUsesRawFallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	recorder := httptest.NewRecorder()
@@ -2367,7 +2436,19 @@ func TestForwardAsChatCompletionsForGrokStreamingStopUsesXAIResponses(t *testing
 			accountsByID: map[int64]*Account{53: account},
 		},
 	}
-	upstream := &httpUpstreamRecorder{resp: grokChatBridgeCompletedResponse("resp_stream_stop_responses", 1)}
+	upstreamBody := strings.Join([]string{
+		`data: {"id":"chat_stream_stop","object":"chat.completion.chunk","model":"grok-4.5","choices":[{"index":0,"delta":{"content":"raw"}}]}`,
+		"",
+		`data: {"id":"chat_stream_stop","object":"chat.completion.chunk","model":"grok-4.5","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamBody)),
+	}}
 	svc := &OpenAIGatewayService{
 		cfg:               rawChatCompletionsTestConfig(),
 		httpUpstream:      upstream,
@@ -2377,22 +2458,16 @@ func TestForwardAsChatCompletionsForGrokStreamingStopUsesXAIResponses(t *testing
 
 	result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body, "", "")
 	require.NoError(t, err)
-	require.Equal(t, xai.DefaultCLIBaseURL+"/responses", upstream.lastReq.URL.String())
+	require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
 	require.Equal(t, "Bearer access-token", upstream.lastReq.Header.Get("Authorization"))
-	require.Equal(t, "application/json, text/event-stream", upstream.lastReq.Header.Get("Accept"))
-	require.Equal(t, xai.CLIUserAgent(xai.CLIClientVersion), upstream.lastReq.Header.Get("User-Agent"))
-	require.Equal(t, grokCLIVersion, upstream.lastReq.Header.Get("X-Grok-Client-Version"))
-	require.NotEmpty(t, upstream.lastReq.Header.Get(grokConversationIDHeader))
-	require.NotEqual(t, "native-client-conversation", upstream.lastReq.Header.Get(grokConversationIDHeader))
 	require.Equal(t, "grok-4.5", gjson.GetBytes(upstream.lastBody, "model").String())
 	require.True(t, gjson.GetBytes(upstream.lastBody, "stream").Bool())
-	require.False(t, gjson.GetBytes(upstream.lastBody, "stop").Exists())
+	require.Equal(t, "done", gjson.GetBytes(upstream.lastBody, "stop").String())
 	require.True(t, result.Stream)
-	require.Equal(t, 9908, result.Usage.InputTokens)
-	require.Equal(t, 12, result.Usage.OutputTokens)
-	require.Equal(t, 1, result.Usage.CacheReadInputTokens)
+	require.Equal(t, 3, result.Usage.InputTokens)
+	require.Equal(t, 2, result.Usage.OutputTokens)
+	require.Zero(t, result.Usage.CacheReadInputTokens)
 	require.Contains(t, recorder.Body.String(), "data: [DONE]")
-	require.NotNil(t, repo.updates[53][grokQuotaSnapshotExtraKey])
 }
 
 func TestForwardAsChatCompletionsForGrokComposerBridgesImageInput(t *testing.T) {

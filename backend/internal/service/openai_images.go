@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/imroc/req/v3"
@@ -465,7 +466,7 @@ func IsGPTImageGenerationModel(model string) bool {
 }
 
 func isGrokImageGenerationModel(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
+	model = strings.ToLower(xai.StripGrokProviderPrefix(model))
 	return model == "grok-imagine" ||
 		model == "grok-imagine-edit" ||
 		strings.HasPrefix(model, "grok-imagine-image")

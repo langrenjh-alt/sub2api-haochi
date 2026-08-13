@@ -272,8 +272,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	}
 	responsesBody = updatedBody
 	grokCacheIdentity := ""
+	var grokIntentBody []byte
 	if account.Platform == PlatformGrok {
-		grokIntentBody := responsesBody
+		grokIntentBody = responsesBody
 		grokCacheIdentity = resolveGrokCacheIdentity(c, grokIntentBody, promptCacheKey, upstreamModel)
 		patchedBody, patchErr := patchGrokResponsesBody(grokIntentBody, upstreamModel)
 		if patchErr != nil {
@@ -283,16 +284,19 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if patchErr != nil {
 			return nil, fmt.Errorf("apply grok prompt cache identity: %w", patchErr)
 		}
-		responsesBody, patchErr = applyGrokFreeMessagesFunctionToolCacheRoute(responsesBody, grokIntentBody, account, grokCacheIdentity)
-		if patchErr != nil {
-			return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", patchErr)
-		}
 	}
 
 	// 5. Get access token
 	token, _, err := s.getRequestCredential(ctx, c, account)
 	if err != nil {
 		return nil, fmt.Errorf("get access token: %w", err)
+	}
+	if account.Platform == PlatformGrok {
+		requestAccount := grokAccountWithRequestAccessToken(account, token)
+		responsesBody, err = applyGrokFreeMessagesFunctionToolCacheRoute(responsesBody, grokIntentBody, requestAccount, grokCacheIdentity)
+		if err != nil {
+			return nil, fmt.Errorf("apply grok Free function-tool cache route: %w", err)
+		}
 	}
 
 	// 6. Build upstream request
@@ -443,7 +447,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return s.handleAnthropicErrorResponse(resp, c, account, billingModel)
 	}
 	if account.Platform == PlatformGrok && account.Type == AccountTypeOAuth && !account.IsShadow() {
-		s.updateGrokUsageFromResponse(ctx, account, resp.Header, resp.StatusCode)
+		s.updateGrokUsageFromResponse(withGrokTeamRateLimitModel(ctx, upstreamModel), account, resp.Header, resp.StatusCode)
 	}
 
 	if account.Type == AccountTypeOAuth && promptCacheKey != "" {

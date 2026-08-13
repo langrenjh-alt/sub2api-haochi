@@ -266,6 +266,26 @@ func TestGroupHandlerEndpoints(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
+func TestGroupHandlerCreateLongContextPricingDefault(t *testing.T) {
+	router, adminSvc := setupAdminRouter()
+
+	request := func(body string) {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/groups", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(recorder, req)
+		require.Equal(t, http.StatusOK, recorder.Code)
+	}
+
+	request(`{"name":"legacy-client","platform":"anthropic","rate_multiplier":1}`)
+	require.Len(t, adminSvc.createdGroups, 1)
+	require.True(t, adminSvc.createdGroups[0].LongContextPricingEnabled)
+
+	request(`{"name":"explicit-disabled","platform":"anthropic","rate_multiplier":1,"long_context_pricing_enabled":false}`)
+	require.Len(t, adminSvc.createdGroups, 2)
+	require.False(t, adminSvc.createdGroups[1].LongContextPricingEnabled)
+}
+
 func TestProxyHandlerEndpoints(t *testing.T) {
 	router, _ := setupAdminRouter()
 

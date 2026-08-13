@@ -304,12 +304,31 @@ func applyGrokFreeToolCacheRoute(body, intentSourceBody []byte, account *Account
 	return appendGrokFreeCacheNativeToolsWithPolicy(body, allowPureClientTools, allowFunctionSearch)
 }
 
+// grokAccountWithRequestAccessToken returns a read-only account view whose JWT
+// tier matches the credential used by this request. Token refresh can replace
+// the durable account while the scheduler-owned Account pointer remains stale.
+func grokAccountWithRequestAccessToken(account *Account, accessToken string) *Account {
+	if account == nil || !account.IsGrokOAuth() || strings.TrimSpace(accessToken) == "" ||
+		strings.TrimSpace(account.GetCredential("access_token")) == strings.TrimSpace(accessToken) {
+		return account
+	}
+	cloned := *account
+	cloned.Credentials = shallowCopyMap(account.Credentials)
+	cloned.Credentials["access_token"] = accessToken
+	return &cloned
+}
+
 // isKnownGrokFreeAccount recognizes free-tier Grok accounts, used for
 // Free cache routing / media free_tier blocks (broader than soft-gate).
 // Soft-gate uses isExplicitGrokFreeOAuthAccount (exact "free" only).
 func isKnownGrokFreeAccount(account *Account) bool {
 	if account == nil || !account.IsGrokOAuth() {
 		return false
+	}
+	// Live access-token JWT wins over stale billing/credential snapshots
+	// so a downgrade to free is visible as soon as the AT is refreshed.
+	if jwtTier := xai.SubscriptionTierFromJWT(account.GetCredential("access_token")); jwtTier != "" {
+		return isGrokFreeSubscriptionTier(jwtTier)
 	}
 	freeSignal := false
 	paidSignal := false
@@ -360,8 +379,8 @@ func isKnownGrokFreeAccount(account *Account) bool {
 }
 
 func isGrokFreeSubscriptionTier(tier string) bool {
-	switch strings.ToLower(strings.TrimSpace(tier)) {
-	case "free", "grok-free", "grok_free", "free-tier", "free_tier", "basic", "grok-basic", "grok_basic":
+	switch xai.NormalizeSubscriptionTier(tier) {
+	case "free", "x_basic":
 		return true
 	default:
 		return false

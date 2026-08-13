@@ -278,6 +278,54 @@ func TestAPIKeyService_SnapshotRoundTrip_PreservesMessagesDispatchModelConfig(t 
 	require.Equal(t, apiKey.Group.MessagesDispatchModelConfig, roundTrip.Group.MessagesDispatchModelConfig)
 }
 
+func TestAPIKeyService_SnapshotRoundTrip_PreservesGroupModelPricing(t *testing.T) {
+	svc := NewAPIKeyService(nil, nil, nil, nil, nil, nil, &config.Config{})
+	groupID := int64(9)
+	apiKey := &APIKey{
+		ID:      1,
+		UserID:  2,
+		GroupID: &groupID,
+		Key:     "k-group-pricing",
+		Status:  StatusActive,
+		User:    &User{ID: 2, Status: StatusActive, Role: RoleUser},
+		Group: &Group{
+			ID:                        groupID,
+			Name:                      "openai",
+			Platform:                  PlatformOpenAI,
+			Status:                    StatusActive,
+			LongContextPricingEnabled: true,
+			ModelPricing: []ChannelModelPricing{{
+				Platform:    PlatformOpenAI,
+				Models:      []string{"gpt-5.4"},
+				BillingMode: BillingModeToken,
+				InputPrice:  groupDuplicateTestPointer(0.000001),
+				Intervals: []PricingInterval{{
+					MaxTokens:   groupDuplicateTestPointer(128000),
+					OutputPrice: groupDuplicateTestPointer(0.00002),
+				}},
+			}},
+		},
+	}
+
+	snapshot := svc.snapshotFromAPIKey(context.Background(), apiKey)
+	roundTrip := svc.snapshotToAPIKey(apiKey.Key, snapshot)
+
+	require.NotNil(t, roundTrip)
+	require.NotNil(t, roundTrip.Group)
+	require.True(t, roundTrip.Group.LongContextPricingEnabled)
+	require.Equal(t, apiKey.Group.ModelPricing, roundTrip.Group.ModelPricing)
+
+	roundTrip.Group.ModelPricing[0].Models[0] = "changed"
+	*roundTrip.Group.ModelPricing[0].InputPrice = 999
+	*roundTrip.Group.ModelPricing[0].Intervals[0].MaxTokens = 999
+	require.Equal(t, "gpt-5.4", snapshot.Group.ModelPricing[0].Models[0])
+	require.Equal(t, 0.000001, *snapshot.Group.ModelPricing[0].InputPrice)
+	require.Equal(t, 128000, *snapshot.Group.ModelPricing[0].Intervals[0].MaxTokens)
+	require.Equal(t, "gpt-5.4", apiKey.Group.ModelPricing[0].Models[0])
+	require.Equal(t, 0.000001, *apiKey.Group.ModelPricing[0].InputPrice)
+	require.Equal(t, 128000, *apiKey.Group.ModelPricing[0].Intervals[0].MaxTokens)
+}
+
 func TestAPIKeyService_SnapshotRoundTrip_PreservesReasoningEffortPolicy(t *testing.T) {
 	svc := NewAPIKeyService(nil, nil, nil, nil, nil, nil, &config.Config{})
 	groupID := int64(9)
