@@ -64,8 +64,21 @@ func resolveOpenAIWSDecisionByClientTransport(
 	decision OpenAIWSProtocolDecision,
 	clientTransport OpenAIClientTransport,
 ) OpenAIWSProtocolDecision {
-	if clientTransport == OpenAIClientTransportHTTP {
-		return openAIWSHTTPDecision("client_protocol_http")
+	// HTTP 入站不再强制改走 HTTP 上游。
+	// 全局 + 账号 WS 打开时，resolver 给出 ctx_pool/passthrough → 上游走 WS 池，
+	// Forward/forwardOpenAIWSV2 仍把事件写成客户端 HTTP/SSE。
+	// 账号 off、http_bridge、全局关闭时 resolver 已是 HTTP，这里保持原决策。
+	if clientTransport == OpenAIClientTransportHTTP && openAIWSDecisionUsesUpstreamWS(decision) {
+		if decision.Reason == "" {
+			decision.Reason = "http_ingress"
+		} else if !strings.HasSuffix(decision.Reason, "_http_ingress") {
+			decision.Reason += "_http_ingress"
+		}
 	}
 	return decision
+}
+
+func openAIWSDecisionUsesUpstreamWS(decision OpenAIWSProtocolDecision) bool {
+	return decision.Transport == OpenAIUpstreamTransportResponsesWebsocketV2 ||
+		decision.Transport == OpenAIUpstreamTransportResponsesWebsocket
 }
