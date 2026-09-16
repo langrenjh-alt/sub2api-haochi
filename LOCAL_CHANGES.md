@@ -287,6 +287,20 @@ go test -tags=unit ./internal/service -run 'TestResolveOpenAIWSDecisionByClientT
 
 cd ../frontend
 pnpm install --frozen-lockfile
+```
+
+Third-party merge verification (2026-09-16):
+
+```bash
+cd backend
+go build ./...
+go test -tags=unit ./...            # same failure set as the pristine f3217fa0b baseline
+go test -tags=unit ./internal/service -run 'TestOpenAIWSConnPool_EffectiveMaxConnsByAccount_ModeRouterV2|TestOpenAIWSConnPool_AcquireRetainedSessionsUsesScaledCapacity|TestMode1WSRuntimeConcurrencyCapCannotBeBypassed'
+#   conflict adjudication gate: fork factor expansion + third-party mode-1 cap coexist
+
+# migration replay against a real PostgreSQL (scratch database): the helpers used are
+# kept in ../thirdparty-merge-20260916/verification_tools/*.go.txt
+go run ./cmd/migcheck "host=127.0.0.1 port=5432 user=sub2api password=… dbname=<scratch> sslmode=disable"
 pnpm run typecheck
 pnpm run build
 ```
