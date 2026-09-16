@@ -33,6 +33,10 @@ func (h *GroupHandler) GetLiveCapability(c *gin.Context) {
 	if h.rejectUnsupportedSimpleModeOperation(c, "live_capability") {
 		return
 	}
+	if !service.LiveBillingAvailable() {
+		response.Success(c, gin.H{"supported": false, "reason": service.ErrLiveBillingUnavailable.Message})
+		return
+	}
 	err := liveattestation.NewProvider().Check(c.Request.Context())
 	result := gin.H{"supported": err == nil}
 	if err != nil {
@@ -182,21 +186,24 @@ func sanitizeUpdateGroupRequestForSimpleMode(req *UpdateGroupRequest) {
 
 // CreateGroupRequest represents create group request
 type CreateGroupRequest struct {
-	Name                      string                        `json:"name" binding:"required"`
-	Description               string                        `json:"description"`
-	Platform                  string                        `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek minimax opencode_go composite"`
-	RateMultiplier            float64                       `json:"rate_multiplier"`
-	IsExclusive               bool                          `json:"is_exclusive"`
-	BurstModeEnabled          bool                          `json:"burst_mode_enabled"`
-	BurstModeThresholdPercent *int                          `json:"burst_mode_threshold_percent" binding:"omitempty,min=1,max=100"`
-	BurstMode429RetryCount    *int                          `json:"burst_mode_429_retry_count" binding:"omitempty,min=1,max=100"`
-	BurstModeHighUsageEnabled bool                          `json:"burst_mode_high_usage_enabled"`
-	SubscriptionType          string                        `json:"subscription_type" binding:"omitempty,oneof=standard subscription"`
-	DailyLimitUSD             optionalLimitField            `json:"daily_limit_usd"`
-	WeeklyLimitUSD            optionalLimitField            `json:"weekly_limit_usd"`
-	MonthlyLimitUSD           optionalLimitField            `json:"monthly_limit_usd"`
-	LongContextPricingEnabled *bool                         `json:"long_context_pricing_enabled"`
-	ModelPricing              []service.ChannelModelPricing `json:"model_pricing"`
+	Name                       string                        `json:"name" binding:"required"`
+	Description                string                        `json:"description"`
+	Platform                   string                        `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek minimax opencode_go composite"`
+	RateMultiplier             float64                       `json:"rate_multiplier"`
+	IsExclusive                bool                          `json:"is_exclusive"`
+	BurstModeEnabled           bool                          `json:"burst_mode_enabled"`
+	BurstModeThresholdPercent  *int                          `json:"burst_mode_threshold_percent" binding:"omitempty,min=1,max=100"`
+	BurstMode429RetryCount     *int                          `json:"burst_mode_429_retry_count" binding:"omitempty,min=1,max=100"`
+	BurstModeHighUsageEnabled  bool                          `json:"burst_mode_high_usage_enabled"`
+	SubscriptionType           string                        `json:"subscription_type" binding:"omitempty,oneof=standard subscription"`
+	DailyLimitUSD              optionalLimitField            `json:"daily_limit_usd"`
+	WeeklyLimitUSD             optionalLimitField            `json:"weekly_limit_usd"`
+	MonthlyLimitUSD            optionalLimitField            `json:"monthly_limit_usd"`
+	LongContextPricingEnabled  *bool                         `json:"long_context_pricing_enabled"`
+	ModelPricing               []service.ChannelModelPricing `json:"model_pricing"`
+	SecurityPolicyEnabled      bool                          `json:"security_policy_enabled"`
+	SecurityPolicyMode         string                        `json:"security_policy_mode"`
+	SecurityPolicyEmailEnabled *bool                         `json:"security_policy_email_enabled"`
 	// 图片生成计费配置（antigravity 和 gemini 平台使用，负数表示清除配置）
 	AllowImageGeneration            bool                          `json:"allow_image_generation"`
 	AllowBatchImageGeneration       bool                          `json:"allow_batch_image_generation"`
@@ -260,22 +267,25 @@ type CreateGroupRequest struct {
 
 // UpdateGroupRequest represents update group request
 type UpdateGroupRequest struct {
-	Name                      string                         `json:"name"`
-	Description               *string                        `json:"description"`
-	Platform                  string                         `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek minimax opencode_go composite"`
-	RateMultiplier            *float64                       `json:"rate_multiplier"`
-	IsExclusive               *bool                          `json:"is_exclusive"`
-	BurstModeEnabled          *bool                          `json:"burst_mode_enabled"`
-	BurstModeThresholdPercent *int                           `json:"burst_mode_threshold_percent" binding:"omitempty,min=1,max=100"`
-	BurstMode429RetryCount    *int                           `json:"burst_mode_429_retry_count" binding:"omitempty,min=1,max=100"`
-	BurstModeHighUsageEnabled *bool                          `json:"burst_mode_high_usage_enabled"`
-	Status                    string                         `json:"status" binding:"omitempty,oneof=active inactive"`
-	SubscriptionType          string                         `json:"subscription_type" binding:"omitempty,oneof=standard subscription"`
-	DailyLimitUSD             optionalLimitField             `json:"daily_limit_usd"`
-	WeeklyLimitUSD            optionalLimitField             `json:"weekly_limit_usd"`
-	MonthlyLimitUSD           optionalLimitField             `json:"monthly_limit_usd"`
-	LongContextPricingEnabled *bool                          `json:"long_context_pricing_enabled"`
-	ModelPricing              *[]service.ChannelModelPricing `json:"model_pricing"`
+	Name                       string                         `json:"name"`
+	Description                *string                        `json:"description"`
+	Platform                   string                         `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok kimi zhipu deepseek minimax opencode_go composite"`
+	RateMultiplier             *float64                       `json:"rate_multiplier"`
+	IsExclusive                *bool                          `json:"is_exclusive"`
+	BurstModeEnabled           *bool                          `json:"burst_mode_enabled"`
+	BurstModeThresholdPercent  *int                           `json:"burst_mode_threshold_percent" binding:"omitempty,min=1,max=100"`
+	BurstMode429RetryCount     *int                           `json:"burst_mode_429_retry_count" binding:"omitempty,min=1,max=100"`
+	BurstModeHighUsageEnabled  *bool                          `json:"burst_mode_high_usage_enabled"`
+	Status                     string                         `json:"status" binding:"omitempty,oneof=active inactive"`
+	SubscriptionType           string                         `json:"subscription_type" binding:"omitempty,oneof=standard subscription"`
+	DailyLimitUSD              optionalLimitField             `json:"daily_limit_usd"`
+	WeeklyLimitUSD             optionalLimitField             `json:"weekly_limit_usd"`
+	MonthlyLimitUSD            optionalLimitField             `json:"monthly_limit_usd"`
+	LongContextPricingEnabled  *bool                          `json:"long_context_pricing_enabled"`
+	ModelPricing               *[]service.ChannelModelPricing `json:"model_pricing"`
+	SecurityPolicyEnabled      *bool                          `json:"security_policy_enabled"`
+	SecurityPolicyMode         *string                        `json:"security_policy_mode"`
+	SecurityPolicyEmailEnabled *bool                          `json:"security_policy_email_enabled"`
 	// 图片生成计费配置（antigravity 和 gemini 平台使用，负数表示清除配置）
 	AllowImageGeneration            *bool                         `json:"allow_image_generation"`
 	AllowBatchImageGeneration       *bool                         `json:"allow_batch_image_generation"`
@@ -679,6 +689,9 @@ func (h *GroupHandler) Create(c *gin.Context) {
 		BurstModeThresholdPercent:       req.BurstModeThresholdPercent,
 		BurstMode429RetryCount:          req.BurstMode429RetryCount,
 		BurstModeHighUsageEnabled:       req.BurstModeHighUsageEnabled,
+		SecurityPolicyEnabled:           req.SecurityPolicyEnabled,
+		SecurityPolicyMode:              req.SecurityPolicyMode,
+		SecurityPolicyEmailEnabled:      req.SecurityPolicyEmailEnabled,
 		SubscriptionType:                req.SubscriptionType,
 		DailyLimitUSD:                   req.DailyLimitUSD.ToServiceInput(),
 		WeeklyLimitUSD:                  req.WeeklyLimitUSD.ToServiceInput(),
@@ -828,6 +841,9 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		BurstModeThresholdPercent:       req.BurstModeThresholdPercent,
 		BurstMode429RetryCount:          req.BurstMode429RetryCount,
 		BurstModeHighUsageEnabled:       req.BurstModeHighUsageEnabled,
+		SecurityPolicyEnabled:           req.SecurityPolicyEnabled,
+		SecurityPolicyMode:              req.SecurityPolicyMode,
+		SecurityPolicyEmailEnabled:      req.SecurityPolicyEmailEnabled,
 		Status:                          req.Status,
 		SubscriptionType:                req.SubscriptionType,
 		DailyLimitUSD:                   req.DailyLimitUSD.ToServiceInput(),
@@ -925,23 +941,28 @@ func (h *GroupHandler) Delete(c *gin.Context) {
 // GetStats handles getting group statistics
 // GET /api/v1/admin/groups/:id/stats
 func (h *GroupHandler) GetStats(c *gin.Context) {
-	if h.rejectUnsupportedSimpleModeOperation(c, "stats") {
-		return
-	}
+	c.Header("Cache-Control", "no-store")
 	groupID, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
+	if err != nil || groupID < 1 {
 		response.BadRequest(c, "Invalid group ID")
 		return
 	}
 
-	// Return mock data for now
-	response.Success(c, gin.H{
-		"total_api_keys":  0,
-		"active_api_keys": 0,
-		"total_requests":  0,
-		"total_cost":      0.0,
-	})
-	_ = groupID // TODO: implement actual stats
+	var from, to *time.Time
+	for key, target := range map[string]**time.Time{"from": &from, "to": &to} {
+		if raw := strings.TrimSpace(c.Query(key)); raw != "" {
+			value, parseErr := time.Parse(time.RFC3339, raw)
+			if parseErr != nil {
+				response.BadRequest(c, "时间必须使用 ISO 8601 格式")
+				return
+			}
+			*target = &value
+		}
+	}
+	stats, err := h.dashboardService.GetGroupDetailStats(c.Request.Context(), groupID, from, to)
+	if !response.ErrorFrom(c, err) {
+		response.Success(c, stats)
+	}
 }
 
 // GetUsageSummary returns today's, yesterday's, and cumulative cost for all groups.

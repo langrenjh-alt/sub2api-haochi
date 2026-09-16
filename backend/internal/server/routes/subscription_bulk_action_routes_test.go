@@ -25,7 +25,8 @@ func TestSubscriptionBulkActionRoutesRequireAdminAuthentication(t *testing.T) {
 	})
 	auditLog := servermiddleware.AuditLogMiddleware(func(c *gin.Context) { c.Next() })
 	stepUp := servermiddleware.StepUpAuthMiddleware(func(c *gin.Context) { c.Next() })
-	RegisterAdminRoutes(router.Group("/api/v1"), handlers, adminAuth, auditLog, stepUp, nil, nil)
+	// userService 为用户层级（第三方二开）守卫依赖，测试中传 nil 表示不启用层级校验。
+	RegisterAdminRoutes(router.Group("/api/v1"), handlers, adminAuth, auditLog, stepUp, nil, nil, nil)
 
 	for _, path := range []string{"/api/v1/admin/subscriptions/bulk-action", "/api/v1/admin/subscriptions/bulk-assign"} {
 		for _, tc := range []struct {

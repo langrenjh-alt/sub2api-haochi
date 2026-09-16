@@ -143,8 +143,77 @@ restored for the OpenAI WS path:
 `openai_ws_pool.go`, `openai_ws_protocol_forward_test.go` and
 `openai_ws_forwarder_v2_test.go` are byte-identical to official `main`
 (`98d86915b`) again. The fork's `transient_html_403` WS dial classification
-stays, because it belongs to the fork's OpenAI 403 policy that also applies on
-the HTTP path.
+  stays, because it belongs to the fork's OpenAI 403 policy that also applies on
+  the HTTP path.
+
+## Third-Party 防降智 / 防并发 Fork Merge (2026-09-16)
+
+Source: `E:\sub2新站`, imported as snapshot commit
+`f8dc19fbdb0e1391b06e2de5539afdcfb3b45dc4` (theirs) and merged into fork commit
+`f3217fa0b`. The snapshot labels itself `0.2.4`, but its real base is official
+`98d86915b` (v0.2.4, May 2026) plus a large independent feature set, so the
+merge is theirs-into-ours: 312 files, +28654/-900. Backup of the pre-merge
+tree: branch `backup/pre-thirdparty-anti-degrade-20260916`; evidence:
+`E:\号池sub2api\thirdparty-merge-20260916\`.
+
+Adopted from the third-party snapshot:
+
+- Anti-degradation (防降智) account protection: `account_anti_degrade.go`,
+  `account_mode1_protection.go`, `account_protection*.go`, mode-1 semantics,
+  per-account TLS fingerprint transports (`internal/pkg/tlsfingerprint` builtin
+  profiles) and the protection runtime/transition/validation state.
+- Anti-concurrency-limit (防并发限制) behaviour: mode-1 effective concurrency
+  (`Account.Mode1EffectiveConcurrency()`) drives slot acquisition
+  (`tryAcquireAccountSlot`, `AccountWaitPlan.MaxConcurrency`, full-account
+  detection) in `openai_account_scheduler.go`, `openai_gateway_scheduling.go`,
+  `openai_plugin_transport.go`, `account_test_admission.go` and
+  `account_traffic_policy.go`. For accounts without anti-degradation the helper
+  returns `Concurrency`, so fork behaviour is unchanged.
+- Intelligent test / degrade detection, security policy keywords, support
+  tickets, user cleanup guards, spend guard, tiered routing, margin and global
+  model pricing, billing export, account traffic policy, legacy API keys and the
+  user-hierarchy guard (`middleware.UserHierarchyGuard`, which adds the
+  `userService` parameter to `routes.RegisterAdminRoutes`).
+- `backend/migrations/239_thirdparty_protection_schema.sql` was reconstructed by
+  hand: the snapshot ships the new entities, handlers and queries but its
+  `migrations/` directory stops at 134, so the DDL for the `groups`
+  security-policy columns, `api_keys.key_hash`/`key_prefix`,
+  `security_policy_keywords`, `global_model_pricing`, `test_settings`,
+  `account_tests`, `intelligent_test_requests`, `support_tickets`,
+  `support_ticket_replies` and the `user_cleanup_*` tables was derived field by
+  field from the snapshot's ent schemas and SQL queries.
+
+Conflict adjudications (fork choice wins wherever the third party regressed fork
+capacity work):
+
+- `openAIWSConnPool.effectiveMaxConnsByAccount`: the snapshot replaced the fork's
+  ModeRouterV2 factor expansion with a plain
+  `min(Mode1EffectiveConcurrency(), hardCap)`, which collapsed
+  `concurrency=1, factor=5` to `1`. The merge keeps *both*: the mode-1
+  protection cap still tightens `hardCap`, while the account-type factor
+  expansion (`OAuthMaxConnsFactor` / `APIKeyMaxConnsFactor`) and the
+  `<= 0 -> 0` rule stay. Third-party
+  `TestMode1WSRuntimeConcurrencyCapCannotBeBypassed` and the fork's
+  `TestOpenAIWSConnPool_EffectiveMaxConnsByAccount_ModeRouterV2` /
+  `TestOpenAIWSConnPool_AcquireRetainedSessionsUsesScaledCapacity` all pass on
+  the result.
+- The WS pool stays official for normal accounts: the extra
+  `conversationID`/`transportKey` handshake-compatibility keys and the
+  per-account TLS profile applied on dial are gated behind
+  `Account.AntiDegradationEnabled()`, so the WS 二开 removal documented above still
+  holds for every account without the protection enabled.
+- `service/account.go` conflict hunks and the v0.2.5 scheduler/queue-wait
+  behaviour (`DisableStickyEscape`, `queueWait`, `rewoken`) come from the fork;
+  `api_key_auth_cache` entry version bumped 25 -> 26 for the security-policy
+  fields. Generated code was regenerated after the merge (`go generate ./ent`,
+  `go generate ./cmd/server`) and produces no diff.
+- The snapshot's compiled admin UI (`backend/internal/web/dist`, 195 files) was
+  not taken: the snapshot ships no `frontend/` source, so the fork's own frontend
+  build is kept and the new admin surfaces are API-only until that source is
+  available.
+
+Merge verification (baseline vs merged, build/test/rollback) is recorded in
+`E:\号池sub2api\thirdparty-merge-20260916\merge_verification.txt`.
 
 ## Public Group Capacity Pool
 

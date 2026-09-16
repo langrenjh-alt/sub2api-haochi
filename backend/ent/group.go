@@ -50,6 +50,12 @@ type Group struct {
 	BurstMode429RetryCount int `json:"burst_mode_429_retry_count,omitempty"`
 	// 超刷模式是否优先将请求集中到用量 95% 以上的账号
 	BurstModeHighUsageEnabled bool `json:"burst_mode_high_usage_enabled,omitempty"`
+	// 分组安全策略总开关，默认关闭
+	SecurityPolicyEnabled bool `json:"security_policy_enabled,omitempty"`
+	// 安全策略命中后处置：block_session 断会话 / block_request 仅拦当次
+	SecurityPolicyMode string `json:"security_policy_mode,omitempty"`
+	// 安全策略命中是否邮件提醒用户
+	SecurityPolicyEmailEnabled bool `json:"security_policy_email_enabled,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
 	// 内部幂等恢复标识，不对 API 暴露
@@ -268,13 +274,13 @@ func (*Group) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case group.FieldVideoModelPrices, group.FieldModelPricing, group.FieldModelRouting, group.FieldSupportedModelScopes, group.FieldMessagesDispatchModelConfig, group.FieldModelAllowlist, group.FieldCodexModelsManifestConfig, group.FieldReasoningEffortMappings:
 			values[i] = new([]byte)
-		case group.FieldPeakRateEnabled, group.FieldIsExclusive, group.FieldBurstModeEnabled, group.FieldBurstModeHighUsageEnabled, group.FieldAllowImageGeneration, group.FieldAllowBatchImageGeneration, group.FieldImageRateIndependent, group.FieldVideoRateIndependent, group.FieldLongContextPricingEnabled, group.FieldClaudeCodeOnly, group.FieldModelRoutingEnabled, group.FieldMcpXMLInject, group.FieldAllowMessagesDispatch, group.FieldAllowLive, group.FieldForceOpenaiFast, group.FieldFreeOpenaiFast, group.FieldRequireOauthOnly, group.FieldRequirePrivacySet, group.FieldProfitControlEnabled:
+		case group.FieldPeakRateEnabled, group.FieldIsExclusive, group.FieldBurstModeEnabled, group.FieldBurstModeHighUsageEnabled, group.FieldSecurityPolicyEnabled, group.FieldSecurityPolicyEmailEnabled, group.FieldAllowImageGeneration, group.FieldAllowBatchImageGeneration, group.FieldImageRateIndependent, group.FieldVideoRateIndependent, group.FieldLongContextPricingEnabled, group.FieldClaudeCodeOnly, group.FieldModelRoutingEnabled, group.FieldMcpXMLInject, group.FieldAllowMessagesDispatch, group.FieldAllowLive, group.FieldForceOpenaiFast, group.FieldFreeOpenaiFast, group.FieldRequireOauthOnly, group.FieldRequirePrivacySet, group.FieldProfitControlEnabled:
 			values[i] = new(sql.NullBool)
 		case group.FieldRateMultiplier, group.FieldPeakRateMultiplier, group.FieldDailyLimitUsd, group.FieldWeeklyLimitUsd, group.FieldMonthlyLimitUsd, group.FieldImageRateMultiplier, group.FieldImagePrice1k, group.FieldImagePrice2k, group.FieldImagePrice4k, group.FieldBatchImageDiscountMultiplier, group.FieldBatchImageHoldMultiplier, group.FieldVideoRateMultiplier, group.FieldVideoPrice480p, group.FieldVideoPrice720p, group.FieldVideoPrice1080p, group.FieldWebSearchPricePerCall, group.FieldSearchPricePer1k, group.FieldAudioRealtimePricePerMin, group.FieldAudioTtsPricePerMillionChars, group.FieldAudioSttPricePerHour, group.FieldProfitMinMargin, group.FieldProfitSafetyBuffer:
 			values[i] = new(sql.NullFloat64)
 		case group.FieldID, group.FieldBurstModeThresholdPercent, group.FieldBurstMode429RetryCount, group.FieldDefaultValidityDays, group.FieldFallbackGroupID, group.FieldFallbackGroupIDOnInvalidRequest, group.FieldSortOrder, group.FieldRpmLimit:
 			values[i] = new(sql.NullInt64)
-		case group.FieldName, group.FieldDescription, group.FieldPeakStart, group.FieldPeakEnd, group.FieldStatus, group.FieldDuplicateOperationID, group.FieldPlatform, group.FieldSubscriptionType, group.FieldDefaultMappedModel, group.FieldMaxReasoningEffort, group.FieldMaxReasoningEffortOverLimit:
+		case group.FieldName, group.FieldDescription, group.FieldPeakStart, group.FieldPeakEnd, group.FieldSecurityPolicyMode, group.FieldStatus, group.FieldDuplicateOperationID, group.FieldPlatform, group.FieldSubscriptionType, group.FieldDefaultMappedModel, group.FieldMaxReasoningEffort, group.FieldMaxReasoningEffortOverLimit:
 			values[i] = new(sql.NullString)
 		case group.FieldCreatedAt, group.FieldUpdatedAt, group.FieldDeletedAt:
 			values[i] = new(sql.NullTime)
@@ -390,6 +396,24 @@ func (_m *Group) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field burst_mode_high_usage_enabled", values[i])
 			} else if value.Valid {
 				_m.BurstModeHighUsageEnabled = value.Bool
+			}
+		case group.FieldSecurityPolicyEnabled:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field security_policy_enabled", values[i])
+			} else if value.Valid {
+				_m.SecurityPolicyEnabled = value.Bool
+			}
+		case group.FieldSecurityPolicyMode:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field security_policy_mode", values[i])
+			} else if value.Valid {
+				_m.SecurityPolicyMode = value.String
+			}
+		case group.FieldSecurityPolicyEmailEnabled:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field security_policy_email_enabled", values[i])
+			} else if value.Valid {
+				_m.SecurityPolicyEmailEnabled = value.Bool
 			}
 		case group.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -878,6 +902,15 @@ func (_m *Group) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("burst_mode_high_usage_enabled=")
 	builder.WriteString(fmt.Sprintf("%v", _m.BurstModeHighUsageEnabled))
+	builder.WriteString(", ")
+	builder.WriteString("security_policy_enabled=")
+	builder.WriteString(fmt.Sprintf("%v", _m.SecurityPolicyEnabled))
+	builder.WriteString(", ")
+	builder.WriteString("security_policy_mode=")
+	builder.WriteString(_m.SecurityPolicyMode)
+	builder.WriteString(", ")
+	builder.WriteString("security_policy_email_enabled=")
+	builder.WriteString(fmt.Sprintf("%v", _m.SecurityPolicyEmailEnabled))
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)

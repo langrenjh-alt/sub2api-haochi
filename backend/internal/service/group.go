@@ -34,9 +34,12 @@ type Group struct {
 	// BurstMode429RetryCount limits same-account 429 retries in burst mode.
 	BurstMode429RetryCount int
 	// BurstModeHighUsageEnabled prioritizes accounts whose current usage is at least 95%.
-	BurstModeHighUsageEnabled bool
-	Status                    string
-	Hydrated                  bool // indicates the group was loaded from a trusted repository source
+	BurstModeHighUsageEnabled  bool
+	SecurityPolicyEnabled      bool
+	SecurityPolicyMode         string
+	SecurityPolicyEmailEnabled bool
+	Status                     string
+	Hydrated                   bool // indicates the group was loaded from a trusted repository source
 	// DuplicateOperationID is internal persistence metadata used only to recover
 	// an already committed one-click copy. It must never be mapped to API DTOs.
 	DuplicateOperationID string

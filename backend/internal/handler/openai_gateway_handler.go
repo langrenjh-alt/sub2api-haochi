@@ -40,6 +40,7 @@ type OpenAIGatewayHandler struct {
 	usageRecordWorkerPool      *service.UsageRecordWorkerPool
 	errorPassthroughService    *service.ErrorPassthroughService
 	contentModerationService   *service.ContentModerationService
+	securityPolicyService      *service.SecurityPolicyService
 	securityAuditCoordinator   *securityaudit.Coordinator
 	grokMediaEligibilityProber grokMediaEligibilityProber
 	opsService                 *service.OpsService
@@ -895,19 +896,19 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if ok {
 						sameAccountRetryCount[account.ID]++
 						burstRetryAccountID = account.ID
-							reqLog.Warn("openai.pool_mode_same_account_retry",
-								zap.Int64("account_id", account.ID),
-								zap.Int("upstream_status", failoverErr.StatusCode),
-								zap.Int("retry_limit", retryLimit),
-								zap.Int("retry_count", sameAccountRetryCount[account.ID]),
-								zap.Duration("retry_delay", retryDelay),
-							)
-							select {
-							case <-c.Request.Context().Done():
-								return
-							case <-time.After(retryDelay):
-							}
-							continue
+						reqLog.Warn("openai.pool_mode_same_account_retry",
+							zap.Int64("account_id", account.ID),
+							zap.Int("upstream_status", failoverErr.StatusCode),
+							zap.Int("retry_limit", retryLimit),
+							zap.Int("retry_count", sameAccountRetryCount[account.ID]),
+							zap.Duration("retry_delay", retryDelay),
+						)
+						select {
+						case <-c.Request.Context().Done():
+							return
+						case <-time.After(retryDelay):
+						}
+						continue
 					}
 					burstRetryAccountID = 0
 					h.gatewayService.RecordOpenAIAccountSwitch()
@@ -1451,19 +1452,19 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					if ok {
 						sameAccountRetryCount[account.ID]++
 						burstRetryAccountID = account.ID
-							reqLog.Warn("openai_messages.pool_mode_same_account_retry",
-								zap.Int64("account_id", account.ID),
-								zap.Int("upstream_status", failoverErr.StatusCode),
-								zap.Int("retry_limit", retryLimit),
-								zap.Int("retry_count", sameAccountRetryCount[account.ID]),
-								zap.Duration("retry_delay", retryDelay),
-							)
-							select {
-							case <-c.Request.Context().Done():
-								return
-							case <-time.After(retryDelay):
-							}
-							continue
+						reqLog.Warn("openai_messages.pool_mode_same_account_retry",
+							zap.Int64("account_id", account.ID),
+							zap.Int("upstream_status", failoverErr.StatusCode),
+							zap.Int("retry_limit", retryLimit),
+							zap.Int("retry_count", sameAccountRetryCount[account.ID]),
+							zap.Duration("retry_delay", retryDelay),
+						)
+						select {
+						case <-c.Request.Context().Done():
+							return
+						case <-time.After(retryDelay):
+						}
+						continue
 					}
 					burstRetryAccountID = 0
 					h.gatewayService.RecordOpenAIAccountSwitch()
@@ -2672,9 +2673,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			return
 		}
 		account := selection.Account
-		accountMaxConcurrency := account.Concurrency
+		accountMaxConcurrency := account.Mode1EffectiveConcurrency()
 		if selection.WaitPlan != nil && selection.WaitPlan.MaxConcurrency > 0 {
 			accountMaxConcurrency = selection.WaitPlan.MaxConcurrency
+		}
+		if account.IsMode1ProtectionEnabled() && (accountMaxConcurrency <= 0 || accountMaxConcurrency > account.Mode1EffectiveConcurrency()) {
+			accountMaxConcurrency = account.Mode1EffectiveConcurrency()
 		}
 		// 终检、准入后绑定与后续 turn 级复核都使用选号结果携带的门（composite
 		// 等跨分组调度的门只存在于调度栈局部 ctx）；准入成功后并入连接 ctx。
@@ -3373,6 +3377,10 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		return
 	}
 	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+	if failoverErr.Reason == "account_traffic_limit" {
+		h.handleStreamingAwareError(c, failoverErr.ClientStatusCode, service.AccountTrafficErrorType(failoverErr.ClientStatusCode), failoverErr.ClientMessage, streamStarted)
+		return
+	}
 	if failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
 		h.handleStreamingAwareError(c, status, "upstream_error", message, streamStarted)
@@ -3805,7 +3813,18 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 		if reason := strings.TrimSpace(string(failoverErr.Reason)); reason != "" {
 			errorCode = reason
 		}
-		if failoverErr.Stage == service.GatewayFailureStageAccountAuth {
+		if failoverErr.Reason == "account_traffic_limit" {
+			intendedStatus = failoverErr.StatusCode
+			errorType = service.AccountTrafficErrorType(intendedStatus)
+			message = failoverErr.ClientMessage
+			closeStatus = coderws.StatusTryAgainLater
+			if conn != nil {
+				payload, _ := json.Marshal(gin.H{"type": "error", "error": gin.H{"type": errorType, "code": errorCode, "message": message, "retry_after": failoverErr.ResponseHeaders.Get("Retry-After")}})
+				writeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = conn.Write(writeCtx, coderws.MessageText, payload)
+				cancel()
+			}
+		} else if failoverErr.Stage == service.GatewayFailureStageAccountAuth {
 			intendedStatus = http.StatusServiceUnavailable
 			errorType = "api_error"
 			message = service.GrokCredentialUnavailableClientMessage

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -81,6 +82,9 @@ type openAIWSAcquireRequest struct {
 	ForceNewConn bool
 	// ForcePreferredConn: 强制本次只使用 PreferredConnID，禁止漂移到其它连接。
 	ForcePreferredConn bool
+	// Snapshot retained for delayed prewarm; never silently re-resolve a new
+	// template under an old handshake compatibility key.
+	tlsProfile *tlsfingerprint.Profile
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
@@ -91,6 +95,8 @@ type openAIWSHandshakeCompatibilityKey struct {
 	threadID            string
 	clientRequestID     string
 	codexWindowID       string
+	conversationID      string
+	transportKey        string
 }
 
 type openAIWSConnLease struct {
@@ -1110,6 +1116,14 @@ func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireReque
 	if p != nil {
 		p.metrics.acquireTotal.Add(1)
 	}
+	profile, err := resolveMode1TLSProfile(req.Account)
+	if err != nil {
+		return nil, err
+	}
+	if profile != nil && p != nil && p.cfg != nil && !p.cfg.Gateway.TLSFingerprint.Enabled {
+		profile = nil
+	}
+	req.tlsProfile = profile
 	queueWait := &openAIWSAcquireQueueWait{}
 	lease, err := p.acquire(ctx, cloneOpenAIWSAcquireRequest(req), 0, queueWait)
 	if lease != nil && queueWait.rewoken {
@@ -1145,7 +1159,7 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 
 retryAcquire:
 	accountID := req.Account.ID
-	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	compatibility := openAIWSAcquireCompatibility(req)
 	routingAffinity := normalizeOpenAIWSRoutingAffinity(req.Headers)
 	effectiveMaxConns := p.effectiveMaxConnsByAccount(req.Account)
 	if effectiveMaxConns <= 0 {
@@ -2126,7 +2140,8 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			return nil, err
 		}
 	}
-	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	dialCtx := withOpenAIWSTLSProfile(ctx, req.Account.ID, req.tlsProfile)
+	conn, status, handshakeHeaders, err := p.clientDialer.Dial(dialCtx, req.WSURL, headers, req.ProxyURL)
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError
 		var responseBody []byte
@@ -2152,7 +2167,9 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	accountID := req.Account.ID
 	evict := func() { p.evictConn(accountID, id) }
 	pooledConn.onPeerClosed.Store(&evict)
-	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	// Third-party anti-degradation: the pooled connection must not be reused
+	// across a different per-account TLS transport profile.
+	pooledConn.handshakeCompatibility = openAIWSAcquireCompatibility(req)
 	pooledConn.routingAffinity = normalizeOpenAIWSRoutingAffinity(req.Headers)
 	return pooledConn, nil
 }
@@ -2218,16 +2235,25 @@ func (p *openAIWSConnPool) maxConnsFactorByAccount(account *Account) float64 {
 
 func (p *openAIWSConnPool) effectiveMaxConnsByAccount(account *Account) int {
 	hardCap := p.maxConnsHardCap()
+	// 账号级有效并发：mode1 防降智账号取保护上限，其余账号等价于 Concurrency。
+	effectiveConcurrency := 0
+	if account != nil {
+		effectiveConcurrency = account.Mode1EffectiveConcurrency()
+	}
+	if isMode1ProtectionEnabled(account) {
+		// 防降智并发上限同时收敛全局硬上限，避免账号级保护被放大系数绕过。
+		hardCap = min(hardCap, effectiveConcurrency)
+	}
 	if hardCap <= 0 {
 		return 0
 	}
-	if p.modeRouterV2Enabled() && account != nil && account.Concurrency <= 0 {
+	if p.modeRouterV2Enabled() && account != nil && effectiveConcurrency <= 0 {
 		return 0
 	}
 	if account == nil || !p.dynamicMaxConnsEnabled() {
 		return hardCap
 	}
-	if account.Concurrency <= 0 {
+	if effectiveConcurrency <= 0 {
 		// 0/-1 等“无限制”并发场景下，仍由全局硬上限兜底。
 		return hardCap
 	}
@@ -2235,7 +2261,7 @@ func (p *openAIWSConnPool) effectiveMaxConnsByAccount(account *Account) int {
 	if factor <= 0 {
 		factor = 1.0
 	}
-	effective := int(math.Ceil(float64(account.Concurrency) * factor))
+	effective := int(math.Ceil(float64(effectiveConcurrency) * factor))
 	if effective < 1 {
 		effective = 1
 	}
@@ -2319,6 +2345,9 @@ func cloneOpenAIWSAcquireRequest(req openAIWSAcquireRequest) openAIWSAcquireRequ
 	copied.WSURL = stringsTrim(req.WSURL)
 	copied.ProxyURL = stringsTrim(req.ProxyURL)
 	copied.PreferredConnID = stringsTrim(req.PreferredConnID)
+	if req.tlsProfile != nil {
+		copied.tlsProfile = req.tlsProfile.Clone()
+	}
 	return copied
 }
 
@@ -2333,7 +2362,15 @@ func cloneOpenAIWSAcquireRequestPtr(req *openAIWSAcquireRequest) *openAIWSAcquir
 func sameOpenAIWSPrewarmTarget(a, b openAIWSAcquireRequest) bool {
 	return stringsTrim(a.WSURL) == stringsTrim(b.WSURL) &&
 		stringsTrim(a.ProxyURL) == stringsTrim(b.ProxyURL) &&
-		normalizeOpenAIWSHandshakeCompatibility(a.Account, a.Headers) == normalizeOpenAIWSHandshakeCompatibility(b.Account, b.Headers)
+		openAIWSAcquireCompatibility(a) == openAIWSAcquireCompatibility(b)
+}
+
+func openAIWSAcquireCompatibility(req openAIWSAcquireRequest) openAIWSHandshakeCompatibilityKey {
+	key := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	if req.Account != nil {
+		key.transportKey = openAIWSTransportKey(req.Account.ID, req.WSURL, req.ProxyURL, req.tlsProfile)
+	}
+	return key
 }
 
 func normalizeOpenAIWSBetaFeatures(headers http.Header) string {
@@ -2370,7 +2407,7 @@ func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Head
 		return key
 	}
 	key.codexInstallationID = normalizeOpenAIWSStableIdentityHeader(headers, "x-codex-installation-id")
-	if mode == codexFingerprintDevice {
+	if mode == codexFingerprintDevice && !account.AntiDegradationEnabled() {
 		return key
 	}
 	key.sessionIDHyphen = normalizeOpenAIWSStableIdentityHeader(headers, "session-id")
@@ -2378,6 +2415,9 @@ func normalizeOpenAIWSHandshakeCompatibility(account *Account, headers http.Head
 	key.threadID = normalizeOpenAIWSStableIdentityHeader(headers, "thread-id")
 	key.clientRequestID = normalizeOpenAIWSStableIdentityHeader(headers, "x-client-request-id")
 	key.codexWindowID = normalizeOpenAIWSStableIdentityHeader(headers, "x-codex-window-id")
+	if account.AntiDegradationEnabled() {
+		key.conversationID = normalizeOpenAIWSStableIdentityHeader(headers, "conversation_id")
+	}
 	return key
 }
 

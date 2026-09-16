@@ -46,6 +46,12 @@ const (
 	FieldBurstMode429RetryCount = "burst_mode_429_retry_count"
 	// FieldBurstModeHighUsageEnabled holds the string denoting the burst_mode_high_usage_enabled field in the database.
 	FieldBurstModeHighUsageEnabled = "burst_mode_high_usage_enabled"
+	// FieldSecurityPolicyEnabled holds the string denoting the security_policy_enabled field in the database.
+	FieldSecurityPolicyEnabled = "security_policy_enabled"
+	// FieldSecurityPolicyMode holds the string denoting the security_policy_mode field in the database.
+	FieldSecurityPolicyMode = "security_policy_mode"
+	// FieldSecurityPolicyEmailEnabled holds the string denoting the security_policy_email_enabled field in the database.
+	FieldSecurityPolicyEmailEnabled = "security_policy_email_enabled"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldDuplicateOperationID holds the string denoting the duplicate_operation_id field in the database.
@@ -246,6 +252,9 @@ var Columns = []string{
 	FieldBurstModeThresholdPercent,
 	FieldBurstMode429RetryCount,
 	FieldBurstModeHighUsageEnabled,
+	FieldSecurityPolicyEnabled,
+	FieldSecurityPolicyMode,
+	FieldSecurityPolicyEmailEnabled,
 	FieldStatus,
 	FieldDuplicateOperationID,
 	FieldPlatform,
@@ -366,6 +375,14 @@ var (
 	BurstMode429RetryCountValidator func(int) error
 	// DefaultBurstModeHighUsageEnabled holds the default value on creation for the "burst_mode_high_usage_enabled" field.
 	DefaultBurstModeHighUsageEnabled bool
+	// DefaultSecurityPolicyEnabled holds the default value on creation for the "security_policy_enabled" field.
+	DefaultSecurityPolicyEnabled bool
+	// DefaultSecurityPolicyMode holds the default value on creation for the "security_policy_mode" field.
+	DefaultSecurityPolicyMode string
+	// SecurityPolicyModeValidator is a validator for the "security_policy_mode" field. It is called by the builders before save.
+	SecurityPolicyModeValidator func(string) error
+	// DefaultSecurityPolicyEmailEnabled holds the default value on creation for the "security_policy_email_enabled" field.
+	DefaultSecurityPolicyEmailEnabled bool
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// StatusValidator is a validator for the "status" field. It is called by the builders before save.
@@ -541,6 +558,21 @@ func ByBurstMode429RetryCount(opts ...sql.OrderTermOption) OrderOption {
 // ByBurstModeHighUsageEnabled orders the results by the burst_mode_high_usage_enabled field.
 func ByBurstModeHighUsageEnabled(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldBurstModeHighUsageEnabled, opts...).ToFunc()
+}
+
+// BySecurityPolicyEnabled orders the results by the security_policy_enabled field.
+func BySecurityPolicyEnabled(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSecurityPolicyEnabled, opts...).ToFunc()
+}
+
+// BySecurityPolicyMode orders the results by the security_policy_mode field.
+func BySecurityPolicyMode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSecurityPolicyMode, opts...).ToFunc()
+}
+
+// BySecurityPolicyEmailEnabled orders the results by the security_policy_email_enabled field.
+func BySecurityPolicyEmailEnabled(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSecurityPolicyEmailEnabled, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 25 // v25: official v24 model_allowlist plus fork burst-mode snapshot fields
+const apiKeyAuthSnapshotVersion = 26 // v26: v25 fork burst-mode snapshot fields plus third-party security-policy snapshot fields
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
@@ -387,6 +387,9 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			BurstModeThresholdPercent:       apiKey.Group.BurstModeThresholdPercent,
 			BurstMode429RetryCount:          burstMode429RetryCount(apiKey.Group),
 			BurstModeHighUsageEnabled:       apiKey.Group.BurstModeHighUsageEnabled,
+			SecurityPolicyEnabled:           apiKey.Group.SecurityPolicyEnabled,
+			SecurityPolicyMode:              apiKey.Group.SecurityPolicyMode,
+			SecurityPolicyEmailEnabled:      apiKey.Group.SecurityPolicyEmailEnabled,
 			Status:                          apiKey.Group.Status,
 			SubscriptionType:                apiKey.Group.SubscriptionType,
 			RateMultiplier:                  apiKey.Group.RateMultiplier,
@@ -492,6 +495,9 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			BurstModeThresholdPercent:       snapshot.Group.BurstModeThresholdPercent,
 			BurstMode429RetryCount:          snapshot.Group.BurstMode429RetryCount,
 			BurstModeHighUsageEnabled:       snapshot.Group.BurstModeHighUsageEnabled,
+			SecurityPolicyEnabled:           snapshot.Group.SecurityPolicyEnabled,
+			SecurityPolicyMode:              snapshot.Group.SecurityPolicyMode,
+			SecurityPolicyEmailEnabled:      snapshot.Group.SecurityPolicyEmailEnabled,
 			Status:                          snapshot.Group.Status,
 			Hydrated:                        true,
 			SubscriptionType:                snapshot.Group.SubscriptionType,

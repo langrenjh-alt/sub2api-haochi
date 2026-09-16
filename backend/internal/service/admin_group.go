@@ -519,6 +519,15 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		}
 	}
 
+	securityPolicyMode, err := validateSecurityPolicyModeForWrite(input.SecurityPolicyMode)
+	if err != nil {
+		return nil, err
+	}
+	securityPolicyEmailEnabled := true
+	if input.SecurityPolicyEmailEnabled != nil {
+		securityPolicyEmailEnabled = *input.SecurityPolicyEmailEnabled
+	}
+
 	// MCPXMLInject：默认为 true，仅当显式传入 false 时关闭
 	mcpXMLInject := true
 	if input.MCPXMLInject != nil {
@@ -576,6 +585,9 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		BurstModeThresholdPercent:       burstModeThresholdPercent,
 		BurstMode429RetryCount:          burstMode429RetryCount,
 		BurstModeHighUsageEnabled:       platform == PlatformOpenAI && input.BurstModeHighUsageEnabled,
+		SecurityPolicyEnabled:           input.SecurityPolicyEnabled,
+		SecurityPolicyMode:              securityPolicyMode,
+		SecurityPolicyEmailEnabled:      securityPolicyEmailEnabled,
 		Status:                          StatusActive,
 		SubscriptionType:                subscriptionType,
 		DailyLimitUSD:                   dailyLimit,
@@ -792,6 +804,19 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 			return nil, errors.New("rate_multiplier must be > 0")
 		}
 		group.RateMultiplier = *input.RateMultiplier
+	}
+	if input.SecurityPolicyEnabled != nil {
+		group.SecurityPolicyEnabled = *input.SecurityPolicyEnabled
+	}
+	if input.SecurityPolicyMode != nil {
+		mode, err := validateSecurityPolicyModeForWrite(*input.SecurityPolicyMode)
+		if err != nil {
+			return nil, err
+		}
+		group.SecurityPolicyMode = mode
+	}
+	if input.SecurityPolicyEmailEnabled != nil {
+		group.SecurityPolicyEmailEnabled = *input.SecurityPolicyEmailEnabled
 	}
 	if input.IsExclusive != nil {
 		group.IsExclusive = *input.IsExclusive
@@ -1364,6 +1389,9 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 	if err != nil {
 		return nil, err
 	}
+	if err := s.authorizeManagedUserResource(ctx, apiKey.UserID); err != nil {
+		return nil, err
+	}
 
 	if groupID == nil {
 		// nil 表示不修改，直接返回
@@ -1440,7 +1468,7 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 
 			// 失效认证缓存（在事务提交后执行）
 			if s.authCacheInvalidator != nil {
-				s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.Key)
+				s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.AuthCacheInvalidationKey())
 			}
 
 			result.APIKey = apiKey
@@ -1455,7 +1483,7 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 
 	// 失效认证缓存
 	if s.authCacheInvalidator != nil {
-		s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.Key)
+		s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.AuthCacheInvalidationKey())
 	}
 
 	result.APIKey = apiKey
@@ -1468,6 +1496,9 @@ func (s *adminServiceImpl) AdminResetAPIKeyRateLimitUsage(ctx context.Context, k
 	if err != nil {
 		return nil, err
 	}
+	if err := s.authorizeManagedUserResource(ctx, apiKey.UserID); err != nil {
+		return nil, err
+	}
 	apiKey.Usage5h = 0
 	apiKey.Usage1d = 0
 	apiKey.Usage7d = 0
@@ -1478,7 +1509,7 @@ func (s *adminServiceImpl) AdminResetAPIKeyRateLimitUsage(ctx context.Context, k
 		return nil, fmt.Errorf("reset api key rate limit usage: %w", err)
 	}
 	if s.authCacheInvalidator != nil {
-		s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.Key)
+		s.authCacheInvalidator.InvalidateAuthCacheByKey(ctx, apiKey.AuthCacheInvalidationKey())
 	}
 	if s.billingCacheService != nil {
 		_ = s.billingCacheService.InvalidateAPIKeyRateLimit(ctx, apiKey.ID)
@@ -1549,4 +1580,15 @@ func (s *adminServiceImpl) ReplaceUserGroup(ctx context.Context, userID, oldGrou
 	}
 
 	return &ReplaceUserGroupResult{MigratedKeys: migrated}, nil
+}
+
+func validateSecurityPolicyModeForWrite(mode string) (string, error) {
+	trimmed := strings.TrimSpace(mode)
+	if trimmed == "" {
+		return SecurityPolicyModeBlockSession, nil
+	}
+	if trimmed == SecurityPolicyModeBlockSession || trimmed == SecurityPolicyModeBlockRequest {
+		return trimmed, nil
+	}
+	return "", infraerrors.Newf(http.StatusBadRequest, "INVALID_SECURITY_POLICY_MODE", "security_policy_mode must be block_session or block_request, got %q", mode)
 }

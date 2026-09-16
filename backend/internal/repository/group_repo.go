@@ -105,6 +105,9 @@ func createGroupRecord(ctx context.Context, client *dbent.Client, groupIn *servi
 		SetBurstModeThresholdPercent(groupIn.BurstModeThresholdPercent).
 		SetBurstMode429RetryCount(groupIn.BurstMode429RetryCount).
 		SetBurstModeHighUsageEnabled(groupIn.BurstModeHighUsageEnabled).
+		SetSecurityPolicyEnabled(groupIn.SecurityPolicyEnabled).
+		SetSecurityPolicyMode(service.NormalizeSecurityPolicyMode(groupIn.SecurityPolicyMode)).
+		SetSecurityPolicyEmailEnabled(groupIn.SecurityPolicyEmailEnabled).
 		SetStatus(groupIn.Status).
 		SetSubscriptionType(groupIn.SubscriptionType).
 		SetNillableDailyLimitUsd(groupIn.DailyLimitUSD).
@@ -296,6 +299,9 @@ func (r *groupRepository) Update(ctx context.Context, groupIn *service.Group) er
 		SetBurstModeThresholdPercent(groupIn.BurstModeThresholdPercent).
 		SetBurstMode429RetryCount(groupIn.BurstMode429RetryCount).
 		SetBurstModeHighUsageEnabled(groupIn.BurstModeHighUsageEnabled).
+		SetSecurityPolicyEnabled(groupIn.SecurityPolicyEnabled).
+		SetSecurityPolicyMode(service.NormalizeSecurityPolicyMode(groupIn.SecurityPolicyMode)).
+		SetSecurityPolicyEmailEnabled(groupIn.SecurityPolicyEmailEnabled).
 		SetStatus(groupIn.Status).
 		SetSubscriptionType(groupIn.SubscriptionType).
 		SetNillableDailyLimitUsd(groupIn.DailyLimitUSD).

@@ -312,19 +312,19 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 					if ok {
 						sameAccountRetryCount[account.ID]++
 						burstRetryAccountID = account.ID
-							reqLog.Warn("openai.images.pool_mode_same_account_retry",
-								zap.Int64("account_id", account.ID),
-								zap.Int("upstream_status", failoverErr.StatusCode),
-								zap.Int("retry_limit", retryLimit),
-								zap.Int("retry_count", sameAccountRetryCount[account.ID]),
-								zap.Duration("retry_delay", retryDelay),
-							)
-							select {
-							case <-requestCtx.Done():
-								return
-							case <-time.After(retryDelay):
-							}
-							continue
+						reqLog.Warn("openai.images.pool_mode_same_account_retry",
+							zap.Int64("account_id", account.ID),
+							zap.Int("upstream_status", failoverErr.StatusCode),
+							zap.Int("retry_limit", retryLimit),
+							zap.Int("retry_count", sameAccountRetryCount[account.ID]),
+							zap.Duration("retry_delay", retryDelay),
+						)
+						select {
+						case <-requestCtx.Done():
+							return
+						case <-time.After(retryDelay):
+						}
+						continue
 					}
 					burstRetryAccountID = 0
 					h.gatewayService.RecordOpenAIAccountSwitch()

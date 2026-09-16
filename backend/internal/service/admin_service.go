@@ -233,21 +233,24 @@ type AdminBoundAuthIdentityChannel struct {
 }
 
 type CreateGroupInput struct {
-	Name                      string
-	Description               string
-	Platform                  string
-	RateMultiplier            float64
-	IsExclusive               bool
-	BurstModeEnabled          bool
-	BurstModeThresholdPercent *int
-	BurstMode429RetryCount    *int
-	BurstModeHighUsageEnabled bool
-	SubscriptionType          string   // standard/subscription
-	DailyLimitUSD             *float64 // 日限额 (USD)
-	WeeklyLimitUSD            *float64 // 周限额 (USD)
-	MonthlyLimitUSD           *float64 // 月限额 (USD)
-	LongContextPricingEnabled bool
-	ModelPricing              []ChannelModelPricing
+	Name                       string
+	Description                string
+	Platform                   string
+	RateMultiplier             float64
+	IsExclusive                bool
+	BurstModeEnabled           bool
+	BurstModeThresholdPercent  *int
+	BurstMode429RetryCount     *int
+	BurstModeHighUsageEnabled  bool
+	SubscriptionType           string   // standard/subscription
+	DailyLimitUSD              *float64 // 日限额 (USD)
+	WeeklyLimitUSD             *float64 // 周限额 (USD)
+	MonthlyLimitUSD            *float64 // 月限额 (USD)
+	LongContextPricingEnabled  bool
+	ModelPricing               []ChannelModelPricing
+	SecurityPolicyEnabled      bool
+	SecurityPolicyMode         string
+	SecurityPolicyEmailEnabled *bool
 	// 图片生成计费配置（仅 antigravity 平台使用）
 	AllowImageGeneration         bool
 	AllowBatchImageGeneration    bool
@@ -317,22 +320,25 @@ type CreateGroupInput struct {
 }
 
 type UpdateGroupInput struct {
-	Name                      string
-	Description               *string
-	Platform                  string
-	RateMultiplier            *float64 // 使用指针以支持设置为0
-	IsExclusive               *bool
-	BurstModeEnabled          *bool
-	BurstModeThresholdPercent *int
-	BurstMode429RetryCount    *int
-	BurstModeHighUsageEnabled *bool
-	Status                    string
-	SubscriptionType          string   // standard/subscription
-	DailyLimitUSD             *float64 // 日限额 (USD)
-	WeeklyLimitUSD            *float64 // 周限额 (USD)
-	MonthlyLimitUSD           *float64 // 月限额 (USD)
-	LongContextPricingEnabled *bool
-	ModelPricing              *[]ChannelModelPricing
+	Name                       string
+	Description                *string
+	Platform                   string
+	RateMultiplier             *float64 // 使用指针以支持设置为0
+	IsExclusive                *bool
+	BurstModeEnabled           *bool
+	BurstModeThresholdPercent  *int
+	BurstMode429RetryCount     *int
+	BurstModeHighUsageEnabled  *bool
+	Status                     string
+	SubscriptionType           string   // standard/subscription
+	DailyLimitUSD              *float64 // 日限额 (USD)
+	WeeklyLimitUSD             *float64 // 周限额 (USD)
+	MonthlyLimitUSD            *float64 // 月限额 (USD)
+	LongContextPricingEnabled  *bool
+	ModelPricing               *[]ChannelModelPricing
+	SecurityPolicyEnabled      *bool
+	SecurityPolicyMode         *string
+	SecurityPolicyEmailEnabled *bool
 	// 图片生成计费配置（仅 antigravity 平台使用）
 	AllowImageGeneration         *bool
 	AllowBatchImageGeneration    *bool
