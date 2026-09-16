@@ -26,7 +26,9 @@ func scanPublicIntelligent(row intelligentScanner) (*service.PublicAccountTest, 
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, service.ErrIntelligentTestNotFound
 	}
-	if err == nil {
+	// A NULL evaluation means the record predates its own result; that is not an
+	// error and must not take the whole public listing down with it.
+	if err == nil && len(raw) > 0 {
 		var evaluation map[string]any
 		if err = json.Unmarshal(raw, &evaluation); err == nil {
 			p.Evaluation = service.PublicIntelligentAssessment(evaluation)

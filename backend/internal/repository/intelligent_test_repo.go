@@ -34,12 +34,23 @@ func scanIntelligentRecord(row intelligentScanner) (*service.IntelligentTestReco
 	if err != nil {
 		return nil, err
 	}
+	// jsonb columns are NULL until a test writes them: a queued row has no
+	// evaluation yet, and the DDL that created these tables does not default
+	// them. Treating NULL as an empty value keeps the queue readable instead of
+	// failing every claim with "unexpected end of JSON input".
 	r.ConfigSnapshot = &service.IntelligentTestConfig{}
-	if err := json.Unmarshal(cfg, r.ConfigSnapshot); err != nil {
-		return nil, err
+	if len(cfg) > 0 {
+		if err := json.Unmarshal(cfg, r.ConfigSnapshot); err != nil {
+			return nil, err
+		}
 	}
-	if err := json.Unmarshal(eval, &r.Evaluation); err != nil {
-		return nil, err
+	if len(eval) > 0 {
+		if err := json.Unmarshal(eval, &r.Evaluation); err != nil {
+			return nil, err
+		}
+	}
+	if r.Evaluation == nil {
+		r.Evaluation = map[string]any{}
 	}
 	return r, nil
 }
@@ -81,8 +92,10 @@ func (r *intelligentTestRepository) Settings(ctx context.Context) ([]service.Int
 		if err := rows.Scan(&s.TestType, &s.Enabled, &s.UserVisible, &cfg, &s.UpdatedAt); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal(cfg, &s.Config); err != nil {
-			return nil, err
+		if len(cfg) > 0 {
+			if err := json.Unmarshal(cfg, &s.Config); err != nil {
+				return nil, err
+			}
 		}
 		s.Name = s.TestType
 		switch s.TestType {
