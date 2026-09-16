@@ -394,3 +394,72 @@ pnpm run build
 
 The migration and the detector SQL were replayed against a throwaway database
 cloned from the production schema (`../jiangzhi-20260916/sandbox_validate.sh`).
+---
+
+## 2026-09-16 — 公开页时间轴、作品管理与「标准答案」真正生效（`eaf1dcf2b`）
+
+线上验收暴露了三个只能在真机复现的问题，都已修在这个提交里，并在美东独服上
+用 `jiangzhi-20260916/deploy4.sh` 验证。
+
+### 1. 标准答案字段此前不影响判定（真 bug）
+
+`degradationRepository.EnqueueDegradationTest` 把 `ExpectedAnswer` 写死成
+`DegradationExpectedAnswer`（"21"），而暂停原因文本却读分组配置里的
+`expected_answer`。后果：把配置改成 29 后，探测仍然按 21 判分，于是
+`temp_unschedulable_reason` 出现自相矛盾的 `降智检测：答案 29（应为 29）`；
+也就是说 UI 上那个输入框根本管不到判分。
+
+修法：
+- `EnqueueDegradationTest` 增加 `expectedAnswer` 参数，分组配置里的值随队列行
+  写入 `config_snapshot`，runner 按快照判分；
+- 暂停原因改为引用**本次判分用的**那个值（`evaluation->>'expected_answer'`，
+  回退到快照、再回退到当前分组配置），保证「应为 X」永不和判定矛盾；
+- 只有 artwork 任务仍然不带答案（它按 svg_structure 评分）。
+
+回归测试：`TestEnqueuedTestsCarryTheGroupConfiguration`（配置 29 → 入队 29、
+artwork 不带答案）、`TestSuspendNoteQuotesTheGradedExpectation`（快照 29 而当前
+配置 21 时，文本必须写 29）。
+
+> 顺带记一个事实：`gpt-6-astra` 对这道糖果题稳定答 **29**，而 29 才是正确答案
+> （最多可取出 28 颗仍不满足条件：只取圆苹果 7 + 圆桃子 9 + 两种西瓜 12，
+> 故 29 才保证成立）。因此线上把分组 42 的 `expected_answer` 设为 29，否则
+> 会把健康账号全部判成降智。
+
+### 2. 公开页时间轴 + 缩略图
+
+- 新增 `GET /api/v1/jiangzhijiance/timeline?hours=24|72|168`：按桶聚合探测结论，
+  固定 24 个点（24h→60min/桶，3d→180min，7d→420min），只返回计数与
+  `current_state`，不含账号标识。`current_state` 取**最近一次**判定（新出现的
+  红点必须立刻可见），另附 `suspended_accounts`。
+- 列表接口不再内联 SVG：`DegradationPublicWork` 增加 `has_image`，原图仍走
+  `/records/:id/image`，一次页面加载从「6 张图 × 数 KB」降到几十字节。
+- 前端：`views/public/DegradationTimeline.vue`（inline SVG 柱状图 + 24h/3d/7d
+  切换 + 图例），`DegradationDetectionView.vue` 改为 3/4/5 列小图 + 点击灯箱看大图。
+
+### 3. 公开页可由运营管理（删除测试图）
+
+- `GET /api/v1/admin/degradation-detection/works`（分页列出现有作品）、
+  `DELETE /api/v1/admin/degradation-detection/works/:id`、
+  `POST /api/v1/admin/degradation-detection/works/purge`。
+- 删除语句只匹配 `test_type='degradation_preview'` 的行，时间轴背后的探测记录
+  无法通过这几个接口被删除（验证时 `probe_history` 计数保持不变）。
+- 分组编辑卡片里新增「公开页作品管理」：缩略图列表 + 单删 + 清空全部。
+
+### 验证
+
+```bash
+# 仓库侧
+gofmt -l internal/service internal/repository      # 无输出
+go vet ./internal/service/ ./internal/repository/ ./internal/handler/... ./internal/server/routes/
+go test -tags=unit -count=1 -run 'Degradation|PublicWorkCuration|EnqueuedTestsCarry|SuspendNoteQuotes' ./internal/service/
+cd ../frontend && pnpm run typecheck && pnpm run build
+
+# 线上侧（美东独服）
+bash /root/scp/deploy4.sh
+bash ROLLBACK.sh status
+```
+
+线上实测（`/root/scp/deploy4.log`）：`expected_answer_saved=29` →
+`probe id=8 verdict=correct expected=29 answer=29` → `detector_marker=cleared
+official_pause=lifted`；时间轴 `buckets=24 current_state=healthy`；作品单删后
+`image_after_delete=404`、`probe_history_untouched=7`；`claim_errors=0`。
