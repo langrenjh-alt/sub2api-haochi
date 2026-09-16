@@ -463,3 +463,46 @@ bash ROLLBACK.sh status
 `probe id=8 verdict=correct expected=29 answer=29` → `detector_marker=cleared
 official_pause=lifted`；时间轴 `buckets=24 current_state=healthy`；作品单删后
 `image_after_delete=404`、`probe_history_untouched=7`；`claim_errors=0`。
+
+---
+
+## 2026-09-16 追加 — 运营拍板：标准答案 = 21（线上实测结论）
+
+周总确认题面标准答案就是 **21**，因此分组 42 的 `expected_answer` 已由 29 改回 21
+（分组 43 本来就是 21）。改完立刻跑了一次探测：
+
+```
+probe id=16 verdict=incorrect expected=21 answer=29 ms=6156
+acct=123019 detector_until=2026-09-16 17:58:14+08
+note='降智检测：答案 29（应为 21），暂停调度 30 分钟'
+```
+
+注意这里判分与文案已经完全一致（`expected=21` ↔ 「应为 21」），也就是本次提交修的
+那个 bug 正常工作了：**配置什么就按什么判**。
+
+### 21 是否可达——四个模型的对照结果
+
+用一个**非降智类型**的一次性测试类型（`candy21`，同样的题面、expected=21、跑完即删）
+在同一账号 123019 上各跑一次，避免影响调度钩子：
+
+| 模型 | 答案 | 判定 |
+|---|---|---|
+| gpt-6-astra | 29 | incorrect |
+| gpt-5.6-sol | 29 | incorrect |
+| gpt-5.6 | 29 | incorrect |
+| gpt-5.5 | 36 | incorrect |
+
+结论：**这批模型没有一个答 21**；三个答 29（也正是本题的数学答案：最多能取出 28 颗
+仍不满足条件——只取圆苹果 7 + 圆桃子 9 + 圆西瓜 8 + 五角星西瓜 4，所以 29 才保证成立），
+gpt-5.5 答 36（安全但非最少）。
+
+### 运营含义（按当前配置）
+
+`expected_answer=21` + 检测开启时，任何走到这个检测的账号都会在每次探测后被判降智并
+暂停 30 分钟，而 10 分钟的探测节奏会不断续期，因此该账号会长期留在暂停态、不会被自动
+恢复。要保留「21 才算正常」的判据又不希望全线暂停，三个可选动作：
+
+1. 关掉该分组的降智检测开关（`enabled=false`），先只保留公开页；
+2. 把探测模型换成确实会答 21 的模型（当前池内尚未找到）；
+3. 把 `expected_answer` 改为 29，恢复「答对即放行」的行为（`bash ROLLBACK.sh config`
+   的反向操作：面板里改回 29 即可）。
