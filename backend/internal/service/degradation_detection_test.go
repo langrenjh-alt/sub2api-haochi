@@ -57,7 +57,7 @@ func TestNormalizeDegradationConfigCanonicalizesEffort(t *testing.T) {
 func TestValidateDegradationConfigRejectsBadInput(t *testing.T) {
 	base := NormalizeDegradationConfig(DegradationDetectionConfig{})
 	cases := map[string]func(c *DegradationDetectionConfig){
-		"interval too small":   func(c *DegradationDetectionConfig) { c.IntervalMinute = 0 },
+		"interval negative":    func(c *DegradationDetectionConfig) { c.IntervalMinute = -5 },
 		"interval too large":   func(c *DegradationDetectionConfig) { c.IntervalMinute = 1441 },
 		"suspend too large":    func(c *DegradationDetectionConfig) { c.SuspendMinute = 1441 },
 		"unsupported effort":   func(c *DegradationDetectionConfig) { c.ReasoningEffort = "turbo" },
@@ -71,6 +71,32 @@ func TestValidateDegradationConfigRejectsBadInput(t *testing.T) {
 		if err := ValidateDegradationConfig(cfg); err == nil {
 			t.Fatalf("%s: expected a validation error, got nil", name)
 		}
+	}
+}
+
+// An empty payload means "use the defaults"; a value that was actually supplied
+// must be rejected instead of being silently rewritten.
+func TestValidateDegradationConfigTreatsEmptyAsUnset(t *testing.T) {
+	if err := ValidateDegradationConfig(DegradationDetectionConfig{}); err != nil {
+		t.Fatalf("an empty payload must be accepted as defaults: %v", err)
+	}
+	if err := ValidateDegradationConfig(DegradationDetectionConfig{IntervalMinute: -5}); err == nil {
+		t.Fatal("a supplied but negative interval must be rejected")
+	}
+	if err := ValidateDegradationConfig(DegradationDetectionConfig{ReasoningEffort: "turbo"}); err == nil {
+		t.Fatal("a supplied but unsupported effort must be rejected")
+	}
+	// The two-pass contract the service uses: validate raw, normalize, validate.
+	raw := DegradationDetectionConfig{Enabled: true, IntervalMinute: 30, ReasoningEffort: "Extra_High"}
+	if err := ValidateDegradationConfig(raw); err != nil {
+		t.Fatalf("a valid raw payload must pass: %v", err)
+	}
+	normalized := NormalizeDegradationConfig(raw)
+	if normalized.ReasoningEffort != "xhigh" {
+		t.Fatalf("normalized effort = %q, want xhigh", normalized.ReasoningEffort)
+	}
+	if err := ValidateDegradationConfig(normalized); err != nil {
+		t.Fatalf("the normalized payload must pass: %v", err)
 	}
 }
 

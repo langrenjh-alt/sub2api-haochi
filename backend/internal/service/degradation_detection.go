@@ -150,34 +150,39 @@ func NormalizeDegradationConfig(cfg DegradationDetectionConfig) DegradationDetec
 	return cfg
 }
 
-// ValidateDegradationConfig rejects out-of-range operator input.
+// ValidateDegradationConfig rejects operator input that is present but invalid.
+//
+// A zero number or an empty string means "leave it to the defaults" and is
+// accepted; a value that was supplied and is out of range is an error rather
+// than something NormalizeDegradationConfig would silently rewrite. Callers
+// therefore validate the raw payload first and the normalized result second.
 func ValidateDegradationConfig(cfg DegradationDetectionConfig) error {
-	if cfg.IntervalMinute < degradationMinIntervalMinute || cfg.IntervalMinute > degradationMaxIntervalMinute {
+	if cfg.IntervalMinute != 0 && (cfg.IntervalMinute < degradationMinIntervalMinute || cfg.IntervalMinute > degradationMaxIntervalMinute) {
 		return errors.New("检测间隔必须在 1-1440 分钟之间")
 	}
-	if cfg.SuspendMinute < degradationMinSuspendMinute || cfg.SuspendMinute > degradationMaxSuspendMinute {
+	if cfg.SuspendMinute != 0 && (cfg.SuspendMinute < degradationMinSuspendMinute || cfg.SuspendMinute > degradationMaxSuspendMinute) {
 		return errors.New("暂停时长必须在 1-1440 分钟之间")
 	}
-	if cfg.PreviewIntervalMinute < degradationMinIntervalMinute || cfg.PreviewIntervalMinute > degradationMaxIntervalMinute {
+	if cfg.PreviewIntervalMinute != 0 && (cfg.PreviewIntervalMinute < degradationMinIntervalMinute || cfg.PreviewIntervalMinute > degradationMaxIntervalMinute) {
 		return errors.New("公开页刷新间隔必须在 1-1440 分钟之间")
 	}
-	if cfg.TimeoutSeconds < 30 || cfg.TimeoutSeconds > 600 {
+	if cfg.TimeoutSeconds != 0 && (cfg.TimeoutSeconds < 30 || cfg.TimeoutSeconds > 600) {
 		return errors.New("超时时间必须在 30-600 秒之间")
 	}
-	if cfg.Model == "" || len([]rune(cfg.Model)) > 200 {
-		return errors.New("模型 ID 不能为空且不超过 200 字符")
+	if len([]rune(strings.TrimSpace(cfg.Model))) > 200 {
+		return errors.New("模型 ID 不超过 200 字符")
 	}
-	if cfg.PreviewModel == "" || len([]rune(cfg.PreviewModel)) > 200 {
-		return errors.New("公开页模型 ID 不能为空且不超过 200 字符")
+	if len([]rune(strings.TrimSpace(cfg.PreviewModel))) > 200 {
+		return errors.New("公开页模型 ID 不超过 200 字符")
 	}
-	if NormalizeMaxReasoningEffort(cfg.ReasoningEffort) == "" {
+	if strings.TrimSpace(cfg.ReasoningEffort) != "" && NormalizeMaxReasoningEffort(cfg.ReasoningEffort) == "" {
 		return errors.New("思考强度必须是 minimal/low/medium/high/xhigh/max 之一")
 	}
-	if NormalizeMaxReasoningEffort(cfg.PreviewReasoningEffort) == "" {
+	if strings.TrimSpace(cfg.PreviewReasoningEffort) != "" && NormalizeMaxReasoningEffort(cfg.PreviewReasoningEffort) == "" {
 		return errors.New("公开页思考强度必须是 minimal/low/medium/high/xhigh/max 之一")
 	}
-	if cfg.ExpectedAnswer == "" || len([]rune(cfg.ExpectedAnswer)) > 200 {
-		return errors.New("标准答案不能为空且不超过 200 字符")
+	if len([]rune(strings.TrimSpace(cfg.ExpectedAnswer))) > 200 {
+		return errors.New("标准答案不超过 200 字符")
 	}
 	if len([]rune(cfg.Prompt)) > degradationMaxPromptRunes {
 		return errors.New("提示词超过 16000 字符上限")

@@ -270,6 +270,11 @@ func (s *DegradationService) Groups(ctx context.Context) ([]DegradationGroup, er
 }
 
 func (s *DegradationService) UpdateGroupConfig(ctx context.Context, actor, groupID int64, cfg DegradationDetectionConfig) (DegradationDetectionConfig, error) {
+	// Reject malformed input before the normalizer can paper over it, then
+	// validate the concrete values that will actually be persisted.
+	if err := ValidateDegradationConfig(cfg); err != nil {
+		return DegradationDetectionConfig{}, err
+	}
 	normalized := NormalizeDegradationConfig(cfg)
 	if err := ValidateDegradationConfig(normalized); err != nil {
 		return DegradationDetectionConfig{}, err
