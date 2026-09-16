@@ -271,7 +271,12 @@ func grokStructuredErrorMessageCandidates(body []byte) []string {
 // applyGrokForbiddenPolicy applies an administrator's existing temporary
 // unschedulable rules to a non-content 403. It reports true only when a rule
 // matched; unmatched responses retain the legacy entitlement cooldown.
+// Grok API-key pool-mode accounts skip this path so they never enter
+// temp-unschedulable, even when an explicit 403 rule would otherwise match.
 func (s *OpenAIGatewayService) applyGrokForbiddenPolicy(ctx context.Context, account *Account, responseBody []byte) bool {
+	if skipGrokPoolTempUnsched(account) {
+		return false
+	}
 	if account == nil || !account.IsTempUnschedulableEnabled() {
 		return false
 	}

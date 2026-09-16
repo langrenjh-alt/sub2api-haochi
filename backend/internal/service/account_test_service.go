@@ -1094,7 +1094,7 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 		clearGrokRateLimitAfterRecovery(ctx, s.accountRepo, account)
 	}
 	if s.accountRepo == nil || len(responseBody) == 0 {
-		if resp.StatusCode == http.StatusPaymentRequired && s.accountRepo != nil {
+		if resp.StatusCode == http.StatusPaymentRequired && s.accountRepo != nil && !skipGrokPoolTempUnsched(account) {
 			stateCtx, cancel := openAIAccountStateContext(ctx)
 			defer cancel()
 			_ = s.accountRepo.SetTempUnschedulable(stateCtx, account.ID, now.Add(30*time.Minute), "grok payment required")
@@ -1108,7 +1108,7 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 	if decision.Class == GrokFailureFreeUsage {
 		if resetAt, limited := grokRateLimitResetAtForAccount(account, snapshot, now); limited && resetAt.After(now) {
 			persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
-		} else {
+		} else if !skipGrokPoolTempUnsched(account) {
 			stateCtx, cancel := openAIAccountStateContext(ctx)
 			_ = s.accountRepo.SetTempUnschedulable(stateCtx, account.ID, now.Add(grokFreeUsageProbeCooldown), "grok free usage exhausted")
 			cancel()
@@ -1136,7 +1136,7 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 	if decision.Class == GrokFailureBilling && cooldown == 0 {
 		cooldown, reason = 30*time.Minute, "grok payment required"
 	}
-	if cooldown > 0 {
+	if cooldown > 0 && !skipGrokPoolTempUnsched(account) {
 		stateCtx, cancel := openAIAccountStateContext(ctx)
 		defer cancel()
 		until := now.Add(cooldown)

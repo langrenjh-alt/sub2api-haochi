@@ -14,6 +14,14 @@ const defaultGrokStreamIdleTimeout = 180 * time.Second
 // but is not immediately re-picked in a tight failover loop.
 const grokStreamIdleCooldown = 2 * time.Minute
 
+// skipGrokPoolTempUnsched reports whether a Grok API-key pool-mode account must
+// remain schedulable. Pool mode treats upstream failures, including stream idle
+// timeouts, as request-local retry/failover signals and never writes
+// temporary-unschedulable state.
+func skipGrokPoolTempUnsched(account *Account) bool {
+	return account != nil && account.Platform == PlatformGrok && account.IsPoolMode()
+}
+
 // resolveGrokStreamIdleTimeout returns the effective upstream-read idle timeout
 // for Grok streams. Prefers the global gateway setting when positive; otherwise
 // applies a Grok-only default so hung SSE bodies still fail over.

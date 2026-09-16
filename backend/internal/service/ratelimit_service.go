@@ -305,6 +305,7 @@ func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Accoun
 	}
 	if account.IsPoolMode() {
 		// 池模式只跳过默认账号状态处理；管理员显式配置的临时不可调度规则仍应生效。
+		// Grok API-key pool accounts never take temp-unschedulable, including custom rules.
 		// 401 保留现有认证错误语义，避免改变重复 401 的升级行为。
 		if statusCode != http.StatusUnauthorized && s.tryTempUnschedulable(ctx, account, statusCode, responseBody) {
 			return ErrorPolicyTempUnscheduled
@@ -340,6 +341,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 	}
 
 	// 池模式默认不标记本地账号状态；但管理员显式配置的临时不可调度规则优先。
+	// Grok API-key pool accounts skip temp-unschedulable entirely.
 	// 401 保留现有认证错误语义，不在这里改变池模式的认证处理。
 	if account.IsPoolMode() && !customErrorCodesEnabled {
 		if statusCode != http.StatusUnauthorized && s.tryTempUnschedulable(ctx, account, statusCode, responseBody) {
@@ -2309,6 +2311,9 @@ func (s *RateLimitService) HandleTempUnschedulable(ctx context.Context, account 
 	if account == nil {
 		return false
 	}
+	if skipGrokPoolTempUnsched(account) {
+		return false
+	}
 	if account.IsPoolMode() && !account.IsCustomErrorCodesEnabled() {
 		return false
 	}
@@ -2653,6 +2658,10 @@ func (s *RateLimitService) tryTempUnschedulable(ctx context.Context, account *Ac
 	if account == nil {
 		return false
 	}
+	if skipGrokPoolTempUnsched(account) {
+		slog.Info("grok_pool_mode_temp_unsched_skipped", "account_id", account.ID, "status_code", statusCode)
+		return false
+	}
 	if !account.IsTempUnschedulableEnabled() {
 		return false
 	}
@@ -2842,6 +2851,10 @@ func (s *RateLimitService) HandleStreamTimeout(ctx context.Context, account *Acc
 
 // triggerStreamTimeoutTempUnsched 触发流超时临时不可调度
 func (s *RateLimitService) triggerStreamTimeoutTempUnsched(ctx context.Context, account *Account, settings *StreamTimeoutSettings, model string) bool {
+	if skipGrokPoolTempUnsched(account) {
+		slog.Info("grok_pool_mode_temp_unsched_skipped", "account_id", account.ID, "reason", "stream_timeout", "model", model)
+		return false
+	}
 	now := time.Now()
 	until := now.Add(time.Duration(settings.TempUnschedMinutes) * time.Minute)
 

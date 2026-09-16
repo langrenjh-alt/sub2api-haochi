@@ -2027,10 +2027,11 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 
 	// Body-first free-usage / empty / billing / capacity must run before the
 	// status switch so non-429 free-usage bodies still cool the account.
-	// Pool-mode still skips durable mutation unless an explicit temp rule matches.
+	// Pool-mode Grok API-key accounts never persist temp-unschedulable state.
 	if decision.ShouldCooldown && decision.Class != GrokFailureNone && decision.Class != GrokFailureRateLimit {
 		if account.IsPoolMode() {
-			// Allow configured temp rules (403) below; skip default body cools.
+			// Skip default body cools. Pool-mode API keys also skip 403 temp
+			// rules below so they never enter temporary-unschedulable.
 		} else {
 			// A free-tier exhaustion message describes a rolling usage window. Use
 			// an upstream absolute reset (or Retry-After) when available; otherwise
@@ -2105,6 +2106,10 @@ func isGrokSpendingLimitError(responseBody []byte) bool {
 
 func (s *OpenAIGatewayService) tempUnscheduleGrok(ctx context.Context, account *Account, cooldown time.Duration, reason string) {
 	if s == nil || account == nil {
+		return
+	}
+	if skipGrokPoolTempUnsched(account) {
+		slog.Info("grok_pool_mode_temp_unsched_skipped", "account_id", account.ID, "reason", reason)
 		return
 	}
 	until := time.Now().Add(cooldown)
