@@ -522,3 +522,63 @@ gpt-5.5 答 36（安全但非最少）。
 
 因此线上保持 **`expected_answer=21`**（分组 42 / 43 均已确认），判据=池内主流答案，
 偏离者即被暂停并持续复检；`123019` 目前处于该策略下的暂停态。
+
+---
+
+## 2026-09-16 追加 — 作品一直生成失败的根因：原始日志 1 MiB 上限（不是超时）
+
+现象：分组 43（`不降智`，7 个 Codex 账号）开启「降智检测 + HTML/SVG 生成」之后，
+`degradation_preview` 记录清一色 `failed`，公开页 `total=0`。
+
+排查（`/root/scp/pelican_experiment.sh`：把同样的鹈鹕提示词塞进一次性测试类型
+`pelican600`，timeout=600s，跑完自动删除，不影响调度）：
+
+```
+id=47 acct=123036 status=failed ms=278372 raw_truncated=t raw_len=1048003 svg=0
+        err=upstream did not return a complete, nonempty test result
+```
+
+278 秒就结束了，远没到 300 秒的旧超时 —— **不是超时**。真正的原因在
+`internal/service/intelligent_test_runner.go` 的原始日志采集上限：
+
+- `intelligentCapture.Write` 写满 `1<<20` 就置 `truncated`；
+- 该标志直接进了失败判据（`... || recorder.truncated || capture.truncated`），
+  同时 `intelligentRawComplete(capture.body)` 因为日志被腰斩而看不到 `response.completed`
+  → `complete=false` → 整单判 failed；
+- 而 `result` 里其实已经是完整答案 + 完整 `<svg>…</svg>`（id=44 的 result 22,108 字符，
+  `</svg>` 落在第 22,099 字符）。
+
+线上数据把这根链条钉死：失败的 26/44/48/54 全部 `raw_truncated=t`、`raw_len≈1_048_0xx`
+（正好是 1 MiB 上限），而修复后的 62 号记录 `raw_truncated=f`、`raw_len=1,912,421`
+（1.82 MiB）—— 作品流本来就有将近 2 MiB，旧上限必然腰斩。
+
+修复（提交 `7eaa712e9`）：
+
+1. 上限放宽：原始日志 1 MiB → 8 MiB、客户端流 2 MiB → 16 MiB、上游 body 读取 4 MiB → 16 MiB；
+2. 判据与日志解耦：抽出 `intelligentObservationFailed(...)`，`capture.truncated` 只写进
+   `raw_truncated`（日志保真度标记），不再让整单失败；`intelligentRawComplete` 只在日志
+   **没有被截断**时才有否决权；
+3. 测试：`TestIntelligentCaptureBounded` 改为按常量取上限，新增
+   `TestIntelligentClippedRawLogStillCompletes`（6 条判据）；
+4. 线上配置：分组 42/43 的 `timeout_seconds` 300 → 600（作品实测 178–300s，留余量）。
+
+部署（`/root/scp/deploy6.sh`，退出码 0，末行 `DEPLOY6 OK`）：
+
+```
+sha    cb9dfa6f… -> 8f986156…
+版本   0.2.5-fork-artwork (commit 7eaa712e9)
+id=62 acct=123038 status=completed ms=218010 raw_truncated=false
+       raw_len=1912421 result_len=18050 img_len=20099
+公开页 /jiangzhijiance/ = 200；total=1；records/62/image = 200（20,432 bytes）
+探测   123032/123036/123037/123038 answer=21 verdict=correct
+```
+
+回退：`bash ROLLBACK.sh {repo|server|config}`（repo → b39345569、server → cb9dfa6f…、
+config → timeout 300）；已在 git worktree 副本上验证回退点（旧代码确实同时具备
+`1<<20` 上限和 `capture.truncated` 判失败）。
+
+### 顺带排除「gpt-6-astra 是不是降智的」
+
+同一批分组 43 账号对糖果题（短回答）每次都答 21 且判 correct，只有长输出的作品任务失败；
+差异只在响应体积，不在账号可用性 —— 既不是账号降智，也不是模型不可用，而是服务端
+自己的采集上限。
