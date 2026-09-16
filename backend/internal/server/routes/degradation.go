@@ -17,6 +17,12 @@ func RegisterDegradationAdminRoutes(admin *gin.RouterGroup, h *handler.Handlers)
 		detector.PUT("/groups/:id", h.Admin.Degradation.UpdateGroup)
 		detector.GET("/overview", h.Admin.Degradation.Overview)
 		detector.POST("/run", h.Admin.Degradation.Run)
+		// The public page is a curated surface: an operator lists what it renders
+		// and removes anything that should not be published (a stray test image,
+		// for example). Only artwork rows can be deleted.
+		detector.GET("/works", h.Admin.Degradation.Works)
+		detector.DELETE("/works/:id", h.Admin.Degradation.DeleteWork)
+		detector.POST("/works/purge", h.Admin.Degradation.PurgeWorks)
 	}
 }
 
@@ -35,6 +41,7 @@ func RegisterDegradationPublicRoutes(
 	public.Use(panelRateLimiter.PublicIP())
 	{
 		public.GET("", h.DegradationPublic.Page)
+		public.GET("/timeline", h.DegradationPublic.Timeline)
 		public.GET("/records/:id/image", h.DegradationPublic.Image)
 	}
 }

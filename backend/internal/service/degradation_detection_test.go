@@ -233,10 +233,28 @@ func TestDegradationProbeVerdicts(t *testing.T) {
 // --------------------------------------------------------------- fake repo
 
 type fakeDegradationRepo struct {
-	applied  []appliedOutcome
-	cfg      DegradationDetectionConfig
-	groupID  int64
-	cfgError error
+	works           *DegradationWorkPage
+	timeline        *DegradationTimeline
+	deletedWorks    []int64
+	purged          bool
+	purgedCount     int64
+	groups          []DegradationGroup
+	dueProbeIDs     []int64
+	previewGroupIDs []int64
+	duePreviewIDs   []int64
+	enqueued        []enqueuedTest
+	applied         []appliedOutcome
+	cfg             DegradationDetectionConfig
+	groupID         int64
+	cfgError        error
+}
+
+type enqueuedTest struct {
+	accountID int64
+	testType  string
+	model     string
+	effort    string
+	expected  string
 }
 
 type appliedOutcome struct {
@@ -246,7 +264,9 @@ type appliedOutcome struct {
 	note      string
 }
 
-func (f *fakeDegradationRepo) Groups(context.Context) ([]DegradationGroup, error) { return nil, nil }
+func (f *fakeDegradationRepo) Groups(context.Context) ([]DegradationGroup, error) {
+	return f.groups, nil
+}
 func (f *fakeDegradationRepo) UpdateGroupConfig(context.Context, int64, int64, DegradationDetectionConfig) error {
 	return nil
 }
@@ -255,13 +275,14 @@ func (f *fakeDegradationRepo) SetTestSettingEnabled(context.Context, string, boo
 }
 func (f *fakeDegradationRepo) PendingQueueDepth(context.Context) (int, error) { return 0, nil }
 func (f *fakeDegradationRepo) DueProbeAccountIDs(context.Context, int64, int, int) ([]int64, error) {
-	return nil, nil
+	return f.dueProbeIDs, nil
 }
 func (f *fakeDegradationRepo) DuePreviewAccountIDs(context.Context, []int64, int, int) ([]int64, error) {
-	return nil, nil
+	return f.duePreviewIDs, nil
 }
-func (f *fakeDegradationRepo) EnqueueDegradationTest(context.Context, int64, string, string, string, string, int) (int64, bool, error) {
-	return 0, false, nil
+func (f *fakeDegradationRepo) EnqueueDegradationTest(_ context.Context, accountID int64, testType, _ string, model, effort, expected string, _ int) (int64, bool, error) {
+	f.enqueued = append(f.enqueued, enqueuedTest{accountID: accountID, testType: testType, model: model, effort: effort, expected: expected})
+	return int64(len(f.enqueued)), true, nil
 }
 func (f *fakeDegradationRepo) ApplyProbeOutcome(_ context.Context, accountID int64, degraded bool, minutes int, note string) (bool, error) {
 	f.applied = append(f.applied, appliedOutcome{accountID, degraded, minutes, note})
@@ -276,9 +297,35 @@ func (f *fakeDegradationRepo) GroupConfig(context.Context, int64) (DegradationDe
 func (f *fakeDegradationRepo) AccountConfig(context.Context, int64) (int64, DegradationDetectionConfig, error) {
 	return f.groupID, f.cfg, f.cfgError
 }
-func (f *fakeDegradationRepo) PreviewGroups(context.Context) ([]int64, error) { return nil, nil }
+func (f *fakeDegradationRepo) PreviewGroups(context.Context) ([]int64, error) {
+	return f.previewGroupIDs, nil
+}
 func (f *fakeDegradationRepo) PublicPage(context.Context, int, int) (*DegradationPublicPage, error) {
 	return &DegradationPublicPage{}, nil
+}
+
+func (f *fakeDegradationRepo) Timeline(context.Context, int) (*DegradationTimeline, error) {
+	if f.timeline != nil {
+		return f.timeline, nil
+	}
+	return &DegradationTimeline{}, nil
+}
+
+func (f *fakeDegradationRepo) Works(context.Context, int, int) (*DegradationWorkPage, error) {
+	if f.works != nil {
+		return f.works, nil
+	}
+	return &DegradationWorkPage{}, nil
+}
+
+func (f *fakeDegradationRepo) DeleteWork(_ context.Context, id int64) (bool, error) {
+	f.deletedWorks = append(f.deletedWorks, id)
+	return id != 404, nil
+}
+
+func (f *fakeDegradationRepo) PurgeWorks(context.Context) (int64, error) {
+	f.purged = true
+	return f.purgedCount, nil
 }
 func (f *fakeDegradationRepo) PublicWork(context.Context, int64) (*DegradationPublicWork, error) {
 	return nil, ErrDegradationWorkNotFound
@@ -315,6 +362,12 @@ func TestHandleIntelligentTestOutcomeSuspendsAndRecovers(t *testing.T) {
 		t.Fatalf("note must record the observed answer, got %q", suspended.note)
 	}
 
+	// The note quotes the number the verdict was graded against, so the default
+	// configuration must not leak a different value into the reason text.
+	if !strings.Contains(suspended.note, "应为 "+DegradationExpectedAnswer) {
+		t.Fatalf("note must quote the graded expectation, got %q", suspended.note)
+	}
+
 	// A correct answer lifts it again.
 	repo.applied = nil
 	svc.HandleIntelligentTestOutcome(context.Background(), probeRecord(5, "correct", nil))
@@ -349,6 +402,81 @@ func TestRunNowSkipsDisabledGroups(t *testing.T) {
 	}
 }
 
+// The group config is the single source of truth for a probe: whatever answer
+// an operator saves there is what the queued row is graded against, and the
+// artwork job never carries an answer at all.
+func TestEnqueuedTestsCarryTheGroupConfiguration(t *testing.T) {
+	cfg := NormalizeDegradationConfig(DegradationDetectionConfig{
+		Enabled: true, PreviewEnabled: true, ExpectedAnswer: "29",
+		Model: "gpt-6-astra", ReasoningEffort: "high",
+		PreviewModel: "gpt-6-astra", PreviewReasoningEffort: "low",
+	})
+	if cfg.ExpectedAnswer != "29" {
+		t.Fatalf("the normalizer must keep an explicit answer, got %q", cfg.ExpectedAnswer)
+	}
+	repo := &fakeDegradationRepo{
+		cfg:             cfg,
+		groups:          []DegradationGroup{{GroupID: 42, GroupName: "prod", Config: cfg}},
+		dueProbeIDs:     []int64{7, 8},
+		previewGroupIDs: []int64{42},
+		duePreviewIDs:   []int64{9},
+	}
+	svc := NewDegradationService(repo)
+	queued, err := svc.RunNow(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("RunNow returned an error: %v", err)
+	}
+	if queued != 2 || len(repo.enqueued) != 2 {
+		t.Fatalf("queued = %d with %d rows, want 2 and 2", queued, len(repo.enqueued))
+	}
+	for _, row := range repo.enqueued {
+		if row.testType != DegradationTestTypeProbe || row.expected != "29" || row.model != "gpt-6-astra" || row.effort != "high" {
+			t.Fatalf("probe row lost the group config: %+v", row)
+		}
+	}
+
+	// The artwork job is the only other producer, and it must not pass a number.
+	svc.Tick(context.Background())
+	var previews int
+	for _, row := range repo.enqueued {
+		if row.testType != DegradationTestTypePreview {
+			continue
+		}
+		previews++
+		if row.expected != "" || row.effort != "low" {
+			t.Fatalf("artwork row must stay answerless at low effort: %+v", row)
+		}
+	}
+	if previews != 1 {
+		t.Fatalf("expected exactly one artwork row, got %d", previews)
+	}
+}
+
+// A slow probe can outlive an edit of the group config. The reason text must
+// keep quoting the number the answer was graded against, otherwise the page
+// shows "答案 29（应为 29）" and reads as a contradiction.
+func TestSuspendNoteQuotesTheGradedExpectation(t *testing.T) {
+	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{ExpectedAnswer: "21"})}
+	svc := NewDegradationService(repo)
+	svc.HandleIntelligentTestOutcome(context.Background(), probeRecord(5, "incorrect", map[string]any{
+		"normalized_answer": "29", "expected_answer": "29", "actual_answer": "29",
+	}))
+	if len(repo.applied) != 1 {
+		t.Fatalf("expected one outcome write, got %d", len(repo.applied))
+	}
+	note := repo.applied[0].note
+	if !strings.Contains(note, "应为 29") || strings.Contains(note, "应为 21") {
+		t.Fatalf("note must quote the graded expectation, got %q", note)
+	}
+
+	// An old row without the field still falls back to the live group config.
+	repo.applied = nil
+	svc.HandleIntelligentTestOutcome(context.Background(), probeRecord(5, "incorrect", map[string]any{"normalized_answer": "22"}))
+	if len(repo.applied) != 1 || !strings.Contains(repo.applied[0].note, "应为 21") {
+		t.Fatalf("legacy rows must fall back to the group config: %+v", repo.applied)
+	}
+}
+
 func TestSafePublicSVGDropsUnrenderableContent(t *testing.T) {
 	if safePublicSVG("") != "" {
 		t.Fatal("empty input must stay empty")
@@ -358,5 +486,41 @@ func TestSafePublicSVGDropsUnrenderableContent(t *testing.T) {
 	}
 	if safePublicSVG("not svg at all") != "" {
 		t.Fatal("non-SVG input must be dropped")
+	}
+}
+
+// The public page is operator-curated, so the panel pages through what it renders
+// and deletes entries. A delete must never reach storage with a nonsense id.
+func TestPublicWorkCurationPagingAndDeletion(t *testing.T) {
+	repo := &fakeDegradationRepo{works: &DegradationWorkPage{Total: 2, Items: []DegradationPublicWork{{ID: 7, HasImage: true}}}, purgedCount: 3}
+	svc := NewDegradationService(repo)
+
+	page, err := svc.Works(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("Works returned an error: %v", err)
+	}
+	if page.Total != 2 || len(page.Items) != 1 || !page.Items[0].HasImage {
+		t.Fatalf("Works lost the artwork list: %+v", page)
+	}
+
+	if _, err := svc.DeleteWork(context.Background(), 0); !errors.Is(err, ErrDegradationWorkNotFound) {
+		t.Fatalf("a zero identifier must be rejected before touching storage, got %v", err)
+	}
+	if len(repo.deletedWorks) != 0 {
+		t.Fatalf("rejected identifiers must not reach the repository: %v", repo.deletedWorks)
+	}
+	deleted, err := svc.DeleteWork(context.Background(), 12)
+	if err != nil || !deleted || len(repo.deletedWorks) != 1 || repo.deletedWorks[0] != 12 {
+		t.Fatalf("delete did not forward the identifier: deleted=%v err=%v calls=%v", deleted, err, repo.deletedWorks)
+	}
+
+	removed, err := svc.PurgeWorks(context.Background())
+	if err != nil || removed != 3 || !repo.purged {
+		t.Fatalf("purge result lost: removed=%d err=%v called=%v", removed, err, repo.purged)
+	}
+
+	timeline, err := svc.Timeline(context.Background(), 6)
+	if err != nil || timeline == nil {
+		t.Fatalf("Timeline must always answer: %v %+v", err, timeline)
 	}
 }

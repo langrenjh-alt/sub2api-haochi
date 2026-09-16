@@ -20,12 +20,16 @@ const (
 	// enqueueing once this many of its own tests are pending. The interval is a
 	// target, not a guarantee: coverage sweeps the stalest accounts first so a
 	// large group is still probed evenly, just slower than the nominal rate.
-	degradationMaxQueued = 200
+	degradationMaxQueued    = 200
 	degradationOverviewRows = 200
 )
 
 // DegradationService owns the periodic probe, the public artwork schedule and
 // the translation of a probe verdict into account scheduling.
+//
+// The answer a probe is graded against is read from the same group config the
+// admin panel edits and is copied into the queued row, so the verdict and the
+// operator-visible numbers can never disagree.
 //
 // It never runs a test itself: it enqueues rows that the shared
 // IntelligentTestService worker executes, and it reacts only to records that
@@ -143,7 +147,7 @@ func (s *DegradationService) enqueueProbe(ctx context.Context, accountID int64, 
 	if prompt == "" {
 		prompt = DegradationCandyPrompt
 	}
-	_, created, err := s.repo.EnqueueDegradationTest(ctx, accountID, DegradationTestTypeProbe, prompt, cfg.Model, cfg.ReasoningEffort, cfg.TimeoutSeconds)
+	_, created, err := s.repo.EnqueueDegradationTest(ctx, accountID, DegradationTestTypeProbe, prompt, cfg.Model, cfg.ReasoningEffort, cfg.ExpectedAnswer, cfg.TimeoutSeconds)
 	return created, err
 }
 
@@ -181,7 +185,8 @@ func (s *DegradationService) schedulePreview(ctx context.Context, groups []Degra
 	// model, effort, interval and timeout, not the picture.
 	prompt := DegradationPelicanPrompt
 	for _, accountID := range ids {
-		_, _, err := s.repo.EnqueueDegradationTest(ctx, accountID, DegradationTestTypePreview, prompt, cfg.PreviewModel, cfg.PreviewReasoningEffort, cfg.TimeoutSeconds)
+		// The artwork is graded by shape, not by a number, so no answer is passed.
+		_, _, err := s.repo.EnqueueDegradationTest(ctx, accountID, DegradationTestTypePreview, prompt, cfg.PreviewModel, cfg.PreviewReasoningEffort, "", cfg.TimeoutSeconds)
 		return err
 	}
 	return nil
@@ -240,7 +245,17 @@ func (s *DegradationService) HandleIntelligentTestOutcome(ctx context.Context, r
 	if minutes <= 0 {
 		minutes = DegradationDefaultSuspendMinute
 	}
-	note := fmt.Sprintf("%s：答案 %s（应为 %s），暂停调度 %d 分钟", DegradationSuspendReasonPrefix, fallback(answer, "非整数"), cfg.ExpectedAnswer, minutes)
+	// Report the number the verdict was actually produced against, not whatever
+	// the group is configured with now: an edit between the request and the
+	// verdict must not be able to print a self-contradicting note.
+	expected := strings.TrimSpace(stringField(record.Evaluation, "expected_answer"))
+	if expected == "" && record.ConfigSnapshot != nil {
+		expected = strings.TrimSpace(record.ConfigSnapshot.ExpectedAnswer)
+	}
+	if expected == "" {
+		expected = cfg.ExpectedAnswer
+	}
+	note := fmt.Sprintf("%s：答案 %s（应为 %s），暂停调度 %d 分钟", DegradationSuspendReasonPrefix, fallback(answer, "非整数"), fallback(expected, DegradationExpectedAnswer), minutes)
 	suspended, err := s.repo.ApplyProbeOutcome(handleCtx, record.AccountID, true, minutes, note)
 	if err != nil {
 		slog.Error("degradation suspension failed", "account_id", record.AccountID, "error", err)
@@ -363,4 +378,38 @@ func safePublicSVG(raw string) string {
 		return ""
 	}
 	return safe
+}
+
+// Timeline returns the public health chart. Probe verdicts are the only public
+// statement about degradation, and they are reduced to per-bucket counts.
+func (s *DegradationService) Timeline(ctx context.Context, hours int) (*DegradationTimeline, error) {
+	return s.repo.Timeline(ctx, hours)
+}
+
+// Works lists the artworks the public page renders. The portal is a curated
+// surface, so an operator needs to see and remove what is on it.
+func (s *DegradationService) Works(ctx context.Context, page, pageSize int) (*DegradationWorkPage, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 24
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	return s.repo.Works(ctx, page, pageSize)
+}
+
+// DeleteWork removes one artwork from the public feed.
+func (s *DegradationService) DeleteWork(ctx context.Context, id int64) (bool, error) {
+	if id < 1 {
+		return false, ErrDegradationWorkNotFound
+	}
+	return s.repo.DeleteWork(ctx, id)
+}
+
+// PurgeWorks empties the public feed and reports how many artworks went away.
+func (s *DegradationService) PurgeWorks(ctx context.Context) (int64, error) {
+	return s.repo.PurgeWorks(ctx)
 }

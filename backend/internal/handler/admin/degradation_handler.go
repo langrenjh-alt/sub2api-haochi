@@ -86,3 +86,60 @@ func (h *DegradationHandler) Run(c *gin.Context) {
 	}
 	response.Accepted(c, gin.H{"queued": queued})
 }
+
+// Works lists the artworks the public page currently renders, so the operator
+// can curate that page.
+func (h *DegradationHandler) Works(c *gin.Context) {
+	if _, ok := intelligentAdminActor(c); !ok {
+		return
+	}
+	page, size := 1, 24
+	if raw := c.Query("page"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			page = value
+		}
+	}
+	if raw := c.Query("page_size"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			size = value
+		}
+	}
+	out, err := h.svc.Works(c.Request.Context(), page, size)
+	if response.ErrorFrom(c, err) {
+		return
+	}
+	response.Success(c, out)
+}
+
+// DeleteWork removes one artwork from the public page.
+func (h *DegradationHandler) DeleteWork(c *gin.Context) {
+	if _, ok := intelligentAdminActor(c); !ok {
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id < 1 {
+		response.BadRequest(c, "invalid artwork identifier")
+		return
+	}
+	deleted, err := h.svc.DeleteWork(c.Request.Context(), id)
+	if response.ErrorFrom(c, err) {
+		return
+	}
+	if !deleted {
+		response.NotFound(c, "artwork not found")
+		return
+	}
+	response.Success(c, gin.H{"deleted": 1})
+}
+
+// PurgeWorks empties the public page in one call.
+func (h *DegradationHandler) PurgeWorks(c *gin.Context) {
+	if _, ok := intelligentAdminActor(c); !ok {
+		return
+	}
+	removed, err := h.svc.PurgeWorks(c.Request.Context())
+	if response.ErrorFrom(c, err) {
+		return
+	}
+	response.Success(c, gin.H{"deleted": removed})
+}

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
@@ -232,13 +234,21 @@ func (r *degradationRepository) PreviewGroups(ctx context.Context) ([]int64, err
 // EnqueueDegradationTest queues one probe. It is idempotent against an already
 // queued or running record of the same type and never uses the admin request
 // path, so the scheduler needs no actor.
-func (r *degradationRepository) EnqueueDegradationTest(ctx context.Context, accountID int64, testType, prompt, model, reasoningEffort string, timeoutSeconds int) (int64, bool, error) {
+func (r *degradationRepository) EnqueueDegradationTest(ctx context.Context, accountID int64, testType, prompt, model, reasoningEffort, expectedAnswer string, timeoutSeconds int) (int64, bool, error) {
+	// The runner resolves the verdict from this snapshot, so the group's
+	// configured answer has to travel with the row: reading the live group
+	// config at verdict time would grade the answer against a value that may
+	// have changed after the request was sent.
+	expected := strings.TrimSpace(expectedAnswer)
+	if expected == "" {
+		expected = service.DegradationExpectedAnswer
+	}
 	cfg := service.IntelligentTestConfig{
 		Prompt:          prompt,
 		Model:           model,
 		ReasoningEffort: reasoningEffort,
 		Evaluator:       degradationEvaluatorFor(testType),
-		ExpectedAnswer:  service.DegradationExpectedAnswer,
+		ExpectedAnswer:  expected,
 		TimeoutSeconds:  timeoutSeconds,
 		AnswerType:      "number",
 		AnswerFormat:    "free_text",
@@ -500,14 +510,16 @@ func (r *degradationRepository) PublicPage(ctx context.Context, page, pageSize i
 	if lastAt.Valid {
 		out.LastFinishedAt = &lastAt.Time
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT `+degradationPublicColumns+` FROM account_tests t WHERE t.test_type=$1 AND t.status NOT IN ('queued','running','cancelled') AND t.result_image <> '' ORDER BY t.id DESC LIMIT $2 OFFSET $3`,
+	// Artwork metadata only: the SVG body is fetched per tile from the image
+	// endpoint, so a page load never ships megabytes of markup.
+	rows, err := r.db.QueryContext(ctx, `SELECT `+degradationWorkColumns+` FROM account_tests t WHERE t.test_type=$1 AND t.status NOT IN ('queued','running','cancelled') AND t.result_image <> '' ORDER BY t.id DESC LIMIT $2 OFFSET $3`,
 		service.DegradationTestTypePreview, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		item, err := scanDegradationPublicWork(rows.Scan)
+		item, err := scanDegradationWorkRow(rows.Scan)
 		if err != nil {
 			return nil, err
 		}
@@ -534,4 +546,174 @@ func (r *degradationRepository) previewConfiguration(ctx context.Context) (servi
 func (r *degradationRepository) PublicWork(ctx context.Context, id int64) (*service.DegradationPublicWork, error) {
 	return scanDegradationPublicWork(r.db.QueryRowContext(ctx, `SELECT `+degradationPublicColumns+` FROM account_tests t WHERE t.id=$1 AND t.test_type=$2 AND t.status NOT IN ('queued','running','cancelled') AND t.result_image <> ''`,
 		id, service.DegradationTestTypePreview).Scan)
+}
+
+// degradationTimelineBuckets is the resolution of the public health chart. Every
+// range renders the same number of points so the chart never changes shape.
+const degradationTimelineBuckets = 24
+
+// degradationWorkColumns lists artwork metadata only. The SVG body never travels
+// in a list: it stays behind /records/:id/image, which matters because the public
+// page re-reads this list every few minutes.
+const degradationWorkColumns = `t.id,t.account_id,t.status,t.model,COALESCE(t.config_snapshot->>'reasoning_effort',''),t.duration_ms,t.created_at,t.finished_at,(COALESCE(t.result_image,'') <> '')`
+
+func scanDegradationWorkRow(scan func(...any) error) (*service.DegradationPublicWork, error) {
+	item := &service.DegradationPublicWork{}
+	var finishedAt sql.NullTime
+	if err := scan(&item.ID, &item.AccountID, &item.Status, &item.Model, &item.ReasoningEffort,
+		&item.DurationMS, &item.CreatedAt, &finishedAt, &item.HasImage); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, service.ErrDegradationWorkNotFound
+		}
+		return nil, err
+	}
+	if finishedAt.Valid {
+		item.FinishedAt = &finishedAt.Time
+	}
+	return item, nil
+}
+
+// Works lists the same rows the public page renders, for the admin panel. The
+// public page is a curated surface, so its rows have to be inspectable.
+func (r *degradationRepository) Works(ctx context.Context, page, pageSize int) (*service.DegradationWorkPage, error) {
+	out := &service.DegradationWorkPage{Page: page, PageSize: pageSize, Items: []service.DegradationPublicWork{}}
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_tests WHERE test_type=$1 AND status NOT IN ('queued','running')`,
+		service.DegradationTestTypePreview).Scan(&out.Total); err != nil {
+		return nil, err
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT `+degradationWorkColumns+` FROM account_tests t WHERE t.test_type=$1 AND t.status NOT IN ('queued','running') ORDER BY t.id DESC LIMIT $2 OFFSET $3`,
+		service.DegradationTestTypePreview, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		item, err := scanDegradationWorkRow(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out.Items = append(out.Items, *item)
+	}
+	return out, rows.Err()
+}
+
+// DeleteWork removes one artwork. Only artwork rows match, so the probe history
+// behind the public timeline can never be deleted through this call.
+func (r *degradationRepository) DeleteWork(ctx context.Context, id int64) (bool, error) {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM account_tests WHERE id=$1 AND test_type=$2`,
+		id, service.DegradationTestTypePreview)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// PurgeWorks clears the whole feed. A running artwork is left alone: it is still
+// writing its own row.
+func (r *degradationRepository) PurgeWorks(ctx context.Context) (int64, error) {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM account_tests WHERE test_type=$1 AND status NOT IN ('queued','running')`,
+		service.DegradationTestTypePreview)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// Timeline aggregates probe verdicts into fixed buckets. It is the public view
+// of detector history, so it returns counts and never rows.
+func (r *degradationRepository) Timeline(ctx context.Context, hours int) (*service.DegradationTimeline, error) {
+	if hours <= 0 {
+		hours = 24
+	}
+	if hours > 24*30 {
+		hours = 24 * 30
+	}
+	bucketMinutes := hours * 60 / degradationTimelineBuckets
+	if bucketMinutes < 1 {
+		bucketMinutes = 1
+	}
+	now := time.Now()
+	bucketSpan := time.Duration(bucketMinutes) * time.Minute
+	newest := now.Truncate(bucketSpan)
+	out := &service.DegradationTimeline{
+		RangeHours:   hours,
+		BucketMinute: bucketMinutes,
+		GeneratedAt:  now,
+		CurrentState: "unknown",
+		Buckets:      make([]service.DegradationTimelineBucket, 0, degradationTimelineBuckets),
+	}
+	index := make(map[int64]int, degradationTimelineBuckets)
+	for i := degradationTimelineBuckets - 1; i >= 0; i-- {
+		start := newest.Add(-time.Duration(i) * bucketSpan)
+		index[start.Unix()] = len(out.Buckets)
+		out.Buckets = append(out.Buckets, service.DegradationTimelineBucket{Start: start})
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT (floor(extract(epoch FROM COALESCE(t.finished_at,t.created_at)) / ($1::int * 60)) * $1::int * 60)::bigint AS bucket_epoch,
+       COUNT(*),
+       COUNT(*) FILTER (WHERE t.evaluation->>'answer_verdict' = 'correct'),
+       COUNT(*) FILTER (WHERE t.evaluation->>'answer_verdict' = 'incorrect'),
+       COUNT(*) FILTER (WHERE COALESCE(t.evaluation->>'answer_verdict','') NOT IN ('correct','incorrect'))
+FROM account_tests t
+WHERE t.test_type = $2 AND t.status NOT IN ('queued','running','cancelled')
+  AND COALESCE(t.finished_at,t.created_at) >= NOW() - make_interval(hours => $3::int)
+GROUP BY 1
+ORDER BY 1`,
+		bucketMinutes, service.DegradationTestTypeProbe, hours)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var epoch, total, correct, degraded, undetermined int64
+		if err := rows.Scan(&epoch, &total, &correct, &degraded, &undetermined); err != nil {
+			return nil, err
+		}
+		position, ok := index[epoch]
+		if !ok {
+			continue
+		}
+		bucket := &out.Buckets[position]
+		bucket.Total += total
+		bucket.Correct += correct
+		bucket.Degraded += degraded
+		bucket.Undetermined += undetermined
+		out.Total += total
+		out.Correct += correct
+		out.Degraded += degraded
+		out.Undetermined += undetermined
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// The headline state is the newest verdict, not the ratio: a single degraded
+	// probe in the most recent bucket is exactly what a visitor must see.
+	var lastAt sql.NullTime
+	var lastVerdict string
+	err = r.db.QueryRowContext(ctx, `SELECT COALESCE(finished_at,created_at), COALESCE(evaluation->>'answer_verdict','') FROM account_tests WHERE test_type=$1 AND status NOT IN ('queued','running','cancelled') ORDER BY id DESC LIMIT 1`,
+		service.DegradationTestTypeProbe).Scan(&lastAt, &lastVerdict)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if lastAt.Valid {
+		stamp := lastAt.Time
+		out.LastProbeAt = &stamp
+		switch lastVerdict {
+		case "correct":
+			out.CurrentState = "healthy"
+		case "incorrect":
+			out.CurrentState = "degraded"
+		}
+	}
+	if out.Total > 0 {
+		out.HealthyRatio = float64(out.Correct) / float64(out.Total)
+	}
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL AND degradation_suspended_until IS NOT NULL AND degradation_suspended_until > NOW()`).Scan(&out.Suspended); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

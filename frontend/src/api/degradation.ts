@@ -70,11 +70,12 @@ export interface DegradationOverview {
 export interface DegradationPublicWork {
   id: number
   account_id: number
-  status: string
-  model: string
-  reasoning_effort: string
-  image?: string
-  duration_ms: number
+	status: string
+	model: string
+	reasoning_effort: string
+	/** True when the row has a renderable artwork; the SVG body is fetched per tile. */
+	has_image: boolean
+	duration_ms: number
   created_at: string
   finished_at: string | null
 }
@@ -89,7 +90,38 @@ export interface DegradationPublicPage {
   page_size: number
   last_status: string
   last_finished_at: string | null
-  items: DegradationPublicWork[]
+	items: DegradationPublicWork[]
+}
+
+export interface DegradationTimelineBucket {
+	start: string
+	total: number
+	correct: number
+	degraded: number
+	undetermined: number
+}
+
+export interface DegradationTimeline {
+	range_hours: number
+	bucket_minutes: number
+	generated_at: string
+	total: number
+	correct: number
+	degraded: number
+	undetermined: number
+	healthy_ratio: number
+	current_state: 'healthy' | 'degraded' | 'unknown' | string
+	suspended_accounts: number
+	last_probe_at: string | null
+	buckets: DegradationTimelineBucket[]
+}
+
+/** Admin view of the artworks the public page renders. */
+export interface DegradationWorkPage {
+	total: number
+	page: number
+	page_size: number
+	items: DegradationPublicWork[]
 }
 
 export const DEFAULT_DEGRADATION_CONFIG: DegradationDetectionConfig = {
@@ -133,6 +165,26 @@ export async function runNow(groupId?: number): Promise<{ queued: number }> {
   return data
 }
 
+/** Admin: the artworks currently on the public page. */
+export async function listWorks(page = 1, pageSize = 24): Promise<DegradationWorkPage> {
+	const { data } = await apiClient.get<DegradationWorkPage>('/admin/degradation-detection/works', {
+		params: { page, page_size: pageSize },
+	})
+	return data
+}
+
+/** Admin: remove one artwork from the public page. */
+export async function deleteWork(id: number): Promise<{ deleted: number }> {
+	const { data } = await apiClient.delete<{ deleted: number }>(`/admin/degradation-detection/works/${id}`)
+	return data
+}
+
+/** Admin: clear the whole public feed. */
+export async function purgeWorks(): Promise<{ deleted: number }> {
+	const { data } = await apiClient.post<{ deleted: number }>('/admin/degradation-detection/works/purge')
+	return data
+}
+
 export async function publicPage(page = 1, pageSize = 6, signal?: AbortSignal): Promise<DegradationPublicPage> {
   const { data } = await apiClient.get<DegradationPublicPage>('/jiangzhijiance', {
     params: { page, page_size: pageSize },
@@ -141,13 +193,25 @@ export async function publicPage(page = 1, pageSize = 6, signal?: AbortSignal): 
   return data
 }
 
+/** Public verdict history behind the timeline chart. */
+export async function publicTimeline(hours = 24, signal?: AbortSignal): Promise<DegradationTimeline> {
+	const { data } = await apiClient.get<DegradationTimeline>('/jiangzhijiance/timeline', {
+		params: { hours },
+		signal,
+	})
+	return data
+}
+
 /** Public SVG endpoint. Kept as a URL so the browser can cache the artwork. */
 export function publicImageURL(id: number): string {
   return `/api/v1/jiangzhijiance/records/${id}/image`
 }
 
 export default {
-  listGroups,
+	listWorks,
+	deleteWork,
+	purgeWorks,
+	listGroups,
   updateGroup,
   overview,
   runNow,

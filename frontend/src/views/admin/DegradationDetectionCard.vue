@@ -117,6 +117,59 @@
       </div>
     </template>
 
+    <!-- 公开页是运营可管理的展台：这里能看能删，但只动画作本身。 -->
+    <div class="space-y-3 rounded-lg bg-gray-50 p-3 dark:bg-dark-800/60">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p class="text-xs font-medium text-gray-700 dark:text-gray-300">公开页作品管理</p>
+          <p class="input-hint">
+            当前展示 {{ worksTotal }} 幅。删除只影响公开页展示，不会动探测记录；运行中的画作不会被清掉。
+          </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <button type="button" class="btn btn-secondary" :disabled="worksLoading" @click="loadWorks">
+            {{ worksLoading ? '读取中…' : '刷新作品列表' }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-secondary"
+            :disabled="worksLoading || worksTotal === 0"
+            @click="purgeAllWorks"
+          >
+            清空全部作品
+          </button>
+        </div>
+      </div>
+
+      <div v-if="works.length" class="grid gap-3 sm:grid-cols-2">
+        <div
+          v-for="work in works"
+          :key="work.id"
+          class="flex items-center gap-3 rounded-lg border border-gray-200 bg-white p-2 dark:border-dark-700 dark:bg-dark-900"
+        >
+          <img
+            v-if="work.has_image"
+            :src="workImageURL(work.id)"
+            alt=""
+            class="h-14 w-14 flex-shrink-0 rounded-md bg-gray-50 object-contain dark:bg-dark-800"
+          />
+          <div class="min-w-0 flex-1">
+            <p class="truncate font-mono text-xs text-gray-600 dark:text-dark-200">#{{ work.id }} · {{ work.status }}</p>
+            <p class="mt-0.5 truncate font-mono text-[11px] text-gray-400 dark:text-dark-500">
+              {{ work.model }} · {{ formatWorkClock(work.created_at) }}
+            </p>
+          </div>
+          <button type="button" class="btn btn-secondary" :disabled="worksLoading" @click="removeWork(work.id)">
+            删除
+          </button>
+        </div>
+      </div>
+      <p v-else class="text-xs text-gray-400">公开页暂无作品。</p>
+      <p v-if="worksMessage" class="text-xs" :class="worksFailed ? 'text-red-600' : 'text-emerald-600'">
+        {{ worksMessage }}
+      </p>
+    </div>
+
     <div class="flex flex-wrap items-center gap-3">
       <button type="button" class="btn btn-secondary" :disabled="saving" @click="save">
         {{ saving ? '保存中…' : '保存降智检测' }}
@@ -138,11 +191,16 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import {
-  DEFAULT_DEGRADATION_CONFIG,
-  listGroups,
-  runNow as runDegradationNow,
-  updateGroup,
-  type DegradationDetectionConfig,
+	DEFAULT_DEGRADATION_CONFIG,
+	deleteWork,
+	listGroups,
+	listWorks,
+	publicImageURL,
+	purgeWorks,
+	runNow as runDegradationNow,
+	updateGroup,
+	type DegradationDetectionConfig,
+	type DegradationPublicWork,
 } from '@/api/degradation'
 
 const props = defineProps<{ groupId: number }>()
@@ -155,6 +213,12 @@ const saving = ref(false)
 const running = ref(false)
 const message = ref('')
 const failed = ref(false)
+
+const works = ref<DegradationPublicWork[]>([])
+const worksTotal = ref(0)
+const worksLoading = ref(false)
+const worksMessage = ref('')
+const worksFailed = ref(false)
 
 async function load() {
   if (!props.groupId) {
@@ -206,11 +270,71 @@ async function runNow() {
   }
 }
 
+function workImageURL(id: number): string {
+	return publicImageURL(id)
+}
+
+function formatWorkClock(raw: string | null): string {
+	if (!raw) return '--'
+	const date = new Date(raw)
+	if (Number.isNaN(date.getTime())) return '--'
+	const pad = (value: number) => value.toString().padStart(2, '0')
+	return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+async function loadWorks() {
+	worksLoading.value = true
+	try {
+		const page = await listWorks(1, 12)
+		works.value = page.items ?? []
+		worksTotal.value = page.total ?? 0
+		worksMessage.value = ''
+		worksFailed.value = false
+	} catch (error) {
+		worksFailed.value = true
+		worksMessage.value = extractMessage(error) || '读取公开页作品失败'
+	} finally {
+		worksLoading.value = false
+	}
+}
+
+async function removeWork(id: number) {
+	worksLoading.value = true
+	try {
+		await deleteWork(id)
+		worksFailed.value = false
+		worksMessage.value = `已删除作品 #${id}`
+		await loadWorks()
+	} catch (error) {
+		worksFailed.value = true
+		worksMessage.value = extractMessage(error) || '删除失败'
+		worksLoading.value = false
+	}
+}
+
+async function purgeAllWorks() {
+	worksLoading.value = true
+	try {
+		const result = await purgeWorks()
+		worksFailed.value = false
+		worksMessage.value = `已清空 ${result.deleted} 幅作品`
+		await loadWorks()
+	} catch (error) {
+		worksFailed.value = true
+		worksMessage.value = extractMessage(error) || '清空失败'
+		worksLoading.value = false
+	}
+}
+
 function extractMessage(error: unknown): string {
   const candidate = error as { response?: { data?: { message?: string } }; message?: string }
   return candidate?.response?.data?.message || candidate?.message || ''
 }
 
 onMounted(load)
-watch(() => props.groupId, load)
+onMounted(loadWorks)
+watch(() => props.groupId, () => {
+	void load()
+	void loadWorks()
+})
 </script>

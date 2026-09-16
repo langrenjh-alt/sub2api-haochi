@@ -46,6 +46,22 @@ func (h *DegradationPublicHandler) Page(c *gin.Context) {
 	response.Success(c, out)
 }
 
+// Timeline is the other half of the public page: it reports counts per bucket
+// so a visitor can see whether the model was degraded during a window.
+func (h *DegradationPublicHandler) Timeline(c *gin.Context) {
+	hours := 24
+	if raw := c.Query("hours"); raw != "" {
+		if value, err := strconv.Atoi(raw); err == nil && value > 0 {
+			hours = value
+		}
+	}
+	out, err := h.svc.Timeline(c.Request.Context(), hours)
+	if response.ErrorFrom(c, err) {
+		return
+	}
+	response.Success(c, out)
+}
+
 // Image streams one sanitized SVG with the same CSP sandbox the admin preview
 // uses. The body is never treated as HTML.
 func (h *DegradationPublicHandler) Image(c *gin.Context) {

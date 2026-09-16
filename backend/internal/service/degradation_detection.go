@@ -20,7 +20,9 @@ const (
 	DegradationTestTypePreview = "degradation_preview"
 )
 
-// DegradationExpectedAnswer is the candy problem's correct total.
+// DegradationExpectedAnswer is the candy problem's correct total. It is only a
+// default: a group may override it in its own degradation_detection_config,
+// and that override is the number both the runner and the suspend note use.
 const DegradationExpectedAnswer = "21"
 
 const (
@@ -204,10 +206,10 @@ var (
 
 // DegradationGroup is one group's detector configuration plus its account count.
 type DegradationGroup struct {
-	GroupID      int64                     `json:"group_id"`
-	GroupName    string                    `json:"group_name"`
-	Platform     string                    `json:"platform"`
-	AccountCount int64                     `json:"account_count"`
+	GroupID      int64                      `json:"group_id"`
+	GroupName    string                     `json:"group_name"`
+	Platform     string                     `json:"platform"`
+	AccountCount int64                      `json:"account_count"`
 	Config       DegradationDetectionConfig `json:"config"`
 }
 
@@ -228,23 +230,23 @@ type DegradationAccountState struct {
 
 // DegradationOverview powers the admin panel summary.
 type DegradationOverview struct {
-	GroupsEnabled      int64                      `json:"groups_enabled"`
-	AccountsWatched    int64                      `json:"accounts_watched"`
-	ProbesToday        int64                      `json:"probes_today"`
-	DegradedAccounts   int64                      `json:"degraded_accounts"`
-	SuspendedAccounts  int64                      `json:"suspended_accounts"`
-	ManualDisabled     int64                      `json:"manual_disabled"`
-	RecoveredToday     int64                      `json:"recovered_today"`
-	PreviewEnabled     bool                       `json:"preview_enabled"`
-	PreviewInterval    int                        `json:"preview_interval_minutes"`
-	PreviewWorks       int64                      `json:"preview_works"`
-	LastPreviewStatus  string                     `json:"last_preview_status"`
-	IntervalMinute     int                        `json:"interval_minutes"`
-	Model              string                     `json:"model"`
-	ReasoningEffort    string                     `json:"reasoning_effort"`
-	ExpectedAnswer     string                     `json:"expected_answer"`
-	SuspendMinute      int                        `json:"suspend_minutes"`
-	Accounts           []DegradationAccountState  `json:"accounts,omitempty"`
+	GroupsEnabled     int64                     `json:"groups_enabled"`
+	AccountsWatched   int64                     `json:"accounts_watched"`
+	ProbesToday       int64                     `json:"probes_today"`
+	DegradedAccounts  int64                     `json:"degraded_accounts"`
+	SuspendedAccounts int64                     `json:"suspended_accounts"`
+	ManualDisabled    int64                     `json:"manual_disabled"`
+	RecoveredToday    int64                     `json:"recovered_today"`
+	PreviewEnabled    bool                      `json:"preview_enabled"`
+	PreviewInterval   int                       `json:"preview_interval_minutes"`
+	PreviewWorks      int64                     `json:"preview_works"`
+	LastPreviewStatus string                    `json:"last_preview_status"`
+	IntervalMinute    int                       `json:"interval_minutes"`
+	Model             string                    `json:"model"`
+	ReasoningEffort   string                    `json:"reasoning_effort"`
+	ExpectedAnswer    string                    `json:"expected_answer"`
+	SuspendMinute     int                       `json:"suspend_minutes"`
+	Accounts          []DegradationAccountState `json:"accounts,omitempty"`
 }
 
 // DegradationPublicWork is one artwork entry on the public page. It carries no
@@ -255,6 +257,7 @@ type DegradationPublicWork struct {
 	Status          string     `json:"status"`
 	Model           string     `json:"model"`
 	ReasoningEffort string     `json:"reasoning_effort"`
+	HasImage        bool       `json:"has_image"`
 	Image           string     `json:"image,omitempty"`
 	DurationMS      int64      `json:"duration_ms"`
 	CreatedAt       time.Time  `json:"created_at"`
@@ -275,6 +278,43 @@ type DegradationPublicPage struct {
 	Items           []DegradationPublicWork `json:"items"`
 }
 
+// DegradationTimelineBucket is one time slice of probe verdicts. It is public,
+// so it carries counts only: no account id, no answer, no prompt.
+type DegradationTimelineBucket struct {
+	Start        time.Time `json:"start"`
+	Total        int64     `json:"total"`
+	Correct      int64     `json:"correct"`
+	Degraded     int64     `json:"degraded"`
+	Undetermined int64     `json:"undetermined"`
+}
+
+// DegradationTimeline is the health chart behind the public page: it answers
+// asks whether the model was degraded during the window, and it does so with
+// bucket counts only, never with account rows.
+type DegradationTimeline struct {
+	RangeHours   int                         `json:"range_hours"`
+	BucketMinute int                         `json:"bucket_minutes"`
+	GeneratedAt  time.Time                   `json:"generated_at"`
+	Total        int64                       `json:"total"`
+	Correct      int64                       `json:"correct"`
+	Degraded     int64                       `json:"degraded"`
+	Undetermined int64                       `json:"undetermined"`
+	HealthyRatio float64                     `json:"healthy_ratio"`
+	CurrentState string                      `json:"current_state"`
+	Suspended    int64                       `json:"suspended_accounts"`
+	LastProbeAt  *time.Time                  `json:"last_probe_at"`
+	Buckets      []DegradationTimelineBucket `json:"buckets"`
+}
+
+// DegradationWorkPage is the admin-facing artwork list. The public page is a
+// curated surface, so the rows it renders can be listed and removed.
+type DegradationWorkPage struct {
+	Total    int64                   `json:"total"`
+	Page     int                     `json:"page"`
+	PageSize int                     `json:"page_size"`
+	Items    []DegradationPublicWork `json:"items"`
+}
+
 // DegradationRepository is implemented by the SQL repository.
 type DegradationRepository interface {
 	Groups(context.Context) ([]DegradationGroup, error)
@@ -284,7 +324,11 @@ type DegradationRepository interface {
 	PendingQueueDepth(context.Context) (int, error)
 	DueProbeAccountIDs(context.Context, int64, int, int) ([]int64, error)
 	DuePreviewAccountIDs(context.Context, []int64, int, int) ([]int64, error)
-	EnqueueDegradationTest(context.Context, int64, string, string, string, string, int) (int64, bool, error)
+	// EnqueueDegradationTest queues one test. expectedAnswer is the group's
+	// configured number, so a verdict is always resolved against the same value
+	// the operator sees in the admin panel; an empty value falls back to the
+	// built-in default and the artwork kind ignores it entirely.
+	EnqueueDegradationTest(context.Context, int64, string, string, string, string, string, int) (int64, bool, error)
 	ApplyProbeOutcome(context.Context, int64, bool, int, string) (bool, error)
 
 	Overview(context.Context, int) (*DegradationOverview, error)
@@ -293,5 +337,11 @@ type DegradationRepository interface {
 	PreviewGroups(context.Context) ([]int64, error)
 
 	PublicPage(context.Context, int, int) (*DegradationPublicPage, error)
+	Timeline(context.Context, int) (*DegradationTimeline, error)
+	Works(context.Context, int, int) (*DegradationWorkPage, error)
+	// DeleteWork removes one artwork from the public feed. Only artwork rows are
+	// ever matched, so a mistaken call cannot delete probe history.
+	DeleteWork(context.Context, int64) (bool, error)
+	PurgeWorks(context.Context) (int64, error)
 	PublicWork(context.Context, int64) (*DegradationPublicWork, error)
 }

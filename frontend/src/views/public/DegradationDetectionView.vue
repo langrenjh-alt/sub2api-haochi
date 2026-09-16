@@ -43,24 +43,39 @@
       <!-- Error -->
       <div
         v-if="errorMessage"
-        class="mt-8 rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200"
+        class="mt-6 rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200"
       >
         {{ errorMessage }}
       </div>
 
-      <!-- Grid -->
+      <!-- Timeline -->
+      <div class="mt-7">
+        <DegradationTimelineChart v-model:range="rangeHours" :timeline="timeline" />
+      </div>
+
+      <!-- Gallery -->
       <section class="mt-9">
-        <div v-if="loading && works.length === 0" class="grid gap-x-6 gap-y-9 sm:grid-cols-2 lg:grid-cols-3">
+        <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 class="text-base font-semibold text-gray-950 dark:text-white">最新作品</h2>
+            <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">
+              每隔 {{ intervalMinutes }} 分钟随机抽一个启用中的账号生成，点击缩略图看大图。
+            </p>
+          </div>
+          <span class="font-mono text-xs text-gray-400 dark:text-dark-500">共 {{ total }} 幅</span>
+        </div>
+
+        <div v-if="loading && works.length === 0" class="grid gap-x-5 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
           <div v-for="index in placeholderCount" :key="index" class="animate-pulse">
-            <div class="aspect-[4/3] w-full rounded-xl bg-gray-100 dark:bg-dark-800"></div>
-            <div class="mt-3 h-3 w-24 rounded bg-gray-100 dark:bg-dark-800"></div>
-            <div class="mt-2 h-3 w-32 rounded bg-gray-100 dark:bg-dark-800"></div>
+            <div class="h-40 w-full rounded-xl bg-gray-100 dark:bg-dark-800"></div>
+            <div class="mt-2.5 h-3 w-20 rounded bg-gray-100 dark:bg-dark-800"></div>
+            <div class="mt-2 h-3 w-28 rounded bg-gray-100 dark:bg-dark-800"></div>
           </div>
         </div>
 
         <div
           v-else-if="works.length === 0"
-          class="rounded-xl border border-dashed border-gray-200 px-6 py-16 text-center dark:border-dark-700"
+          class="rounded-xl border border-dashed border-gray-200 px-6 py-14 text-center dark:border-dark-700"
         >
           <p class="text-sm font-medium text-gray-600 dark:text-dark-200">尚无作品</p>
           <p class="mt-2 text-sm text-gray-400 dark:text-dark-400">
@@ -68,51 +83,47 @@
           </p>
         </div>
 
-        <div v-else class="grid gap-x-6 gap-y-9 sm:grid-cols-2 lg:grid-cols-3">
+        <div v-else class="grid gap-x-5 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
           <article v-for="work in works" :key="work.id" class="group">
-            <div class="overflow-hidden rounded-xl border border-gray-200 bg-gray-50 dark:border-dark-700 dark:bg-dark-900">
-              <div class="aspect-[4/3] w-full">
-                <!--
-                  Images are served as SVG from the backend with a sandbox CSP and
-                  loaded through <img>, so the browser never executes markup that
-                  came from a model.
-                -->
-                <img
-                  v-if="work.image"
-                  :src="imageURL(work.id)"
-                  :alt="`${page?.headline || '鹈鹕骑行'} #${work.id}`"
-                  loading="lazy"
-                  class="h-full w-full object-contain"
-                />
-                <div v-else class="flex h-full w-full items-center justify-center text-xs text-gray-400">
-                  生成失败
-                </div>
+            <button
+              type="button"
+              class="relative block h-40 w-full overflow-hidden rounded-xl border border-gray-200 bg-gray-50 transition hover:border-gray-300 dark:border-dark-700 dark:bg-dark-900 dark:hover:border-dark-600"
+              :aria-label="`查看第 ${work.id} 幅作品的大图`"
+              @click="openLightbox(work.id)"
+            >
+              <!--
+                Images are served as SVG from the backend with a sandbox CSP and
+                loaded through <img>, so the browser never executes markup that
+                came from a model.
+              -->
+              <img
+                v-if="work.has_image"
+                :src="imageURL(work.id)"
+                :alt="`${page?.headline || '鹈鹕骑行'} #${work.id}`"
+                loading="lazy"
+                class="h-full w-full object-contain p-1.5"
+              />
+              <div v-else class="flex h-full w-full items-center justify-center text-xs text-gray-400">
+                生成失败
               </div>
-            </div>
-
-            <div class="mt-3 flex items-center justify-between gap-3">
-              <span class="truncate text-sm font-medium text-gray-900 dark:text-white">
-                {{ page?.headline || '鹈鹕骑行' }}
+              <span
+                v-if="work.has_image"
+                class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/55 to-transparent px-2.5 py-1.5 text-[11px] font-medium text-white opacity-0 transition group-hover:opacity-100"
+              >
+                查看大图
               </span>
-              <span class="flex-shrink-0 rounded-md bg-gray-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:bg-dark-800 dark:text-dark-300">
+            </button>
+
+            <div class="mt-2.5 flex items-center justify-between gap-2">
+              <span class="truncate font-mono text-xs text-gray-500 dark:text-dark-400">{{ work.model }}</span>
+              <span class="flex-shrink-0 rounded-md bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:bg-dark-800 dark:text-dark-300">
                 SVG
               </span>
             </div>
 
-            <div class="mt-1.5 flex items-center justify-between gap-3">
-              <span class="truncate font-mono text-xs text-gray-400 dark:text-dark-400">{{ work.model }}</span>
-              <span class="flex-shrink-0 font-mono text-xs text-blue-600 dark:text-blue-400">
-                {{ formatClock(work.created_at) }}
-              </span>
-            </div>
-
-            <div class="mt-1 flex items-center justify-between gap-3">
-              <span class="flex-shrink-0 font-mono text-xs text-blue-600 dark:text-blue-400">
-                {{ formatClock(work.finished_at || work.created_at) }}
-              </span>
-              <span class="flex-shrink-0 text-xs text-gray-400 dark:text-dark-400">
-                {{ formatDuration(work.duration_ms) }}
-              </span>
+            <div class="mt-1.5 flex items-center justify-between gap-2 font-mono text-[11px] text-blue-600 dark:text-blue-400">
+              <span class="truncate">{{ formatClock(work.created_at) }}</span>
+              <span class="flex-shrink-0 text-gray-400 dark:text-dark-500">{{ formatDuration(work.duration_ms) }}</span>
             </div>
           </article>
         </div>
@@ -123,6 +134,7 @@
         <div class="flex flex-wrap items-center justify-between gap-3">
           <p class="text-sm text-gray-500 dark:text-dark-400">
             显示 {{ works.length }} / {{ total }} 幅作品
+            <span v-if="timeline?.last_probe_at"> · 最近一次探测 {{ formatClock(timeline.last_probe_at) }}</span>
           </p>
           <a
             class="inline-flex items-center gap-1 text-sm font-medium text-emerald-600 transition hover:text-emerald-700 dark:text-emerald-400"
@@ -137,26 +149,64 @@
         </div>
       </footer>
     </div>
+
+    <!-- Lightbox: the tile stays small on purpose, the full artwork remains reachable. -->
+    <div
+      v-if="lightboxId"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      role="dialog"
+      aria-modal="true"
+      @click.self="closeLightbox"
+    >
+      <div class="relative max-h-full w-full max-w-2xl overflow-auto rounded-2xl bg-white p-3 shadow-2xl dark:bg-dark-900">
+        <img :src="imageURL(lightboxId)" :alt="`作品 #${lightboxId}`" class="mx-auto max-h-[75vh] w-auto" />
+        <div class="mt-2 flex items-center justify-between px-1 pb-1">
+          <span class="font-mono text-xs text-gray-500 dark:text-dark-400">#{{ lightboxId }}</span>
+          <button
+            type="button"
+            class="rounded-lg px-3 py-1.5 text-sm font-medium text-gray-600 transition hover:bg-gray-100 dark:text-dark-200 dark:hover:bg-dark-800"
+            @click="closeLightbox"
+          >
+            关闭
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { publicImageURL, publicPage, type DegradationPublicPage } from '@/api/degradation'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import DegradationTimelineChart from './DegradationTimeline.vue'
+import {
+  publicImageURL,
+  publicPage,
+  publicTimeline,
+  type DegradationPublicPage,
+  type DegradationTimeline,
+} from '@/api/degradation'
 
 const page = ref<DegradationPublicPage | null>(null)
+const timeline = ref<DegradationTimeline | null>(null)
 const works = computed(() => page.value?.items ?? [])
 const loading = ref(false)
 const errorMessage = ref('')
-const placeholderCount = 6
+const rangeHours = ref(24)
+const lightboxId = ref(0)
+const placeholderCount = 10
 
 let timer: ReturnType<typeof setInterval> | null = null
 let controller: AbortController | null = null
 
 const total = computed(() => page.value?.total ?? 0)
 
+const intervalMinutes = computed(() => {
+  const seconds = page.value?.interval_seconds ?? 600
+  return Math.max(Math.round(seconds / 60), 1)
+})
+
 const latestReadyId = computed(() => {
-  const first = works.value.find((item) => item.image)
+  const first = works.value.find((item) => item.has_image)
   return first?.id ?? 0
 })
 
@@ -200,6 +250,23 @@ function formatDuration(milliseconds: number): string {
   return `${(milliseconds / 1000).toFixed(1)} 秒`
 }
 
+function openLightbox(id: number) {
+  lightboxId.value = id
+}
+
+function closeLightbox() {
+  lightboxId.value = 0
+}
+
+async function loadTimeline(silent = false) {
+  try {
+    timeline.value = await publicTimeline(rangeHours.value, controller?.signal)
+  } catch (error) {
+    if ((error as { name?: string })?.name === 'CanceledError') return
+    if (!silent) errorMessage.value = '时间轴加载失败，请稍后重试。'
+  }
+}
+
 async function reload(silent = false) {
   if (controller) {
     controller.abort()
@@ -209,7 +276,11 @@ async function reload(silent = false) {
     loading.value = true
   }
   try {
-    page.value = await publicPage(1, 6, controller.signal)
+    const [pageData] = await Promise.all([
+      publicPage(1, 20, controller.signal),
+      loadTimeline(true),
+    ])
+    page.value = pageData
     errorMessage.value = ''
   } catch (error) {
     if ((error as { name?: string })?.name === 'CanceledError') {
@@ -234,6 +305,10 @@ function scheduleRefresh() {
     }
   }, seconds * 1000)
 }
+
+watch(rangeHours, () => {
+  void loadTimeline()
+})
 
 onMounted(async () => {
   await reload()
