@@ -118,7 +118,7 @@ async function reload(silent = false) {
     if (abortController === ctrl) {
       if (!silent) loading.value = false
       if (!silent) capacityLoading.value = false
-      countdown.value = DEFAULT_INTERVAL_SECONDS
+      autoRefresh.resetCountdown()
       abortController = null
     }
   }

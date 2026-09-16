@@ -1563,7 +1563,11 @@ func TestProxyOpenAIWSHTTPBridgeTurnPromotesCodexAdditionalToolsForMixedCache(t 
 	require.Len(t, tools, 4)
 	require.Equal(t, "function", tools[0].Get("type").String())
 	require.Equal(t, "lookup", tools[0].Get("name").String())
-	require.Equal(t, "web_search", tools[1].Get("type").String())
+	// Fork contract: a client-declared search function is never rewritten into a
+	// native tool (that would change the tool-call protocol); only the missing
+	// companion native route marker (x_search) is injected next to it.
+	require.Equal(t, "function", tools[1].Get("type").String())
+	require.Equal(t, "web_search", tools[1].Get("name").String())
 	require.Equal(t, "function", tools[2].Get("type").String())
 	require.Equal(t, "apply_patch", tools[2].Get("name").String())
 	require.Equal(t, "x_search", tools[3].Get("type").String())

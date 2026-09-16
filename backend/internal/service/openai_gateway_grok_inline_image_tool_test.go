@@ -46,7 +46,17 @@ func TestForwardGrokChatViaResponsesDropsRedundantViewImage(t *testing.T) {
 
 func TestForwardGrokRawChatDropsRedundantViewImage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	body := grokChatInlineImageRequest()
+	// Fork contract: every losslessly bridgeable Grok request is driven through
+	// the Responses endpoint, including API-key accounts (see
+	// TestForwardAsChatCompletionsForGrokAPIKeyUsesConfiguredResponsesEndpoint).
+	// `seed` is not preservable by the bridge, so this request keeps exercising
+	// the raw Chat Completions inline-image/tool adaptation.
+	body := bytes.Replace(
+		grokChatInlineImageRequest(),
+		[]byte(`"stream":false`),
+		[]byte(`"seed":7,"stream":false`),
+		1,
+	)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))

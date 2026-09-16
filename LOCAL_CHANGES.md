@@ -1,12 +1,96 @@
-# Local Changes Against Official sub2api main (2026-09-10)
+# Local Changes Against Official sub2api main (2026-09-16)
 
 This fork is based on the official `main` commit
-`98d86915becae9fe9491a91ffc6defd5235c8d2b` (source version `0.2.4`).
+`881f3202694c6bc932446931a30c27d9675178b9` (source version `0.2.5`).
 
-- Fork source version: `backend/cmd/server/VERSION` is `0.2.4`.
-- Upgrade date: 2026-09-10.
+- Fork source version: `backend/cmd/server/VERSION` is `0.2.5`.
+- Upgrade date: 2026-09-16.
 - Upgrade policy: retain the documented fork behavior while adopting official
   fixes, API contracts, cancellation checks, and generated dependency wiring.
+
+## v0.2.5 Upstream Merge Decisions
+
+Official `main` advanced 197 commits from `98d86915b` (v0.2.4) to `881f32026`
+(v0.2.5): 447 files, +23038/-1538. Git auto-merged all but three files; the
+remaining hunks and the contradicting expectations were adjudicated as follows.
+
+Adopted from official v0.2.5:
+
+- OpenCode Go platform (native protocol dispatch, billing, session handling) and
+  its migration `238_opencode_go_platform.sql`.
+- `openai_gateway_chat_completions.go`: API-key `/responses` unsupported
+  (404/405) fallback to raw Chat Completions, plus upstream endpoint stamping
+  used by usage logs and routing hints.
+- OpenAI image route rework (native Codex Images, image cache pricing fields),
+  Responses Lite namespace tool preservation, `sequence_number` for grok-build,
+  apicompat leading-system-message merge, antigravity OAuth token cache
+  isolation and Gemini SSE separator fix, subscription bulk actions, monitor
+  auto-refresh interval fix, Codex quota window parsing, WS pool queue-waiter
+  reselection and the new context-pool capacity math (ctx_pool per-account
+  connection factor default 5.0).
+- Migrations `237_add_minimax_platform.sql`,
+  `238_purge_unlimited_user_platform_quotas.sql`.
+- Generated code: `go generate ./ent` and `go generate ./cmd/server` were
+  re-run after the merge and produce no diff.
+
+Fork behavior kept through the merge:
+
+- Group burst mode (threshold/latency/429 retry/high-usage) and its sticky
+  reserve account: `burstSameAccountRetry`, `WithBurstModeRetryAccount`,
+  `burstModeMaxSwitches`, `shouldStopOpenAI429FailoverInMode`, plus migrations
+  `221_group_burst_mode.sql` / `222_group_burst_retry_and_high_usage.sql` and
+  the renamed `223_group_model_pricing.sql`.
+- Public group capacity pool (`group_capacity_service.go`, user monitor card).
+- OpenAI HTML-403 policy (transient HTML 403 stays same-account retryable,
+  inactive-workspace 403 disables the credential owner) and the
+  `transient_html_403` WS dial classification.
+- Grok Free prompt-cache routing, the chat-to-Responses bridge (including
+  API-key accounts on custom xAI-compatible endpoints), native
+  `web_search`/`x_search` route markers, media/video ownership binding.
+- Grok API-key pool-mode accounts never persist temporary-unschedulable state.
+- Scheduler short-TTL account-reference cache and `[]*Account` request-local
+  copies; API-key auth snapshots stay version `25`.
+- The WS 二开 removal from commit `3255adfe1` (HTTP ingress stays HTTP/SSE,
+  upstream WS only for the WebSocket ingress, pool idle recycle at official 90s).
+
+Conflict adjudication (official fix vs fork behavior):
+
+- `backend/internal/handler/grok_media.go` — union: official bound video-lookup
+  ownership (`SelectGrokMediaVideoRequestAccount`), slot acquisition/release
+  refactor and `not_found_error` short-circuit, plus the fork's burst-retry
+  account threaded through the selection context (`WithBurstModeRetryAccount`).
+- `frontend/src/views/user/ChannelStatusV1View.vue` — official
+  `autoRefresh.resetCountdown()` (honors the selected interval) plus the fork's
+  capacity-pool loading reset.
+- `README_CN.md` — both documents kept (fork nginx/SSE note and official
+  Codex Fast/Flex policy).
+- Grok chat → Responses bridge: official keeps API-key accounts on raw Chat
+  Completions and upstream's regression test asserts that. The fork deliberately
+  bridges API-key accounts as well, including accounts that target a custom
+  xAI-compatible endpoint which serves `/responses` (covered by
+  `TestForwardAsChatCompletionsForGrokAPIKeyUsesConfiguredResponsesEndpoint` and
+  `TestBuildGrokResponsesRequestAllowsPublicAPIKeyBaseURLByDefault`), so the fork
+  behavior is kept. The official inline-image regression
+  (`TestForwardGrokRawChatDropsRedundantViewImage`) now forces the raw path with
+  a request shape the bridge cannot preserve (`seed`), keeping its coverage of
+  the raw Chat Completions image/tool adaptation.
+- Grok Free mixed-cache route: the fork deliberately stops rewriting a
+  client-declared `web_search`/`x_search` function into a native tool (that
+  changes the tool-call protocol and breaks tool-output correlation) and only
+  injects the missing companion native marker. The fork contract is kept, and
+  the official expectation in `openai_ws_http_bridge_test.go` was aligned to it
+  (`tools[1]` stays `function`/`web_search`, `tools[3]` is `x_search`).
+- Fork test expectations updated to the current defaults: the Grok model alias
+  resolves to `grok-4.6` (`TestForwardIncompatibleGrokChatUsesRawFallback`).
+
+Upgrade verification:
+
+- `backend`: `go build ./...`, `go test -tags=unit ./...`. Remaining failures are
+  environment/upstream owned: the `internal/repository` PgDumper tests need a
+  POSIX `sh`, and `TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort`
+  fails on pristine official `main` too (verified in a clean v0.2.5 worktree).
+- `frontend`: `pnpm install --frozen-lockfile`, `pnpm run typecheck`,
+  `pnpm run build` (includes the i18n completeness check).
 
 ## v0.2.4 Upstream Merge Decisions
 

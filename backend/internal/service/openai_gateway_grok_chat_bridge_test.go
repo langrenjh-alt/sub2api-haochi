@@ -688,7 +688,7 @@ func TestForwardIncompatibleGrokChatUsesRawFallback(t *testing.T) {
 			require.NotNil(t, result)
 			require.Equal(t, xai.DefaultCLIBaseURL+"/chat/completions", upstream.lastReq.URL.String())
 			require.Equal(t, grokChatRawEndpoint, result.UpstreamEndpoint)
-			expected := ReplaceModelInBody(body, "grok-4.5")
+			expected := ReplaceModelInBody(body, "grok-4.6")
 			require.JSONEq(t, string(expected), string(upstream.lastBody))
 			require.Equal(t, "raw ok", gjson.Get(recorder.Body.String(), "choices.0.message.content").String())
 		})
