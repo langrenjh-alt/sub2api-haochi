@@ -18,6 +18,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// A long artwork streams reasoning, item echoes and the SVG itself, so the raw
+// log grows far past a short probe. These ceilings only bound a runaway
+// upstream: a filled buffer marks the stored raw log as clipped and must never
+// turn a complete answer into a failure.
+const (
+	intelligentCaptureMaxBytes  = 8 << 20
+	intelligentStreamMaxBytes   = 16 << 20
+	intelligentUpstreamMaxBytes = 16 << 20
+)
+
 type intelligentRunKey struct{}
 type intelligentRunContext struct {
 	prompt  string
@@ -201,7 +211,11 @@ func (s *AccountTestService) RunIntelligentTest(ctx context.Context, r *Intellig
 		return &TestAdmissionWaitError{Until: time.Now().Add(capture.trafficWait.RetryAfter), Reason: capture.trafficWait.Reason}
 	}
 	if capture.body.Len() > 0 && !intelligentRawComplete(capture.body.String()) {
-		complete = false
+		// The raw log stops at its buffer ceiling, so a clipped log says nothing
+		// about whether the answer ended. Only an intact log may veto completeness.
+		if !capture.truncated {
+			complete = false
+		}
 	}
 	r.Result = capture.redact(textOutput)
 	if model != "" {
@@ -228,7 +242,7 @@ func (s *AccountTestService) RunIntelligentTest(ctx context.Context, r *Intellig
 	r.Result = strings.ToValidUTF8(r.Result, "�")
 	r.RawResponse = strings.ToValidUTF8(r.RawResponse, "�")
 	r.ErrorMessage = strings.ToValidUTF8(r.ErrorMessage, "�")
-	if err != nil || eventError != "" || !complete || strings.TrimSpace(r.Result) == "" || recorder.truncated || capture.truncated {
+	if intelligentObservationFailed(err, eventError, complete, r.Result, recorder.truncated) {
 		if err == nil {
 			err = errors.New("upstream did not return a complete, nonempty test result")
 		}
@@ -239,6 +253,17 @@ func (s *AccountTestService) RunIntelligentTest(ctx context.Context, r *Intellig
 		return err
 	}
 	return nil
+}
+
+// intelligentObservationFailed decides whether a finished observation is a
+// failure. A raw log that hit its buffer ceiling is not one: the log is a
+// debugging aid and the client stream already proved that the answer ended.
+// Only a client stream that was itself cut short invalidates the answer.
+func intelligentObservationFailed(runErr error, eventError string, complete bool, result string, streamTruncated bool) bool {
+	if runErr != nil || eventError != "" || !complete || strings.TrimSpace(result) == "" {
+		return true
+	}
+	return streamTruncated
 }
 
 // Some old connectivity adapters treat EOF as success. Capability scoring
@@ -382,7 +407,7 @@ func (w *intelligentSSEWriter) Header() http.Header { return w.header }
 func (w *intelligentSSEWriter) WriteHeader(int)     {}
 func (w *intelligentSSEWriter) Flush()              {}
 func (w *intelligentSSEWriter) Write(p []byte) (int, error) {
-	if w.body.Len()+len(p) > 2<<20 {
+	if w.body.Len()+len(p) > intelligentStreamMaxBytes {
 		w.truncated = true
 		w.cancel()
 		return 0, errors.New("test output too large")
@@ -403,7 +428,7 @@ func (c *intelligentCapture) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := len(p)
-	available := (1 << 20) - c.body.Len()
+	available := intelligentCaptureMaxBytes - c.body.Len()
 	if available < len(p) {
 		c.truncated = true
 		if available > 0 {
@@ -456,7 +481,7 @@ func (c *intelligentCapture) response(req *http.Request, resp *http.Response) *h
 	}
 	if resp.Body != nil {
 		if _, ok := resp.Body.(*intelligentCaptureBody); !ok {
-			resp.Body = &intelligentCaptureBody{Reader: io.TeeReader(io.LimitReader(resp.Body, 4<<20), c), closer: resp.Body}
+			resp.Body = &intelligentCaptureBody{Reader: io.TeeReader(io.LimitReader(resp.Body, intelligentUpstreamMaxBytes), c), closer: resp.Body}
 		}
 	}
 	return resp

@@ -161,11 +161,24 @@ func TestIntelligentSVGAndCandyEvaluation(t *testing.T) {
 }
 func TestIntelligentCaptureBounded(t *testing.T) {
 	capture := &intelligentCapture{}
-	n, err := io.Copy(capture, strings.NewReader(strings.Repeat("x", 2<<20)))
+	payload := strings.Repeat("x", intelligentCaptureMaxBytes+(1<<20))
+	n, err := io.Copy(capture, strings.NewReader(payload))
 	require.NoError(t, err)
-	require.EqualValues(t, 2<<20, n)
-	require.Equal(t, 1<<20, capture.body.Len())
+	require.EqualValues(t, len(payload), n)
+	require.Equal(t, intelligentCaptureMaxBytes, capture.body.Len())
 	require.True(t, capture.truncated)
+}
+
+// A raw log that hit its buffer ceiling is a log-fidelity flag, not a verdict:
+// the long artwork still counts as produced when the client stream ended.
+func TestIntelligentClippedRawLogStillCompletes(t *testing.T) {
+	artwork := "结果是 29：最不利时…\n```svg\n<svg viewBox=\"0 0 1 1\"></svg>\n```"
+	require.False(t, intelligentObservationFailed(nil, "", true, artwork, false))
+	require.True(t, intelligentObservationFailed(nil, "", false, artwork, false), "a stream without a terminal event")
+	require.True(t, intelligentObservationFailed(nil, "", true, "   ", false), "an empty answer")
+	require.True(t, intelligentObservationFailed(nil, "", true, artwork, true), "a client stream that was cut short")
+	require.True(t, intelligentObservationFailed(fmt.Errorf("boom"), "", true, artwork, false), "a transport error")
+	require.True(t, intelligentObservationFailed(nil, "rate limited", true, artwork, false), "an upstream error event")
 }
 
 type intelligentRedirectUpstream struct {
