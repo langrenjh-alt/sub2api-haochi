@@ -182,6 +182,14 @@ Adopted from the third-party snapshot:
   `account_tests`, `intelligent_test_requests`, `support_tickets`,
   `support_ticket_replies` and the `user_cleanup_*` tables was derived field by
   field from the snapshot's ent schemas and SQL queries.
+- `backend/migrations/240_thirdparty_protection_schema_fixup.sql` completes that
+  reconstruction: applying 239 on the live server and then parsing every SQL
+  statement in the snapshot's repositories (`Prepare` against the migrated schema)
+  showed `account_tests.lease_until` was still missing, which made the intelligent
+  test worker log `column "lease_until" does not exist` every minute. 240 adds the
+  column and its index. 239 is left untouched on purpose: the migration runner
+  pins each applied file by SHA256 checksum and refuses to start when an applied
+  file changes.
 
 Conflict adjudications (fork choice wins wherever the third party regressed fork
 capacity work):
@@ -197,6 +205,13 @@ capacity work):
   `TestOpenAIWSConnPool_EffectiveMaxConnsByAccount_ModeRouterV2` /
   `TestOpenAIWSConnPool_AcquireRetainedSessionsUsesScaledCapacity` all pass on
   the result.
+- The third-party super-admin guard (`middleware.UserHierarchyGuard`,
+  `requireSystemSuperAdmin`) is kept as shipped: writes on
+  `/api/v1/admin/settings`, `/system`, `/plugins`, `/backups` and
+  `/data-management` need `role=super_admin`. Because the production instance had
+  exactly one administrator with `role=admin`, that account was promoted to
+  `super_admin` during the 2026-09-16 deployment (recorded, one-statement
+  revert) instead of relaxing the guard.
 - The WS pool stays official for normal accounts: the extra
   `conversationID`/`transportKey` handshake-compatibility keys and the
   per-account TLS profile applied on dial are gated behind
