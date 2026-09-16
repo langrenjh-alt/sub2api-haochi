@@ -205,13 +205,23 @@ capacity work):
   `TestOpenAIWSConnPool_EffectiveMaxConnsByAccount_ModeRouterV2` /
   `TestOpenAIWSConnPool_AcquireRetainedSessionsUsesScaledCapacity` all pass on
   the result.
-- The third-party super-admin guard (`middleware.UserHierarchyGuard`,
-  `requireSystemSuperAdmin`) is kept as shipped: writes on
-  `/api/v1/admin/settings`, `/system`, `/plugins`, `/backups` and
-  `/data-management` need `role=super_admin`. Because the production instance had
-  exactly one administrator with `role=admin`, that account was promoted to
-  `super_admin` during the 2026-09-16 deployment (recorded, one-statement
-  revert) instead of relaxing the guard.
+- REVERTED 2026-09-16 (commit `fd8be6430`): the third-party super-admin hierarchy
+  guard — `middleware.UserHierarchyGuard`, `requireSystemSuperAdmin`, the
+  `service`/`repository` hierarchy enforcement, the `userService` parameter of
+  `routes.RegisterAdminRoutes` and their tests — is removed, so administrator
+  permissions behave exactly like official v0.2.5 again. Reason: the guard needs
+  `role=super_admin` for writes on `/api/v1/admin/settings`, `/system`,
+  `/plugins`, `/backups` and `/data-management`, but the fork frontend derives
+  admin access from `role === 'admin'` (`frontend/src/stores/auth.ts`), so an
+  account promoted to `super_admin` can log in and still not enter the panel.
+  The production administrator is back to `role=admin`; everything else from the
+  third-party merge (security policy, intelligent test, tickets, global pricing,
+  spend guard, tiered routing, margins, legacy API keys, anti-degradation) stays.
+- The official `AdminComplianceGuard` is untouched and still applies: an admin
+  without a `settings` row `admin_compliance_acknowledgement:<user_id>` gets 423
+  `ADMIN_COMPLIANCE_ACK_REQUIRED` until `POST /api/v1/admin/compliance/accept`.
+  The production administrator already had the acknowledgement, so nothing
+  changes for that account.
 - The WS pool stays official for normal accounts: the extra
   `conversationID`/`transportKey` handshake-compatibility keys and the
   per-account TLS profile applied on dial are gated behind
