@@ -1389,9 +1389,6 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authorizeManagedUserResource(ctx, apiKey.UserID); err != nil {
-		return nil, err
-	}
 
 	if groupID == nil {
 		// nil 表示不修改，直接返回
@@ -1494,9 +1491,6 @@ func (s *adminServiceImpl) AdminUpdateAPIKeyGroupID(ctx context.Context, keyID i
 func (s *adminServiceImpl) AdminResetAPIKeyRateLimitUsage(ctx context.Context, keyID int64) (*APIKey, error) {
 	apiKey, err := s.apiKeyRepo.GetByID(ctx, keyID)
 	if err != nil {
-		return nil, err
-	}
-	if err := s.authorizeManagedUserResource(ctx, apiKey.UserID); err != nil {
 		return nil, err
 	}
 	apiKey.Usage5h = 0

@@ -250,9 +250,6 @@ func (r *apiKeyRepository) GetByKeyForAuth(ctx context.Context, key string) (*se
 }
 
 func (r *apiKeyRepository) Update(ctx context.Context, key *service.APIKey, fields service.APIKeyUpdateFields) error {
-	if needsManagedResourceGuard(ctx) {
-		return withManagedResourceWrite(ctx, r.client, "api_keys", key.ID, 0, func(next context.Context) error { return r.Update(next, key, fields) })
-	}
 	// 空掩码代表调用方不改任何列，直接返回，避免产生一次无意义的整行写。
 	if fields.IsEmpty() {
 		return nil
