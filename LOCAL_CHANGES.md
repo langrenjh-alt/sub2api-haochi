@@ -582,3 +582,49 @@ config → timeout 300）；已在 git worktree 副本上验证回退点（旧�
 同一批分组 43 账号对糖果题（短回答）每次都答 21 且判 correct，只有长输出的作品任务失败；
 差异只在响应体积，不在账号可用性 —— 既不是账号降智，也不是模型不可用，而是服务端
 自己的采集上限。
+
+---
+
+## 2026-09-16 追加 — 删除第三方二开的「全站账号健康分服务」
+
+周总问：`health:auto err_rate=94.0%` 这个「全站账号健康分服务」是官方功能吗？不是就删掉。
+
+**结论：不是官方功能，已删除并上线（提交 `4792d9589`）。**
+
+出处判定：
+
+```
+$ git cat-file -e f3217fa0b:backend/internal/service/account_health.go
+fatal: path ... exists on disk, but not in 'f3217fa0b'        # 官方 v0.2.5 基线没有
+$ git log --oneline --diff-filter=A -- backend/internal/service/account_health.go
+f8dc19fbd thirdparty snapshot: E:\sub2新站 ...                 # 来自第三方二开快照
+```
+
+它做了什么：每 60 秒扫描一次，`ok = usage_logs`、`err = ops_error_logs(status>=400 且非
+is_business_limited)`，10 分钟窗口内样本 ≥10 且 `err/total >= 50%` 就写
+`temp_unschedulable` 30 分钟，reason = `health:auto err_rate=X%`（也就是账号页里那个
+「临时不可调度状态 / health:auto err_rate=94.0%」）。恢复阈值 `<= 20%`。
+
+删除内容：服务本体、handler、`/api/v1/admin/account-health*` 路由、wire/wire_gen 装配、
+`Handlers.AccountHealth` 字段；被删测试桩改为 margin/spend-guard/tiered-routing 共用
+`stubSharedSettingRepo`。**官方与「账号健康」有关的两处保留未动**：
+`ObserveOpenAIAccountHealthFailure`（OpenAI 调度）与运维邮件里的「账号健康报告」
+（`GET /api/v1/admin/ops/email-notification/config` 部署后仍 200）。
+
+线上（美东独服 `deploy7.sh`，exit 0）：
+
+```
+sha     8f986156… -> c85f5f41…
+version 0.2.5-fork-nohealth (commit 4792d9589)   health=200 after 3s
+GET /api/v1/admin/account-health           -> 404   （已删除，不是 401/403）
+GET /api/v1/admin/accounts                 -> 200
+GET /api/v1/admin/ops/email-notification/config -> 200
+UPDATE accounts ... WHERE reason LIKE 'health:%'   -> UPDATE 22（历史残留清零，剩余 0）
+```
+
+部署后 5 分钟观察（cpagrok 窗口 1547–1661 ok / 109–123 err）：`health_isolated_now=0` 全程、
+`any_health_reason_left=0`、`cpagrok_isolated=false`、账号恢复成功流量。
+同一时刻按旧规则本应被隔离的账号（`id=123119 ok=0 err=16 err_pct=100%`）**没有再被隔离**。
+
+回退：`bash ROLLBACK.sh repo`（回到 `cad12be73`）、`bash ROLLBACK.sh server`
+（装回 `sub2api.bak-20260916-192630-v0.2.5-fork-artwork` = `8f986156…`）。
