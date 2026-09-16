@@ -247,6 +247,7 @@ type fakeDegradationRepo struct {
 	cfg             DegradationDetectionConfig
 	groupID         int64
 	cfgError        error
+	page            *DegradationPublicPage
 }
 
 type enqueuedTest struct {
@@ -301,7 +302,39 @@ func (f *fakeDegradationRepo) PreviewGroups(context.Context) ([]int64, error) {
 	return f.previewGroupIDs, nil
 }
 func (f *fakeDegradationRepo) PublicPage(context.Context, int, int) (*DegradationPublicPage, error) {
+	if f.page != nil {
+		return f.page, nil
+	}
 	return &DegradationPublicPage{}, nil
+}
+
+// The public page must not stay empty behind one failed artwork.
+func TestPreviewRetriesQuicklyAfterAFailedArtwork(t *testing.T) {
+	ninetySecondsAgo := time.Now().Add(-90 * time.Second)
+	repo := &fakeDegradationRepo{
+		cfg:  NormalizeDegradationConfig(DegradationDetectionConfig{PreviewIntervalMinute: 10}),
+		page: &DegradationPublicPage{LastStatus: "failed", LastFinishedAt: &ninetySecondsAgo},
+	}
+	svc := NewDegradationService(repo)
+
+	due, err := svc.previewDue(context.Background(), 10)
+	if err != nil || !due {
+		t.Fatalf("a failed artwork must be retried quickly: due=%v err=%v", due, err)
+	}
+
+	// A successful artwork keeps the configured cadence.
+	repo.page = &DegradationPublicPage{LastStatus: "completed", LastFinishedAt: &ninetySecondsAgo}
+	due, err = svc.previewDue(context.Background(), 10)
+	if err != nil || due {
+		t.Fatalf("a fresh artwork must hold the interval: due=%v err=%v", due, err)
+	}
+
+	old := time.Now().Add(-11 * time.Minute)
+	repo.page = &DegradationPublicPage{LastStatus: "completed", LastFinishedAt: &old}
+	due, err = svc.previewDue(context.Background(), 10)
+	if err != nil || !due {
+		t.Fatalf("an artwork older than the interval is due: due=%v err=%v", due, err)
+	}
 }
 
 func (f *fakeDegradationRepo) Timeline(context.Context, int) (*DegradationTimeline, error) {

@@ -22,6 +22,9 @@ const (
 	// large group is still probed evenly, just slower than the nominal rate.
 	degradationMaxQueued    = 200
 	degradationOverviewRows = 200
+	// A failed artwork is retried after this long instead of waiting out the
+	// configured interval, so one bad account cannot leave the public page empty.
+	degradationPreviewRetryMinute = 1
 )
 
 // DegradationService owns the periodic probe, the public artwork schedule and
@@ -205,7 +208,13 @@ func (s *DegradationService) previewDue(ctx context.Context, intervalMinutes int
 	if page.LastFinishedAt == nil {
 		return true, nil
 	}
-	return time.Since(*page.LastFinishedAt) >= time.Duration(intervalMinutes)*time.Minute, nil
+	age := time.Since(*page.LastFinishedAt)
+	// A failed artwork must not hold the page empty for a whole interval: retry
+	// after a minute, on an account without a recent failure.
+	if page.LastStatus != "completed" {
+		return age >= time.Duration(degradationPreviewRetryMinute)*time.Minute, nil
+	}
+	return age >= time.Duration(intervalMinutes)*time.Minute, nil
 }
 
 // HandleIntelligentTestOutcome is the outcome hook installed on the intelligent

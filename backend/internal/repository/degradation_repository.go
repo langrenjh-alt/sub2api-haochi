@@ -197,7 +197,13 @@ WHERE g.deleted_at IS NULL AND g.degradation_detection_enabled AND g.degradation
   AND a.deleted_at IS NULL AND a.schedulable = TRUE
   AND (a.degradation_suspended_until IS NULL OR a.degradation_suspended_until <= NOW())
   AND NOT EXISTS (SELECT 1 FROM account_tests q WHERE q.test_type = $1 AND q.status IN ('queued','running'))
-ORDER BY random() LIMIT $3`,
+ORDER BY (SELECT COUNT(*) FROM account_tests p
+          WHERE p.account_id = a.id AND p.test_type = $1
+            AND p.status NOT IN ('queued','running','cancelled')
+            AND p.status <> 'completed'
+            AND p.created_at > NOW() - INTERVAL '30 minutes') ASC,
+         random()
+LIMIT $3`,
 		service.DegradationTestTypePreview, pq.Array(groupIDs), limit)
 	if err != nil {
 		return nil, err
