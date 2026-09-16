@@ -25,9 +25,42 @@ type IntelligentTestService struct {
 	repo       IntelligentTestRepository
 	runner     IntelligentTestRunner
 	evaluators map[string]IntelligentTestEvaluator
-	cancel     context.CancelFunc
-	mu         sync.Mutex
-	wg         sync.WaitGroup
+	// outcomeHook observes terminal records after they are durable. It is the
+	// only place allowed to translate a test verdict into scheduling state.
+	outcomeHook func(context.Context, *IntelligentTestRecord)
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	wg          sync.WaitGroup
+}
+
+// SetOutcomeHook installs the post-persist observer used by the degradation
+// detector. It runs only after the record is saved, so a scheduling change can
+// never be made for a test whose result was lost.
+func (s *IntelligentTestService) SetOutcomeHook(hook func(context.Context, *IntelligentTestRecord)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.outcomeHook = hook
+}
+
+func (s *IntelligentTestService) notifyOutcome(ctx context.Context, record *IntelligentTestRecord) {
+	if s == nil || record == nil {
+		return
+	}
+	s.mu.Lock()
+	hook := s.outcomeHook
+	s.mu.Unlock()
+	if hook == nil {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("intelligent test outcome hook panic", "id", record.ID, "type", fmt.Sprintf("%T", p))
+		}
+	}()
+	hook(ctx, record)
 }
 
 func NewIntelligentTestService(repo IntelligentTestRepository, runner *AccountTestService) *IntelligentTestService {
@@ -109,6 +142,13 @@ func validateIntelligentTestConfig(cfg *IntelligentTestConfig, evaluators map[st
 	}
 	if cfg.TimeoutSeconds < 30 || cfg.TimeoutSeconds > 600 {
 		return intelligentTestBad("timeout_seconds must be 30–600")
+	}
+	if cfg.ReasoningEffort != "" {
+		normalized := NormalizeMaxReasoningEffort(cfg.ReasoningEffort)
+		if normalized == "" {
+			return intelligentTestBad("reasoning_effort 必须是 minimal/low/medium/high/xhigh/max 之一")
+		}
+		cfg.ReasoningEffort = normalized
 	}
 	if _, ok := evaluators[cfg.Evaluator]; !ok {
 		return intelligentTestBad("unknown evaluator")
@@ -245,7 +285,9 @@ func (s *IntelligentTestService) work(ctx context.Context) {
 	}
 	if err := s.repo.Finish(saveCtx, record); err != nil {
 		slog.Error("intelligent test result save failed; lease recovery will record interruption", "id", record.ID, "error", err)
+		return
 	}
+	s.notifyOutcome(saveCtx, record)
 }
 func (s *IntelligentTestService) run(ctx context.Context, r *IntelligentTestRecord) {
 	start := time.Now()

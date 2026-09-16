@@ -50,6 +50,7 @@ type AdminHandlers struct {
 	Ticket                 *admin.TicketHandler
 	BillingExport          *admin.BillingExportHandler
 	AntiDegrade            *admin.AntiDegradeHandler
+	Degradation            *admin.DegradationHandler
 	PromptAudit            *securityaudit.PromptAdminHandler
 	Payment                *admin.PaymentHandler
 	Affiliate              *admin.AffiliateHandler
@@ -81,6 +82,17 @@ type Handlers struct {
 	AsyncImage        *AsyncImageHandler
 	BatchImage        *BatchImageHandler
 	AccountCapability *AccountCapabilityHandler
+	DegradationPublic *DegradationPublicHandler
+}
+
+// SetDegradationHandlers attaches the degradation detector handlers. They are
+// installed after construction so the shared handler signature and its
+// generated wiring stay untouched.
+func (h *Handlers) SetDegradationHandlers(public *DegradationPublicHandler) {
+	if h == nil {
+		return
+	}
+	h.DegradationPublic = public
 }
 
 // BuildInfo contains build-time information

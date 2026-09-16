@@ -13,6 +13,7 @@ type IntelligentTestConfig struct {
 	Execution      *ProtectionRuntimeState `json:"execution,omitempty"`
 	Prompt         string                  `json:"prompt"`
 	Model          string                  `json:"model"`
+	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
 	Evaluator      string                  `json:"evaluator"`
 	ExpectedAnswer string                  `json:"expected_answer"`
 	TimeoutSeconds int                     `json:"timeout_seconds"`

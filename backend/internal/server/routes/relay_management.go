@@ -28,6 +28,8 @@ func registerRelayManagementRoutes(admin *gin.RouterGroup, h *handler.Handlers) 
 	tests.POST("/run", h.Admin.IntelligentTest.Run)
 	tests.GET("/settings", h.Admin.IntelligentTest.Settings)
 	tests.PUT("/settings/:test_type", h.Admin.IntelligentTest.UpdateSetting)
+
+	RegisterDegradationAdminRoutes(admin, h)
 }
 
 func registerAccountCapabilityRoutes(authenticated *gin.RouterGroup, h *handler.Handlers) {

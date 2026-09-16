@@ -836,6 +836,7 @@ func ProvideTLSFingerprintProfileService(repo TLSFingerprintProfileRepository, c
 var ProviderSet = wire.NewSet(
 	NewUserCleanupService,
 	ProvideIntelligentTestService,
+	NewDegradationService,
 	// Core services
 	ProvideAuthService,
 	NewPasskeyService,

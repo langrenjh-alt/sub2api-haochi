@@ -21,6 +21,7 @@ import (
 type intelligentRunKey struct{}
 type intelligentRunContext struct {
 	prompt  string
+	effort  string
 	capture *intelligentCapture
 }
 
@@ -45,18 +46,50 @@ func intelligentPrompt(ctx context.Context) string {
 	return ""
 }
 func applyIntelligentPayloadPrompt(ctx context.Context, payload map[string]any) {
-	prompt := intelligentPrompt(ctx)
-	if prompt == "" {
+	run := intelligentContext(ctx)
+	if run == nil {
 		return
 	}
-	if _, ok := payload["input"]; ok {
-		payload["input"] = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "input_text", "text": prompt}}}}
-	}
-	if _, ok := payload["messages"]; ok {
-		payload["messages"] = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": prompt}}}}
-		if _, bounded := payload["max_tokens"]; bounded {
-			payload["max_tokens"] = 8192
+	prompt := run.prompt
+	if prompt != "" {
+		if _, ok := payload["input"]; ok {
+			payload["input"] = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "input_text", "text": prompt}}}}
 		}
+		if _, ok := payload["messages"]; ok {
+			payload["messages"] = []map[string]any{{"role": "user", "content": []map[string]any{{"type": "text", "text": prompt}}}}
+			if _, bounded := payload["max_tokens"]; bounded {
+				payload["max_tokens"] = 8192
+			}
+		}
+	}
+	// Capability probes pin their own thinking budget. The account/group policy
+	// still applies afterwards, so an explicit cap is never exceeded.
+	applyIntelligentPayloadEffort(payload, run.effort)
+}
+
+// applyIntelligentPayloadEffort pins the reasoning effort requested by a test
+// configuration onto whichever request shape the protocol adapter built.
+func applyIntelligentPayloadEffort(payload map[string]any, effort string) {
+	if payload == nil || strings.TrimSpace(effort) == "" {
+		return
+	}
+	if nested, ok := payload["reasoning"].(map[string]any); ok {
+		nested["effort"] = effort
+		return
+	}
+	if nested, ok := payload["output_config"].(map[string]any); ok {
+		nested["effort"] = effort
+		return
+	}
+	switch {
+	case payload["messages"] != nil:
+		payload["reasoning_effort"] = effort
+	case payload["input"] != nil:
+		payload["reasoning"] = map[string]any{"effort": effort}
+	case payload["contents"] != nil:
+		// Gemini-style bodies carry no reasoning effort knob.
+	default:
+		payload["reasoning_effort"] = effort
 	}
 }
 func intelligentAntigravityBody(ctx context.Context, body []byte) ([]byte, error) {
@@ -104,6 +137,13 @@ func (s *AccountTestService) RunIntelligentTest(ctx context.Context, r *Intellig
 		return errors.New("account unavailable")
 	}
 	r.AntiDegradation = account.AntiDegradationEnabled()
+	// A degradation probe must keep observing an account that a previous
+	// verdict suspended: the suspension is exactly what the re-check has to
+	// clear. Manual disables never reach this path because the scheduler only
+	// queues schedulable accounts.
+	if IsDegradationTestType(r.TestType) {
+		ctx = withIntelligentTempSuspensionIgnored(ctx)
+	}
 	if r.ConfigSnapshot == nil {
 		return errors.New("missing configuration")
 	}
@@ -131,7 +171,7 @@ func (s *AccountTestService) RunIntelligentTest(ctx context.Context, r *Intellig
 	r.ConfigSnapshot.Execution.Model = r.Model
 	capture := &intelligentCapture{}
 	capture.collectCredentialSecrets(account.Credentials)
-	ctx = context.WithValue(ctx, intelligentRunKey{}, &intelligentRunContext{prompt: r.Input, capture: capture})
+	ctx = context.WithValue(ctx, intelligentRunKey{}, &intelligentRunContext{prompt: r.Input, effort: r.ConfigSnapshot.ReasoningEffort, capture: capture})
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	recorder := &intelligentSSEWriter{header: http.Header{}, cancel: cancel}

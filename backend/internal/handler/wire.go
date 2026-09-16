@@ -258,6 +258,8 @@ func ProvideHandlers(
 var ProviderSet = wire.NewSet(
 	admin.NewUserCleanupHandler,
 	admin.NewIntelligentTestHandler,
+	admin.NewDegradationHandler,
+	NewDegradationPublicHandler,
 	NewAccountCapabilityHandler,
 	// Top-level handlers
 	NewAuthHandler,

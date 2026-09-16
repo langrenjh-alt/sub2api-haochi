@@ -3228,6 +3228,9 @@
           :account-names="editCodexManifestAccountNames"
         />
 
+        <!-- 降智检测：分组级开关与探测参数（自带保存，独立于本表单） -->
+        <DegradationDetectionCard v-if="editingGroup" :group-id="editingGroup.id" />
+
 
         <div class="border-t border-gray-200 pt-4 mt-4 dark:border-dark-400">
           <div class="flex flex-wrap items-start justify-between gap-3">
@@ -4406,6 +4409,7 @@ import GroupRPMOverridesModal from "@/components/admin/group/GroupRPMOverridesMo
 import GroupCapacityBadge from "@/components/common/GroupCapacityBadge.vue";
 import ReasoningEffortPolicyFields from "@/components/admin/group/ReasoningEffortPolicyFields.vue";
 import CodexManifestAccountsField from "@/components/admin/group/CodexManifestAccountsField.vue";
+import DegradationDetectionCard from "@/views/admin/DegradationDetectionCard.vue";
 import PricingEntryCard from "@/components/admin/channel/PricingEntryCard.vue";
 import type { PricingFormEntry } from "@/components/admin/channel/types";
 import {

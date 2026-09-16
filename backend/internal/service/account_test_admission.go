@@ -23,6 +23,7 @@ func accountTestCooldown(ctx context.Context, a *Account, model string, now time
 	if a == nil {
 		return errors.New("账号不存在")
 	}
+	ignoreTempSuspension := intelligentTempSuspensionIgnored(ctx)
 	until, reason := now, ""
 	for _, item := range []struct {
 		deadline *time.Time
@@ -30,6 +31,12 @@ func accountTestCooldown(ctx context.Context, a *Account, model string, now time
 	}{
 		{a.RateLimitResetAt, "账号限流冷却尚未结束"}, {a.OverloadUntil, "账号过载冷却尚未结束"}, {a.TempUnschedulableUntil, "账号临时暂停尚未结束"},
 	} {
+		// The degradation detector suspends an account with the official
+		// temporary-unschedulable field, then has to keep probing it. Skipping
+		// only that entry keeps rate-limit and overload cooldowns intact.
+		if ignoreTempSuspension && item.deadline == a.TempUnschedulableUntil {
+			continue
+		}
 		if item.deadline != nil && item.deadline.After(until) {
 			until, reason = *item.deadline, item.reason
 		}

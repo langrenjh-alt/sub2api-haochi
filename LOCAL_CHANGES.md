@@ -314,3 +314,83 @@ go run ./cmd/migcheck "host=127.0.0.1 port=5432 user=sub2api password=… dbname
 pnpm run typecheck
 pnpm run build
 ```
+
+## Degradation Detection + Public Artwork Page (2026-09-16)
+
+Fork-added feature. It is built on the intelligent-test plumbing that the
+third-party merge already brought in, and it adds no new tables.
+
+### Scheduling model
+
+- Per-group switch and parameters live on `groups`
+  (`degradation_detection_enabled`, `degradation_detection_config`,
+  `degradation_preview_enabled`, migration `241_degradation_detection.sql`).
+- The probe reuses `test_settings` (`degradation_probe`) and `account_tests`.
+  `test_settings.enabled` tracks whether *any* group has the detector on, which
+  is what keeps the claim worker from cancelling queued probes.
+- The scheduler (`internal/service/degradation_service.go`) ticks every minute,
+  sweeps the stalest accounts first, and stops enqueueing once its own pending
+  backlog reaches 200, so a large group cannot flood the shared queue (the
+  runner drains four tests at a time).
+
+### Verdict -> scheduling, and why manual disable stays manual
+
+- The detector suspends an account through the **official**
+  `temp_unschedulable_until` / `temp_unschedulable_reason` window, and records
+  the same deadline in `accounts.degradation_suspended_until` with the note
+  prefix `降智检测`.
+- Only `incorrect` suspends and only `correct` recovers. An undetermined
+  verdict changes nothing, because a verbose-but-unparseable answer is not
+  evidence of degradation.
+- Recovery clears the official window **only while its reason still carries our
+  prefix**, then always clears our own marker. An unrelated pause (manual
+  disable, overload, rate limit) survives verbatim. Accounts with
+  `schedulable = false` are excluded from the scheduler entirely, which is what
+  makes "手动停用不参与探测也不自动启用" hold by construction.
+- Install order matters: `wire_gen.go` constructs the detector before
+  `ProvideIntelligentTestService` so the outcome hook is registered before the
+  worker goroutines start.
+
+### Probing during suspension
+
+`accountTestCooldown` treats `temp_unschedulable_until` as a cooldown, which
+would otherwise defer the detector's own re-check. Degradation test types carry
+a context flag that skips **only** that entry; rate-limit and overload cooldowns
+still apply. Covered by `TestAccountTestCooldownSkipsOnlyDetectorSuspension`.
+
+### Reasoning effort
+
+`IntelligentTestConfig` gained `reasoning_effort`. `applyIntelligentPayloadPrompt`
+(the single hook every protocol adapter calls) now also pins the effort onto
+whichever request shape was built: `reasoning.effort` for Responses,
+`reasoning_effort` for Chat Completions, `output_config.effort` for Anthropic.
+
+### Public page
+
+- `GET /api/v1/jiangzhijiance` (page + interval + model/effort metadata) and
+  `GET /api/v1/jiangzhijiance/records/:id/image` (sanitized SVG, CSP sandbox).
+  No JWT: this is the requested public page, so it is deliberately *not* behind
+  `BackendModeUserGuard` (backend mode is enabled on the account-pool instance).
+- Every SVG is re-encoded through `PrepareIntelligentSVGPreview`, and the page
+  loads it through `<img>`, so stored markup is never executed.
+- Frontend: `/jiangzhijiance/` (`views/public/DegradationDetectionView.vue`,
+  added to `BACKEND_MODE_ALLOWED_PATHS`) and a self-saving card in the group
+  editor (`views/admin/DegradationDetectionCard.vue`).
+
+### Verification
+
+```bash
+cd backend
+go build ./...
+go test -tags=unit -count=1 ./internal/service/ ./internal/handler/admin/ ./internal/server/routes/
+#   failure set must equal the pristine baseline:
+#   TestGroupHandlerSimpleModeSanitizesCommercialFields and
+#   TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort
+go test -tags=unit -count=1 -run 'Degradation|IntelligentPayload|AccountTestCooldown|HandleIntelligentTestOutcome|RunNowSkips|SafePublicSVG' ./internal/service/
+
+cd ../frontend
+pnpm run build
+```
+
+The migration and the detector SQL were replayed against a throwaway database
+cloned from the production schema (`../jiangzhi-20260916/sandbox_validate.sh`).

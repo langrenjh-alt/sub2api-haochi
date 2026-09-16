@@ -176,6 +176,17 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    // 降智检测公开展示页：匿名可读，路径按产品要求固定为 /jiangzhijiance/
+    path: '/jiangzhijiance',
+    alias: '/jiangzhijiance/',
+    name: 'DegradationDetection',
+    component: () => import('@/views/public/DegradationDetectionView.vue'),
+    meta: {
+      requiresAuth: false,
+      title: '降智检测'
+    }
+  },
+  {
     path: '/model-plaza',
     name: 'ModelPlaza',
     component: () => import('@/views/ModelPlazaView.vue'),
@@ -751,7 +762,7 @@ let authInitialized = false
 const navigationLoading = useNavigationLoadingState()
 // 延迟初始化预加载，传入 router 实例
 let routePrefetch: ReturnType<typeof useRoutePrefetch> | null = null
-const BACKEND_MODE_ALLOWED_PATHS = ['/login', '/key-usage', '/setup', '/payment/result', '/payment/airwallex', '/legal']
+const BACKEND_MODE_ALLOWED_PATHS = ['/login', '/key-usage', '/setup', '/payment/result', '/payment/airwallex', '/legal', '/jiangzhijiance']
 const BACKEND_MODE_CALLBACK_PATHS = [
   '/auth/callback',
   '/auth/linuxdo/callback',
