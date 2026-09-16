@@ -957,7 +957,6 @@ var ProviderSet = wire.NewSet(
 	wire.Bind(new(SecurityPolicyModelReviewer), new(*ContentModerationService)),
 	NewSecurityPolicyService,
 	NewGlobalModelPricingService,
-	ProvideAccountHealthService,
 	ProvideMarginService,
 	NewTieredRoutingService,
 	ProvideSpendGuardService,

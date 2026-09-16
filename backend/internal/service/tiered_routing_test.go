@@ -54,7 +54,7 @@ func TestTierPoolContext(t *testing.T) {
 }
 
 func TestTieredRoutingSettingsRoundtrip(t *testing.T) {
-	repo := &stubHealthSettingRepo{}
+	repo := &stubSharedSettingRepo{}
 	svc := NewTieredRoutingService(repo)
 	got := svc.GetSettings(context.Background())
 	require.False(t, got.Enabled)

@@ -129,9 +129,6 @@ func RegisterAdminRoutes(
 		// 全站模型定价覆盖
 		registerGlobalPricingRoutes(admin, h)
 
-		// 账号健康分
-		registerAccountHealthRoutes(admin, h)
-
 		// 毛利看板与熔断
 		registerMarginRoutes(admin, h)
 
@@ -816,17 +813,6 @@ func registerGlobalPricingRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		pricing.PUT("/:id", h.Admin.GlobalPricing.Update)
 		pricing.DELETE("/:id", h.Admin.GlobalPricing.Delete)
 		pricing.POST("/:id/enable", h.Admin.GlobalPricing.SetEnabled)
-	}
-}
-
-func registerAccountHealthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
-	health := admin.Group("/account-health")
-	{
-		health.GET("", h.Admin.AccountHealth.Snapshot)
-		health.GET("/settings", h.Admin.AccountHealth.GetSettings)
-		health.PUT("/settings", h.Admin.AccountHealth.UpdateSettings)
-		health.POST("/:id/isolate", h.Admin.AccountHealth.Isolate)
-		health.POST("/:id/resume", h.Admin.AccountHealth.Resume)
 	}
 }
 

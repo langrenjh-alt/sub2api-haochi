@@ -37,8 +37,44 @@ func TestNormalizeMarginFuseSettings(t *testing.T) {
 	require.True(t, norm.IntervalMinutes >= 1)
 }
 
+// stubSharedSettingRepo is the setting repository the margin tests need. It used
+// to live next to the removed account-health tests.
+type stubSharedSettingRepo struct {
+	values map[string]string
+}
+
+func (s *stubSharedSettingRepo) Get(ctx context.Context, key string) (*Setting, error) {
+	return &Setting{Key: key, Value: s.values[key]}, nil
+}
+
+func (s *stubSharedSettingRepo) GetValue(_ context.Context, key string) (string, error) {
+	return s.values[key], nil
+}
+
+func (s *stubSharedSettingRepo) Set(_ context.Context, key, value string) error {
+	if s.values == nil {
+		s.values = make(map[string]string)
+	}
+	s.values[key] = value
+	return nil
+}
+
+func (s *stubSharedSettingRepo) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	return nil, nil
+}
+
+func (s *stubSharedSettingRepo) SetMultiple(_ context.Context, settings map[string]string) error {
+	return nil
+}
+
+func (s *stubSharedSettingRepo) GetAll(context.Context) (map[string]string, error) {
+	return nil, nil
+}
+
+func (s *stubSharedSettingRepo) Delete(_ context.Context, _ string) error { return nil }
+
 func TestMarginRowWithoutBilling(t *testing.T) {
-	svc := NewMarginService(nil, &stubMarginChannels{}, nil, &stubHealthSettingRepo{})
+	svc := NewMarginService(nil, &stubMarginChannels{}, nil, &stubSharedSettingRepo{})
 	row := svc.toMarginRow(marginAggRow{model: "gpt-5", requests: 3, revenue: 1.5})
 	require.Equal(t, "gpt-5", row.Model)
 	require.Nil(t, row.EstCost)
@@ -47,7 +83,7 @@ func TestMarginRowWithoutBilling(t *testing.T) {
 
 func TestMarginUnfuse(t *testing.T) {
 	ch := &stubMarginChannels{status: map[int64]string{9: StatusDisabled}}
-	svc := NewMarginService(nil, ch, nil, &stubHealthSettingRepo{})
+	svc := NewMarginService(nil, ch, nil, &stubSharedSettingRepo{})
 	svc.mu.Lock()
 	svc.fused[9] = time.Now()
 	svc.mu.Unlock()

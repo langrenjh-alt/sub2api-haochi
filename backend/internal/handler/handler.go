@@ -43,7 +43,6 @@ type AdminHandlers struct {
 	ContentModeration      *admin.ContentModerationHandler
 	SecurityPolicy         *admin.SecurityPolicyHandler
 	GlobalPricing          *admin.GlobalPricingHandler
-	AccountHealth          *admin.AccountHealthHandler
 	Margin                 *admin.MarginHandler
 	TieredRouting          *admin.TieredRoutingHandler
 	SpendGuard             *admin.SpendGuardHandler

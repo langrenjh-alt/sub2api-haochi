@@ -38,7 +38,7 @@ func TestNormalizeSpendGuardSettings(t *testing.T) {
 }
 
 func TestSpendGuardSettingsRoundtrip(t *testing.T) {
-	repo := &stubHealthSettingRepo{}
+	repo := &stubSharedSettingRepo{}
 	svc := NewSpendGuardService(nil, nil, repo)
 	got := svc.GetSettings(context.Background())
 	require.False(t, got.Enabled)
