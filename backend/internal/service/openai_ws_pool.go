@@ -22,9 +22,7 @@ const (
 	openAIWSConnHealthCheckIdle = 90 * time.Second
 	// coder/websocket cannot consume pong frames without a reader. Recycle
 	// unsupported idle sockets before the upstream keepalive window expires.
-	// OpenAI production closes idle WS with "keepalive ping timeout" well
-	// before 90s; 15s keeps the pool from handing out already-dead sockets.
-	openAIWSConnIdleRecycleAfter   = 15 * time.Second
+	openAIWSConnIdleRecycleAfter   = 90 * time.Second
 	openAIWSConnHealthCheckTO      = 2 * time.Second
 	openAIWSConnPrewarmExtraDelay  = 2 * time.Second
 	openAIWSAcquireCleanupInterval = 3 * time.Second

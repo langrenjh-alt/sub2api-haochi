@@ -33,7 +33,6 @@ func TestForwardOpenAIWSV2_KeepsOutboundAndObservedServiceTiersSeparate(t *testi
 			c, _ := gin.CreateTestContext(rec)
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 			c.Request.Header.Set("User-Agent", "unit-test-agent/1.0")
-			SetOpenAIClientTransport(c, OpenAIClientTransportHTTP)
 
 			cfg := &config.Config{}
 			cfg.Security.URLAllowlist.Enabled = false

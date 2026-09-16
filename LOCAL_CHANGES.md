@@ -40,6 +40,28 @@ This fork is based on the official `main` commit
 - API-key auth snapshots are version `25` so v22 fork snapshots and v24
   official snapshots are both evicted.
 
+## OpenAI WS 二开 Removal (2026-09-16)
+
+Fork commits `f6b4e8caa` (HTTP ingress multiplexed onto the upstream WS pool) and
+`f4e71a62a` (15s idle WS recycle) are removed; official v0.2.4 behaviour is
+restored for the OpenAI WS path:
+
+- `resolveOpenAIWSDecisionByClientTransport` again returns
+  `openAIWSHTTPDecision("client_protocol_http")` for HTTP ingress, so a
+  `/v1/responses` HTTP/SSE request never multiplexes onto the upstream WS pool.
+  Upstream WS is used only by the WebSocket ingress.
+- `openAIWSConnIdleRecycleAfter` is back to the official `90s`; the fork's 15s
+  idle recycle and its keepalive-timeout comment are gone.
+- `openai_gateway_forward.go` keeps only its unrelated fork hunk (the OpenAI
+  HTML-403 retry policy documented below); the WS comment is official again.
+
+`openai_client_transport.go`, `openai_client_transport_test.go`,
+`openai_ws_pool.go`, `openai_ws_protocol_forward_test.go` and
+`openai_ws_forwarder_v2_test.go` are byte-identical to official `main`
+(`98d86915b`) again. The fork's `transient_html_403` WS dial classification
+stays, because it belongs to the fork's OpenAI 403 policy that also applies on
+the HTTP path.
+
 ## Public Group Capacity Pool
 
 The user channel-status page exposes a shared capacity view for public standard
@@ -92,6 +114,8 @@ Primary files:
 cd backend
 go test -tags=unit ./internal/handler
 go test -tags=unit ./internal/service
+go test -tags=unit ./internal/service -run 'TestResolveOpenAIWSDecisionByClientTransport|TestOpenAIGatewayService_Forward_HTTPIngressStaysHTTPWhenWSEnabled'
+#   official gate: HTTP ingress must stay HTTP/SSE when account/global WS is on
 
 cd ../frontend
 pnpm install --frozen-lockfile
