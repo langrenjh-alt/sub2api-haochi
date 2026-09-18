@@ -201,6 +201,9 @@ type AdminGroup struct {
 	// 固定账号获取 Codex Model Manifest 配置（仅 openai 平台使用）。
 	CodexModelsManifestConfig domain.GroupCodexModelsManifestConfig `json:"codex_models_manifest_config"`
 
+	// 分组统一防降智策略预设（策略注册表 ID）；空字符串表示不干预，各账号自管。
+	AntiDegradePreset string `json:"anti_degrade_preset"`
+
 	// 支持的模型系列（仅 antigravity 平台使用）
 	SupportedModelScopes    []string       `json:"supported_model_scopes"`
 	AccountGroups           []AccountGroup `json:"account_groups,omitempty"`

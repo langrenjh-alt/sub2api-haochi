@@ -1,0 +1,71 @@
+package repository
+
+import (
+	"context"
+	"github.com/stretchr/testify/require"
+	"testing"
+)
+
+func TestDegradationPostgresRoundSample(t *testing.T) {
+	db := degradationTestDB(t)
+	r := &degradationRepository{db: db}
+	ctx := context.Background()
+	_, err := db.Exec(`INSERT INTO account_tests(account_id,test_type,status,config_snapshot,finished_at) VALUES(10,'degradation_probe','running','{"degradation_group_id":1}',NULL)`)
+	require.NoError(t, err)
+	require.NoError(t, r.SchedulePublicSamples(ctx))
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM account_tests WHERE config_snapshot->>'public_sample'='true'`).Scan(&n))
+	require.Zero(t, n, "no sample before sweep drains")
+	_, err = db.Exec(`UPDATE account_tests SET status='completed',finished_at=NOW(); UPDATE groups SET degradation_detection_config='{"enabled":true,"prompt":"numeric test","expected_answer":"960","model":"model-test","interval_minutes":10}' WHERE id=1`)
+	require.NoError(t, err)
+	require.NoError(t, r.SchedulePublicSamples(ctx))
+	require.NoError(t, r.SchedulePublicSamples(ctx))
+	var source int64
+	var answer, prompt string
+	require.NoError(t, db.QueryRow(`SELECT count(*),max((config_snapshot->>'source_round_id')::bigint),max(config_snapshot->>'expected_answer'),max(input) FROM account_tests WHERE config_snapshot->>'public_sample'='true'`).Scan(&n, &source, &answer, &prompt))
+	require.Equal(t, 1, n)
+	require.Positive(t, source)
+	require.Equal(t, "960", answer)
+	require.Equal(t, "numeric test", prompt)
+	timeline, err := r.SampleTimeline(ctx, 24)
+	require.NoError(t, err)
+	require.Len(t, timeline.Buckets, 144)
+	require.Equal(t, 10, timeline.BucketMinute)
+	require.True(t, timeline.Running)
+	require.Zero(t, timeline.Total)
+	_, err = db.Exec(`UPDATE account_tests SET status='completed',duration_ms=8000,evaluation='{"answer_verdict":"correct"}',config_snapshot=config_snapshot||'{"output_tokens":166}',finished_at=NOW() WHERE config_snapshot->>'public_sample'='true'`)
+	require.NoError(t, err)
+	timeline, err = r.SampleTimeline(ctx, 24)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, timeline.Total, "bulk results excluded")
+	require.Equal(t, "healthy", timeline.CurrentState)
+	require.EqualValues(t, 166, *timeline.LatestSample.OutputTokens)
+	require.EqualValues(t, 8000, timeline.LatestSample.DurationMS)
+	require.NoError(t, r.SchedulePublicSamples(ctx))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM account_tests WHERE config_snapshot->>'public_sample'='true'`).Scan(&n))
+	require.Equal(t, 1, n, "completed round is not resampled")
+	_, err = db.Exec(`INSERT INTO account_tests(account_id,test_type,status,config_snapshot,finished_at) VALUES(40,'degradation_probe','completed','{"degradation_group_id":1}',NOW())`)
+	require.NoError(t, err)
+	require.NoError(t, r.SchedulePublicSamples(ctx))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM account_tests WHERE config_snapshot->>'public_sample'='true'`).Scan(&n))
+	require.Equal(t, 1, n, "respect interval between rounds")
+	_, err = db.Exec(`UPDATE account_tests SET created_at=NOW()-interval '11 minutes' WHERE config_snapshot->>'public_sample'='true'`)
+	require.NoError(t, err)
+	require.NoError(t, r.SchedulePublicSamples(ctx))
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM account_tests WHERE config_snapshot->>'public_sample'='true'`).Scan(&n))
+	require.Equal(t, 2, n)
+	_, err = db.Exec(`UPDATE account_tests SET status='failed',evaluation='{"answer_verdict":"not_evaluated"}',finished_at=NOW() WHERE status='queued'`)
+	require.NoError(t, err)
+	timeline, err = r.SampleTimeline(ctx, 24)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, timeline.Total)
+	require.EqualValues(t, 1, timeline.Undetermined)
+	require.Zero(t, timeline.Degraded)
+	require.Equal(t, "unknown", timeline.CurrentState)
+	_, err = r.ResetPublicStats(ctx, 1)
+	require.NoError(t, err)
+	timeline, err = r.SampleTimeline(ctx, 24)
+	require.NoError(t, err)
+	require.Zero(t, timeline.Total)
+	require.Nil(t, timeline.LatestSample)
+}

@@ -99,6 +99,7 @@ const (
 	upstreamProtocolModeDefault          = "default"
 	upstreamProtocolModeLongStreamH2     = "long_stream_h2"
 	upstreamProtocolModeOpenAIH1         = "openai_h1"
+	upstreamProtocolModeOpenAIHarvest    = "openai_harvest_h1_no_reuse"
 	upstreamProtocolModeOpenAIH2         = "openai_h2"
 	upstreamProtocolModeOpenAIH1Fallback = "openai_h1_fallback"
 	upstreamProtocolModeGrok             = "grok"
@@ -166,6 +167,10 @@ type httpUpstreamService struct {
 	clients map[string]*upstreamClientEntry // 客户端缓存池，key 由隔离策略决定
 	// OpenAI 走 HTTP/HTTPS 代理时的 H2->H1 回退状态（key=标准化 proxyKey）
 	openAIHTTP2Fallbacks sync.Map
+	// TLS 指纹握手被上游拒绝后的标准 TLS 回退状态（key=account/proxy/profile）
+	tlsFingerprintFallbacks sync.Map
+	// 代理连续失败后的直连回退状态（key=account/proxy/profile）
+	tlsFingerprintDirectFallbacks sync.Map
 }
 
 // NewHTTPUpstream 创建通用 HTTP 上游服务
@@ -296,6 +301,13 @@ func (s *httpUpstreamService) doWithTLSUncontrolled(req *http.Request, proxyURL 
 	if err := s.validateRequestHost(req); err != nil {
 		return nil, err
 	}
+	fallbackKey := s.tlsFingerprintFallbackKey(proxyURL, accountID, profile)
+	if _, ok := s.tlsFingerprintDirectFallbacks.Load(fallbackKey); ok {
+		return s.doStandardHTTP1WithRetry(req, "")
+	}
+	if _, ok := s.tlsFingerprintFallbacks.Load(fallbackKey); ok {
+		return s.doStandardHTTP1WithRetry(req, proxyURL)
+	}
 
 	entry, err := s.acquireClientWithTLS(proxyURL, accountID, accountConcurrency, profile, upstreamProfile)
 	if err != nil {
@@ -309,6 +321,47 @@ func (s *httpUpstreamService) doWithTLSUncontrolled(req *http.Request, proxyURL 
 	if err != nil {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		if isTLSFingerprintHandshakeEOF(err) {
+			// ChatGPT can close the socket during a fingerprinted ClientHello.
+			// Retry once with the normal Go TLS transport so one bad fingerprint
+			// does not make an otherwise valid OAuth account unusable. Remove the
+			// poisoned fingerprint client from the pool after the failure.
+			s.discardClientIfMatch(entry)
+			s.tlsFingerprintFallbacks.Store(fallbackKey, struct{}{})
+			retryReq, ok := cloneRequestForRetry(req)
+			if ok {
+				slog.Warn("tls_fingerprint_fallback_to_standard",
+					"account_id", accountID,
+					"target", targetHost,
+					"profile", profile.Name,
+					"error", err)
+				if retryResp, retryErr := s.doStandardHTTP1WithRetry(retryReq, proxyURL); retryErr == nil {
+					return retryResp, nil
+				} else {
+					slog.Warn("tls_fingerprint_standard_fallback_failed",
+						"account_id", accountID,
+						"target", targetHost,
+						"error", retryErr)
+					directReq, directOK := cloneRequestForRetry(req)
+					if directOK {
+						if directResp, directErr := s.doStandardHTTP1WithRetry(directReq, ""); directErr == nil {
+							s.tlsFingerprintDirectFallbacks.Store(fallbackKey, struct{}{})
+							slog.Warn("tls_fingerprint_direct_fallback",
+								"account_id", accountID,
+								"target", targetHost,
+								"proxy", proxyInfo,
+								"error", retryErr)
+							return directResp, nil
+						} else {
+							slog.Warn("tls_fingerprint_direct_fallback_failed",
+								"account_id", accountID,
+								"target", targetHost,
+								"error", directErr)
+						}
+					}
+				}
+			}
+		}
 		slog.Debug("tls_fingerprint_request_failed", "account_id", accountID, "error", err)
 		return nil, err
 	}
@@ -321,6 +374,122 @@ func (s *httpUpstreamService) doWithTLSUncontrolled(req *http.Request, proxyURL 
 	})
 
 	return resp, nil
+}
+
+func (s *httpUpstreamService) doStandardHTTP1WithRetry(req *http.Request, proxyURL string) (*http.Response, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		attemptReq, ok := cloneRequestForRetry(req)
+		if !ok {
+			return nil, lastErr
+		}
+		resp, err := s.doStandardHTTP1Uncontrolled(attemptReq, proxyURL)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !isRetryableStandardTLSFallbackError(err) || attempt == maxAttempts-1 {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 150 * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
+func isRetryableStandardTLSFallbackError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unexpected eof") ||
+		strings.HasSuffix(strings.TrimSpace(message), ": eof") ||
+		strings.HasSuffix(strings.TrimSpace(message), " eof")
+}
+
+func (s *httpUpstreamService) doStandardHTTP1Uncontrolled(req *http.Request, proxyURL string) (*http.Response, error) {
+	if err := s.validateRequestHost(req); err != nil {
+		return nil, err
+	}
+	_, parsedProxy, err := normalizeProxyURL(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	settings := s.resolvePoolSettings(s.getIsolationMode(), 0)
+	settings = s.applyProfilePoolSettings(settings, service.HTTPUpstreamProfileOpenAI)
+	transport, err := buildUpstreamTransport(settings, parsedProxy, upstreamProtocolModeOpenAIH1Fallback)
+	if err != nil {
+		return nil, fmt.Errorf("build standard HTTP/1.1 fallback transport: %w", err)
+	}
+	client := &http.Client{Transport: transport}
+	if s.shouldValidateResolvedIP() {
+		client.CheckRedirect = s.redirectChecker
+	}
+	client = s.httpClientForUpstreamRequest(client, req)
+	resp, err := servertiming.Do(client, req)
+	if err != nil {
+		transport.CloseIdleConnections()
+		return nil, err
+	}
+	decompressResponseBody(resp)
+	resp.Body = wrapTrackedBody(resp.Body, transport.CloseIdleConnections)
+	return resp, nil
+}
+
+func (s *httpUpstreamService) tlsFingerprintFallbackKey(proxyURL string, accountID int64, profile *tlsfingerprint.Profile) string {
+	proxyKey := strings.TrimSpace(proxyURL)
+	if normalized, _, err := normalizeProxyURL(proxyURL); err == nil {
+		proxyKey = normalized
+	}
+	profileKey := ""
+	if profile != nil {
+		profileKey = profile.CacheKey()
+	}
+	return fmt.Sprintf("account:%d|proxy:%s|profile:%s", accountID, proxyKey, profileKey)
+}
+
+func isTLSFingerprintHandshakeEOF(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "tls handshake failed") &&
+		strings.Contains(message, "unexpected eof")
+}
+
+func cloneRequestForRetry(req *http.Request) (*http.Request, bool) {
+	if req == nil {
+		return nil, false
+	}
+	retryReq := req.Clone(req.Context())
+	if req.Body == nil {
+		return retryReq, true
+	}
+	if req.GetBody == nil {
+		return nil, false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, false
+	}
+	retryReq.Body = body
+	retryReq.GetBody = req.GetBody
+	retryReq.ContentLength = req.ContentLength
+	return retryReq, true
+}
+
+func (s *httpUpstreamService) discardClientIfMatch(target *upstreamClientEntry) {
+	if s == nil || target == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, entry := range s.clients {
+		if entry == target {
+			s.removeClientLocked(key, entry)
+			return
+		}
+	}
 }
 
 // httpClientForUpstreamRequest 按请求上下文的标记派生客户端：禁用重定向，或对重定向的每一跳做主机校验。
@@ -1040,6 +1209,9 @@ func (s *httpUpstreamService) resolveOpenAIHTTP2Settings() openAIHTTP2Settings {
 }
 
 func (s *httpUpstreamService) resolveProtocolMode(profile service.HTTPUpstreamProfile, proxyKey string, parsedProxy *url.URL) string {
+	if profile == service.HTTPUpstreamProfileOpenAIHarvest {
+		return upstreamProtocolModeOpenAIHarvest
+	}
 	if profile == service.HTTPUpstreamProfileLongStream {
 		return upstreamProtocolModeLongStreamH2
 	}
@@ -1372,6 +1544,12 @@ func buildUpstreamTransport(settings poolSettings, proxyURL *url.URL, protocolMo
 		ResponseHeaderTimeout: settings.responseHeaderTimeout,
 	}
 	switch protocolMode {
+	case upstreamProtocolModeOpenAIHarvest:
+		transport.DisableKeepAlives = true
+		transport.MaxIdleConns = 0
+		transport.MaxIdleConnsPerHost = 0
+		transport.ForceAttemptHTTP2 = false
+		transport.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
 	case upstreamProtocolModeLongStreamH2, upstreamProtocolModeOpenAIH2:
 		transport.ForceAttemptHTTP2 = true
 		// 显式配置 http2 并启用 PING 健康探测，剔除代理/NAT 静默掐断的死连接，

@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode, listStrategiesMock, applyPresetMock, revertPresetMock, showSuccessMock } = vi.hoisted(() => ({
+  listStrategiesMock: vi.fn().mockResolvedValue([]),
+  applyPresetMock: vi.fn(),
+  revertPresetMock: vi.fn(),
+  showSuccessMock: vi.fn(),
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
   authIsSimpleMode: { value: true }
@@ -11,7 +15,7 @@ const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.ho
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError: vi.fn(),
-    showSuccess: vi.fn(),
+    showSuccess: showSuccessMock,
     showInfo: vi.fn()
   })
 }))
@@ -27,6 +31,9 @@ vi.mock('@/stores/auth', () => ({
 vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
+      listAntiDegradeStrategies: listStrategiesMock,
+      applyAntiDegrade: applyPresetMock,
+      revertAntiDegrade: revertPresetMock,
       update: updateAccountMock,
       checkMixedChannelRisk: checkMixedChannelRiskMock
     },
@@ -1696,6 +1703,60 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     await wrapper.get('[data-testid="auto-reset-credit-5h-threshold"]').setValue('0')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     expect(updateAccountMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
+
+
+describe('anti-degrade preset regression', () => {
+  const strategies = [
+    { id: 'native_baseline', name: 'Native', apply_supported: false, max_concurrency: 0 },
+    { id: 'legacy', name: 'Legacy', apply_supported: true, max_concurrency: 16 },
+    { id: 'mode1', name: 'Mode 1', apply_supported: true, max_concurrency: 16 },
+  ]
+  beforeEach(() => {
+    authIsSimpleMode.value = false
+    listStrategiesMock.mockReset().mockResolvedValue(strategies)
+    applyPresetMock.mockReset()
+    revertPresetMock.mockReset()
+    showSuccessMock.mockClear()
+  })
+  it('preserves saved mode before the asynchronous registry loads', async () => {
+    let resolve!: (value: unknown) => void
+    listStrategiesMock.mockReturnValue(new Promise(r => { resolve = r }))
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = { anti_degrade: { enabled: true, mode: 'legacy' } }
+    const wrapper = mountModal(account)
+    resolve(strategies)
+    await flushPromises()
+    expect((wrapper.get('[data-testid="edit-anti-degrade-select"]').element as HTMLSelectElement).value).toBe('legacy')
+    wrapper.unmount()
+  })
+  it('does not offer strategies rejected by the apply endpoint', async () => {
+    const wrapper = mountModal(buildOpenAIOAuthParentAccount())
+    await flushPromises()
+    expect(wrapper.find('[data-testid="edit-anti-degrade-select"] option[value="native_baseline"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+  it('keeps the dialog open without a success toast when preset save fails', async () => {
+    const account = buildOpenAIOAuthParentAccount()
+    updateAccountMock.mockResolvedValue(account)
+    applyPresetMock.mockRejectedValue(new Error('preset failed'))
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.get('[data-testid="edit-anti-degrade-select"]').setValue('legacy')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(applyPresetMock).toHaveBeenCalledWith(account.id, 'legacy')
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(wrapper.emitted('close')).toBeUndefined()
+    wrapper.unmount()
+  })
+  it('disables conflicting fingerprint changes while a preset is selected', async () => {
+    const wrapper = mountModal(buildOpenAIOAuthParentAccount())
+    await flushPromises()
+    await wrapper.get('[data-testid="edit-anti-degrade-select"]').setValue('legacy')
+    expect(wrapper.get('[data-testid="edit-codex-fingerprint-mode-select"]').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 })

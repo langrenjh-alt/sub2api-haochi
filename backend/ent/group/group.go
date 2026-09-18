@@ -148,6 +148,8 @@ const (
 	FieldModelAllowlist = "model_allowlist"
 	// FieldCodexModelsManifestConfig holds the string denoting the codex_models_manifest_config field in the database.
 	FieldCodexModelsManifestConfig = "codex_models_manifest_config"
+	// FieldAntiDegradePreset holds the string denoting the anti_degrade_preset field in the database.
+	FieldAntiDegradePreset = "anti_degrade_preset"
 	// FieldRpmLimit holds the string denoting the rpm_limit field in the database.
 	FieldRpmLimit = "rpm_limit"
 	// FieldMaxReasoningEffort holds the string denoting the max_reasoning_effort field in the database.
@@ -303,6 +305,7 @@ var Columns = []string{
 	FieldMessagesDispatchModelConfig,
 	FieldModelAllowlist,
 	FieldCodexModelsManifestConfig,
+	FieldAntiDegradePreset,
 	FieldRpmLimit,
 	FieldMaxReasoningEffort,
 	FieldMaxReasoningEffortOverLimit,
@@ -457,6 +460,10 @@ var (
 	DefaultModelAllowlist domain.GroupModelAllowlist
 	// DefaultCodexModelsManifestConfig holds the default value on creation for the "codex_models_manifest_config" field.
 	DefaultCodexModelsManifestConfig domain.GroupCodexModelsManifestConfig
+	// DefaultAntiDegradePreset holds the default value on creation for the "anti_degrade_preset" field.
+	DefaultAntiDegradePreset string
+	// AntiDegradePresetValidator is a validator for the "anti_degrade_preset" field. It is called by the builders before save.
+	AntiDegradePresetValidator func(string) error
 	// DefaultRpmLimit holds the default value on creation for the "rpm_limit" field.
 	DefaultRpmLimit int
 	// DefaultMaxReasoningEffort holds the default value on creation for the "max_reasoning_effort" field.
@@ -778,6 +785,11 @@ func ByRequirePrivacySet(opts ...sql.OrderTermOption) OrderOption {
 // ByDefaultMappedModel orders the results by the default_mapped_model field.
 func ByDefaultMappedModel(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDefaultMappedModel, opts...).ToFunc()
+}
+
+// ByAntiDegradePreset orders the results by the anti_degrade_preset field.
+func ByAntiDegradePreset(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAntiDegradePreset, opts...).ToFunc()
 }
 
 // ByRpmLimit orders the results by the rpm_limit field.

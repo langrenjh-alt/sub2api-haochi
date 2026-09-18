@@ -2264,9 +2264,53 @@
             </p>
           </div>
           <div class="w-52 flex-shrink-0">
-            <Select v-model="codexFingerprintMode" data-testid="edit-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" />
+            <Select v-model="codexFingerprintMode" data-testid="edit-codex-fingerprint-mode-select" :options="codexFingerprintModeOptions" :disabled="!!antiDegradeMode || !!antiDegradeInitialMode || !!groupAntiDegradePreset" />
           </div>
         </div>
+      </div>
+
+      <!-- 防降智策略预设（仅 OpenAI OAuth）；与上方指纹收敛块互斥：预设优先级更高 -->
+      <div
+        v-if="account?.platform === 'openai' && account?.type === 'oauth'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.antiDegrade.label') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.antiDegrade.hint') }}
+            </p>
+          </div>
+          <div class="w-52 flex-shrink-0">
+            <Select
+              v-model="antiDegradeMode"
+              data-testid="edit-anti-degrade-select"
+              :options="antiDegradeOptions"
+              :disabled="antiDegradeSelectDisabled"
+            />
+          </div>
+        </div>
+        <p
+          v-if="groupAntiDegradePreset"
+          class="mt-2 text-xs text-amber-600 dark:text-amber-400"
+        >
+          {{ t('admin.accounts.openai.antiDegrade.groupManaged', { group: groupAntiDegradePreset.name, preset: groupAntiDegradePreset.preset }) }}
+        </p>
+        <p
+          v-else-if="antiDegradeSelectedStrategy"
+          class="mt-2 text-xs text-gray-500 dark:text-gray-400"
+        >
+          {{ antiDegradeSelectedStrategy.description }}
+          <span v-if="antiDegradeSelectedStrategy.risk">
+            · {{ t('admin.accounts.openai.antiDegrade.risk') }}：{{ antiDegradeSelectedStrategy.risk }}
+          </span>
+          <span v-if="antiDegradeSelectedStrategy.diagnostic_only">
+            · {{ t('admin.accounts.openai.antiDegrade.diagnosticOnly') }}
+          </span>
+        </p>
+        <p v-else class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.openai.antiDegrade.offHint') }}
+        </p>
       </div>
 
       <!-- OpenAI 订阅档位手动覆盖（Plus/Pro/Free），仅 OAuth 非影子账号 -->
@@ -3036,7 +3080,9 @@ import type {
   OpenAIEndpointCapability,
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
-  GrokMediaEligibilityState
+  GrokMediaEligibilityState,
+  AntiDegradeStrategy,
+  AntiDegradeMarker
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -3567,6 +3613,50 @@ const codexFingerprintModeOptions = computed(() => [
   { value: 'full' as CodexFingerprintMode, label: t('admin.accounts.openai.codexFingerprintFull') },
 ])
 
+// ---- 防降智策略预设 ----
+// '' 表示关闭：不做任何预设写入，账号使用自身的并发/指纹设置。
+// 选中某个预设时，该预设的指纹模式/TLS 模板/并发上限覆盖账号设置（由后端 apply 接口写入）。
+const antiDegradeMode = ref<string>('')
+// 打开弹窗时的原始值，用于判断是否需要调用 apply/revert（这两个接口不走 PUT）。
+const antiDegradeInitialMode = ref<string>('')
+const antiDegradeStrategies = ref<AntiDegradeStrategy[]>([])
+// 所属分组已设策略预设时，以分组为准，账号级下拉置灰（与后端收敛器行为一致）。
+const groupAntiDegradePreset = computed(() => {
+  const bound = new Set(form.group_ids || [])
+  const hit = (props.groups || []).find(
+    (g) => bound.has(g.id) && g.status === 'active' && !!g.anti_degrade_preset
+  )
+  return hit ? { name: hit.name, preset: (hit as { anti_degrade_preset?: string }).anti_degrade_preset as string } : null
+})
+const antiDegradeOptions = computed(() => [
+  { value: '', label: t('admin.accounts.openai.antiDegrade.off') },
+  ...(antiDegradeMode.value && !antiDegradeStrategies.value.some((s) => s.apply_supported && s.id === antiDegradeMode.value)
+    ? [{ value: antiDegradeMode.value, label: antiDegradeMode.value }] : []),
+  ...antiDegradeStrategies.value.filter((s) => s.apply_supported).map((s) => ({
+    value: s.id,
+    label: s.name,
+  })),
+])
+const antiDegradeSelectedStrategy = computed(() =>
+  antiDegradeStrategies.value.find((s) => s.id === antiDegradeMode.value) || null
+)
+
+// 预设清单来自服务端注册表；旧后端没有该接口时静默降级为"只有关闭一项"。
+if (typeof adminAPI.accounts.listAntiDegradeStrategies === 'function') {
+  adminAPI.accounts
+    .listAntiDegradeStrategies()
+    .then((list) => {
+      antiDegradeStrategies.value = list
+    })
+    .catch(() => {
+      antiDegradeStrategies.value = []
+    })
+}
+
+const antiDegradeSelectDisabled = computed(
+  () => submitting.value || isSparkShadow.value || !!groupAntiDegradePreset.value || antiDegradeStrategies.value.length === 0
+)
+
 const openAIWSModeOptions = computed(() => [
   { value: OPENAI_WS_MODE_OFF, label: t('admin.accounts.openai.wsModeOff') },
   { value: OPENAI_WS_MODE_CTX_POOL, label: t('admin.accounts.openai.wsModeCtxPool') },
@@ -4011,6 +4101,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   codexCLIOnlyEnabled.value = false
   codexCLIOnlyAppServerEnabled.value = false
   codexFingerprintMode.value = 'off'
+  antiDegradeMode.value = ''
+  antiDegradeInitialMode.value = ''
   codexImageToolMode.value = 'inherit'
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -4069,6 +4161,12 @@ const syncFormFromAccount = (newAccount: Account | null) => {
         ? fpMode as CodexFingerprintMode
         : 'off')
     }
+    // Saved state must not depend on the asynchronously loaded registry.
+    const marker = extra?.anti_degrade as AntiDegradeMarker | undefined
+    const markerMode =
+      marker?.enabled === true ? (marker.mode || 'mode1') : ''
+    antiDegradeMode.value = markerMode
+    antiDegradeInitialMode.value = antiDegradeMode.value
     const credentials = newAccount.credentials as Record<string, unknown> | undefined
     const compactMappings = credentials?.compact_model_mapping as Record<string, string> | undefined
     if (compactMappings && typeof compactMappings === 'object') {
@@ -4928,11 +5026,40 @@ const persistGrokMediaEligibility = async (accountID: number, updatedAccount: Ac
   return updatedAccount
 }
 
+/**
+ * 持久化防降智策略选择。预设不走 PUT（apply/revert 需要写 prev 快照、
+ * 派生身份种子并做版本乐观锁），因此放在账号 PUT 成功之后单独调用。
+ * 策略失败保留弹窗和选择，显示部分保存提示，允许重试。
+ */
+const persistAntiDegradePreset = async (accountID: number, updatedAccount: Account): Promise<Account> => {
+  if (props.account?.platform !== 'openai' || props.account?.type !== 'oauth') {
+    return updatedAccount
+  }
+  // 分组已设预设时以分组为准，账号级不写入（后端收敛器会持续对齐）。
+  if (groupAntiDegradePreset.value) {
+    return updatedAccount
+  }
+  if (antiDegradeMode.value === antiDegradeInitialMode.value) {
+    return updatedAccount
+  }
+
+  try {
+    const next = antiDegradeMode.value
+      ? await adminAPI.accounts.applyAntiDegrade(accountID, antiDegradeMode.value)
+      : await adminAPI.accounts.revertAntiDegrade(accountID)
+    antiDegradeInitialMode.value = antiDegradeMode.value
+    return next || updatedAccount
+  } catch (error: any) {
+    throw new Error(`${t('admin.accounts.openai.antiDegrade.partialSave')}${error?.message ? `: ${error.message}` : ''}`)
+  }
+}
+
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
   submitting.value = true
   try {
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
     updatedAccount = await persistGrokMediaEligibility(accountID, updatedAccount)
+    updatedAccount = await persistAntiDegradePreset(accountID, updatedAccount)
     appStore.showSuccess(t('admin.accounts.accountUpdated'))
     emit('updated', updatedAccount)
     handleClose()

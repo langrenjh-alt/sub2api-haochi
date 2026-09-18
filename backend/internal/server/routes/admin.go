@@ -46,6 +46,9 @@ func RegisterAdminRoutes(
 
 		// 账号管理
 		registerAccountRoutes(admin, h, stepUpAuth)
+		registerWishTeamRoutes(admin, h)
+		registerPoolRunwayRoutes(admin, h)
+		registerCodexTurnStateRoutes(admin, h)
 
 		// 公告管理
 		registerAnnouncementRoutes(admin, h)
@@ -384,6 +387,9 @@ func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		groups.PUT("/:id/rpm-overrides", h.Admin.Group.BatchSetGroupRPMOverrides)
 		groups.DELETE("/:id/rpm-overrides", h.Admin.Group.ClearGroupRPMOverrides)
 		groups.GET("/:id/api-keys", h.Admin.Group.GetGroupAPIKeys)
+		// 分组统一防降智预设的收敛状态与手动触发。
+		groups.GET("/:id/anti-degrade-sync", h.Admin.Group.AntiDegradeSync)
+		groups.POST("/:id/anti-degrade-sync", h.Admin.Group.AntiDegradeSyncTrigger)
 	}
 }
 

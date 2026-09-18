@@ -12,14 +12,17 @@
           </span>
         </div>
         <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-          按间隔用固定题目探测本组账号；答案不等于标准答案即判定降智，暂停调度并在恢复后自动重新启用。
+          按间隔用糖果题探测本组账号；答案不等于标准答案，或最近10次已记录请求中至少5次请求 gpt-6-astra、上游响应模型为 luna，即判定降智（OR）。按下方设置暂停调度或移入指定分组。
+          响应模型规则每分钟巡检；不足10条时按已有记录计数，仍需至少5次命中。未知响应模型不算命中。
           账号管理器手动停用的账号不参与探测，也不会被自动恢复。
+          跨组共享账号只要属于启用检测的分组就可能被探测；暂停会影响该账号在所有分组的调度。
         </p>
       </div>
       <button
         type="button"
         role="switch"
         :aria-checked="config.enabled"
+        :disabled="loading || saving"
         class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors"
         :class="config.enabled ? 'bg-primary-500' : 'bg-gray-300 dark:bg-dark-600'"
         @click="config.enabled = !config.enabled"
@@ -57,12 +60,12 @@
         <div>
           <label class="input-label">标准答案</label>
           <input v-model.trim="config.expected_answer" type="text" class="input" placeholder="21" />
-          <p class="input-hint">糖果题正确答案为 21；答案不同即判定降智。</p>
+          <p class="input-hint">默认 21，可自定义。保存后新任务按本组标准答案判定，已运行任务保留原答案。</p>
         </div>
-        <div>
+        <div v-if="!config.move_on_degraded">
           <label class="input-label">降智后暂停调度（分钟）</label>
           <input v-model.number="config.suspend_minutes" type="number" min="1" max="1440" step="1" class="input" />
-          <p class="input-hint">暂停期间继续探测，一旦答对立即恢复调度。</p>
+          <p class="input-hint">暂停期间继续探测；答对且响应模型规则未命中时提前恢复调度。</p>
         </div>
         <div>
           <label class="input-label">单次探测超时（秒）</label>
@@ -70,6 +73,50 @@
           <p class="input-hint">范围 30-600 秒。</p>
         </div>
       </div>
+
+      <section class="space-y-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600" aria-label="降智后移组">
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <p class="text-xs font-medium text-gray-700 dark:text-gray-300">降智后移组</p>
+            <p class="input-hint">
+              开启后，明确判定降智的账号会清除原有全部分组绑定，只绑定目标分组；不再添加降智冷却，并清除已有的降智检测冷却。
+              其他原因的停用、限流或冷却不变；超时和网络错误不触发移组，恢复后不自动移回。
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-label="降智后移组"
+            data-testid="degradation-move-switch"
+            :aria-checked="config.move_on_degraded"
+            :disabled="saving || loading"
+            class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50"
+            :class="config.move_on_degraded ? 'bg-primary-500' : 'bg-gray-300 dark:bg-dark-600'"
+            @click="config.move_on_degraded = !config.move_on_degraded"
+          >
+            <span :class="['inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform', config.move_on_degraded ? 'translate-x-6' : 'translate-x-1']" />
+          </button>
+        </div>
+        <div v-if="config.move_on_degraded">
+          <label :for="`degradation-move-target-${groupId}`" class="input-label">目标分组</label>
+          <select
+            :id="`degradation-move-target-${groupId}`"
+            v-model.number="config.move_target_group_id"
+            data-testid="degradation-move-target"
+            class="input"
+            :disabled="saving || loading"
+          >
+            <option :value="0" disabled>请选择移入分组</option>
+            <option v-if="config.move_target_group_id && !validMoveTarget" :value="config.move_target_group_id" disabled>
+              目标分组 #{{ config.move_target_group_id }} 不可用，请重新选择
+            </option>
+            <option v-for="group in moveTargetGroups" :key="group.group_id" :value="group.group_id">
+              {{ group.group_name }}（#{{ group.group_id }}）
+            </option>
+          </select>
+          <p class="input-hint">保存后对新完成的降智判定生效，不批量处理历史记录。关闭移组后恢复使用暂停调度规则。</p>
+        </div>
+      </section>
 
       <div class="space-y-3 rounded-lg bg-gray-50 p-3 dark:bg-dark-800/60">
         <div class="flex items-center justify-between gap-4">
@@ -117,13 +164,27 @@
       </div>
     </template>
 
+    <section class="space-y-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600" aria-label="公开统计管理">
+      <p class="text-xs font-medium text-gray-700 dark:text-gray-300">公开页统计管理（全站）</p>
+      <p class="input-hint">重置所有分组汇总的时间轴、答对比例、答错次数及最近探测状态。历史探测、作品数量、分组设置和账号暂停状态保持不变；重置前入队的任务也不再计入。</p>
+      <button type="button" class="btn btn-secondary text-xs" :disabled="resetting" @click="resetConfirmation = true">重置公开页统计</button>
+      <div v-if="resetConfirmation" class="space-y-3 rounded-lg bg-amber-50 p-3 dark:bg-dark-800" role="group" aria-label="确认重置全站统计">
+        <p class="text-xs text-gray-700 dark:text-gray-300">确认从现在开始重新累计全站公开统计？24 小时、3 天和 7 天窗口都会重置，并非仅影响当前分组。</p>
+        <div class="flex gap-3">
+          <button type="button" class="btn btn-primary text-xs" :disabled="resetting" @click="confirmStatsReset">{{ resetting ? '正在重置…' : '确认重置全站统计' }}</button>
+          <button type="button" class="btn btn-secondary text-xs" :disabled="resetting" @click="resetConfirmation = false">取消</button>
+        </div>
+      </div>
+      <p v-if="resetMessage" :role="resetFailed ? 'alert' : 'status'" class="text-xs" :class="resetFailed ? 'text-red-600' : 'text-emerald-700 dark:text-emerald-300'">{{ resetMessage }}</p>
+    </section>
+
     <!-- 公开页是运营可管理的展台：这里能看能删，但只动画作本身。 -->
     <div class="space-y-3 rounded-lg bg-gray-50 p-3 dark:bg-dark-800/60">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p class="text-xs font-medium text-gray-700 dark:text-gray-300">公开页作品管理</p>
           <p class="input-hint">
-            当前展示 {{ worksTotal }} 幅。删除只影响公开页展示，不会动探测记录；运行中的画作不会被清掉。
+            全站作品管理，共 {{ worksTotal }} 条。删除只影响公开页展示，不会动探测记录；运行中的画作不会被清掉。
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
@@ -148,7 +209,7 @@
           class="flex items-center gap-3 rounded-lg border border-gray-200 bg-white p-2 dark:border-dark-700 dark:bg-dark-900"
         >
           <img
-            v-if="work.has_image"
+            v-if="workImages[work.id]"
             :src="workImageURL(work.id)"
             alt=""
             class="h-14 w-14 flex-shrink-0 rounded-md bg-gray-50 object-contain dark:bg-dark-800"
@@ -171,91 +232,161 @@
     </div>
 
     <div class="flex flex-wrap items-center gap-3">
-      <button type="button" class="btn btn-secondary" :disabled="saving" @click="save">
+      <button type="button" class="btn btn-secondary" :disabled="saving || loading || !loaded" @click="save">
         {{ saving ? '保存中…' : '保存降智检测' }}
       </button>
       <button
         v-if="config.enabled"
         type="button"
         class="btn btn-secondary"
-        :disabled="running"
+        :disabled="running || saving || loading"
         @click="runNow"
       >
         {{ running ? '已入队' : '立即探测本组' }}
       </button>
-      <span v-if="message" class="text-xs" :class="failed ? 'text-red-600' : 'text-emerald-600'">{{ message }}</span>
+      <span v-if="message" :role="failed ? 'alert' : 'status'" class="text-xs" :class="failed ? 'text-red-600' : 'text-emerald-600'">{{ message }}</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
 	DEFAULT_DEGRADATION_CONFIG,
 	deleteWork,
 	listGroups,
 	listWorks,
-	publicImageURL,
+	adminWorkImage,
 	purgeWorks,
+	resetPublicStats,
 	runNow as runDegradationNow,
 	updateGroup,
 	type DegradationDetectionConfig,
+	type DegradationGroup,
 	type DegradationPublicWork,
 } from '@/api/degradation'
+
+defineExpose({ save })
 
 const props = defineProps<{ groupId: number }>()
 
 const EFFORT_OPTIONS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 const config = ref<DegradationDetectionConfig>({ ...DEFAULT_DEGRADATION_CONFIG })
+const availableGroups = ref<DegradationGroup[]>([])
+const moveTargetGroups = computed(() => availableGroups.value.filter(group => group.group_id !== props.groupId))
+const validMoveTarget = computed(() =>
+  Number.isSafeInteger(config.value.move_target_group_id) &&
+  moveTargetGroups.value.some(group => group.group_id === config.value.move_target_group_id)
+)
+let configGeneration = 0
 const loading = ref(false)
+const loaded = ref(false)
 const saving = ref(false)
 const running = ref(false)
 const message = ref('')
 const failed = ref(false)
+const resetConfirmation = ref(false)
+const resetting = ref(false)
+const resetMessage = ref('')
+const resetFailed = ref(false)
+async function confirmStatsReset() {
+  if (resetting.value) return
+  resetting.value = true
+  resetMessage.value = ''
+  try {
+    const result = await resetPublicStats()
+    resetConfirmation.value = false
+    resetFailed.value = false
+    resetMessage.value = `已重置全站公开统计，起点：${new Date(result.reset_at).toLocaleString()}。刷新公开页即可查看；历史记录及作品保留。`
+  } catch (error) {
+    resetFailed.value = true
+    resetMessage.value = extractMessage(error) || '重置失败，请重试'
+  } finally {
+    resetting.value = false
+  }
+}
 
 const works = ref<DegradationPublicWork[]>([])
+const workImages = ref<Record<number, string>>({})
+let imageController: AbortController | undefined
+let workGeneration = 0
+function clearWorkImages() {
+  Object.values(workImages.value).forEach(url => URL.revokeObjectURL(url))
+  workImages.value = {}
+}
+onBeforeUnmount(() => { configGeneration++; workGeneration++; imageController?.abort(); clearWorkImages() })
 const worksTotal = ref(0)
 const worksLoading = ref(false)
 const worksMessage = ref('')
 const worksFailed = ref(false)
 
 async function load() {
-  if (!props.groupId) {
+  const generation = ++configGeneration
+  const groupId = props.groupId
+  if (!groupId) {
     return
   }
   loading.value = true
+  loaded.value = false
   try {
     const groups = await listGroups()
-    const match = groups.find((item) => item.group_id === props.groupId)
-    config.value = match ? { ...match.config } : { ...DEFAULT_DEGRADATION_CONFIG }
+    if (generation !== configGeneration) return
+    const match = groups.find((item) => item.group_id === groupId)
+    if (!match) throw new Error("分组配置不存在")
+    availableGroups.value = groups
+    config.value = { ...DEFAULT_DEGRADATION_CONFIG, ...match.config }
+    loaded.value = true
     message.value = ''
     failed.value = false
   } catch {
+    if (generation !== configGeneration) return
     failed.value = true
     message.value = '读取降智检测配置失败'
   } finally {
-    loading.value = false
+    if (generation === configGeneration) loading.value = false
   }
 }
 
 async function save() {
+  if (!loaded.value || loading.value || saving.value) {
+    // 配置没加载成功时并没有可写回的内容，返回 false 的含义是「未保存」而不是
+    // 「保存失败」。不在这里说明，调用方只能统一报「保存失败，请重试」，
+    // 而配置根本没读出来的情况下重试永远不会成功。
+    if (!loaded.value && !loading.value) {
+      failed.value = true
+      message.value = '降智检测配置未加载成功，无法保存；请关闭弹窗重开'
+    }
+    return false
+  }
+  if (config.value.enabled && config.value.move_on_degraded && !validMoveTarget.value) {
+    failed.value = true
+    message.value = '请选择有效的目标分组，且不能选择当前分组'
+    return false
+  }
+  const groupId = props.groupId
+  const generation = configGeneration
   saving.value = true
   message.value = ''
   try {
-    const result = await updateGroup(props.groupId, config.value)
-    config.value = { ...result.config }
+    const result = await updateGroup(groupId, { ...config.value })
+    if (generation !== configGeneration) return false
+    config.value = { ...DEFAULT_DEGRADATION_CONFIG, ...result.config }
     failed.value = false
-    message.value = '已保存（分组保存后生效）'
+    message.value = '已保存并生效；新入队探测使用本组标准答案'
+    return true
   } catch (error) {
+    if (generation !== configGeneration) return false
     failed.value = true
     message.value = extractMessage(error) || '保存失败'
+    return false
   } finally {
     saving.value = false
   }
 }
 
 async function runNow() {
+  if (!(await save())) return
   running.value = true
   message.value = ''
   try {
@@ -271,7 +402,7 @@ async function runNow() {
 }
 
 function workImageURL(id: number): string {
-	return publicImageURL(id)
+	return workImages.value[id] || ''
 }
 
 function formatWorkClock(raw: string | null): string {
@@ -283,18 +414,29 @@ function formatWorkClock(raw: string | null): string {
 }
 
 async function loadWorks() {
+    const generation = ++workGeneration
+    imageController?.abort()
+    imageController = new AbortController()
+    const signal = imageController.signal
 	worksLoading.value = true
 	try {
 		const page = await listWorks(1, 12)
+        if (generation !== workGeneration) return
+        clearWorkImages()
 		works.value = page.items ?? []
 		worksTotal.value = page.total ?? 0
 		worksMessage.value = ''
 		worksFailed.value = false
+        await Promise.allSettled(works.value.filter(work => work.has_image).map(async work => {
+            const blob = await adminWorkImage(work.id, signal)
+            if (generation === workGeneration) workImages.value[work.id] = URL.createObjectURL(blob)
+        }))
 	} catch (error) {
 		worksFailed.value = true
-		worksMessage.value = extractMessage(error) || '读取公开页作品失败'
+		if (generation !== workGeneration) return
+        worksMessage.value = extractMessage(error) || '读取公开页作品失败'
 	} finally {
-		worksLoading.value = false
+		if (generation === workGeneration) worksLoading.value = false
 	}
 }
 

@@ -152,6 +152,25 @@ func (s *AccountTestService) RunIntelligentTest(ctx context.Context, r *Intellig
 	// clear. Manual disables never reach this path because the scheduler only
 	// queues schedulable accounts.
 	if IsDegradationTestType(r.TestType) {
+		if !account.Schedulable {
+			r.Status = "cancelled"
+			return errors.New("账号已手动停用")
+		}
+		if r.ConfigSnapshot == nil || r.ConfigSnapshot.DegradationGroupID <= 0 {
+			r.Status = "cancelled"
+			return errors.New("缺少降智检测来源分组")
+		}
+		member := false
+		for _, id := range account.GroupIDs {
+			if id == r.ConfigSnapshot.DegradationGroupID {
+				member = true
+				break
+			}
+		}
+		if !member {
+			r.Status = "cancelled"
+			return errors.New("账号已移出检测分组")
+		}
 		ctx = withIntelligentTempSuspensionIgnored(ctx)
 	}
 	if r.ConfigSnapshot == nil {
@@ -227,6 +246,7 @@ func (s *AccountTestService) RunIntelligentTest(ctx context.Context, r *Intellig
 	if r.RawResponse == "" {
 		r.RawResponse = capture.redact(recorder.body.String())
 	}
+	r.ConfigSnapshot.OutputTokens = intelligentOutputTokens(r.RawResponse)
 	r.ErrorMessage = capture.redact(eventError)
 	if r.ErrorMessage == "" && err != nil {
 		r.ErrorMessage = capture.redact(err.Error())

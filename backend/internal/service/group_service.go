@@ -36,6 +36,11 @@ type GroupRepository interface {
 	BindAccountsToGroup(ctx context.Context, groupID int64, accountIDs []int64) error
 	// UpdateSortOrders 批量更新分组排序
 	UpdateSortOrders(ctx context.Context, updates []GroupSortOrderUpdate) error
+	// ListAntiDegradePresetCandidates 返回分组内防降智标记与目标预设不一致的账号 ID。
+	// preset 非空：返回标记 mode 不等于 preset（或没有标记）的成员，供收敛器套用。
+	// preset 为空：返回标记溯源为"由该分组写入"的成员，供关闭分组预设时回滚。
+	// 每次调用都基于当前成员关系，不缓存 ID —— WishTeam5X 复活会换账号 ID。
+	ListAntiDegradePresetCandidates(ctx context.Context, groupID int64, preset string) ([]int64, error)
 }
 
 type GroupDuplicateRepository interface {

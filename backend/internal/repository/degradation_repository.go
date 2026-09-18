@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -108,6 +109,25 @@ func (r *degradationRepository) UpdateGroupConfig(ctx context.Context, actor, gr
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Serialize switches with enqueue and other group updates, so the global
+	// worker setting reflects all committed group switches.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(247000)`); err != nil {
+		return err
+	}
+	if err := guardDegradationTicketTransfer(ctx, tx, groupID, cfg); err != nil {
+		return err
+	}
+	if cfg.Enabled && cfg.MoveOnDegraded {
+		if cfg.MoveTargetGroupID <= 0 || cfg.MoveTargetGroupID == groupID {
+			return service.ErrDegradationMoveTargetInvalid
+		}
+		if err := lockLiveGroups(ctx, tx, []int64{cfg.MoveTargetGroupID}); err != nil {
+			if errors.Is(err, service.ErrGroupNotFound) {
+				return service.ErrDegradationMoveTargetInvalid
+			}
+			return err
+		}
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE groups SET degradation_detection_enabled=$2, degradation_detection_config=$3::jsonb, degradation_preview_enabled=$4, updated_at=NOW() WHERE id=$1 AND deleted_at IS NULL`, groupID, cfg.Enabled, string(encoded), cfg.PreviewEnabled)
 	if err != nil {
 		return err
@@ -158,13 +178,14 @@ func (r *degradationRepository) DueProbeAccountIDs(ctx context.Context, groupID 
 WITH member AS (
     SELECT a.id,
            COALESCE((SELECT MAX(t.created_at) FROM account_tests t
-                     WHERE t.account_id = a.id AND t.test_type = $2
+                     WHERE t.account_id = a.id AND t.test_type = $2 AND COALESCE(t.config_snapshot->>'public_sample','false') <> 'true'
+                       AND t.config_snapshot->>'degradation_group_id' = $1::bigint::text
                        AND t.status NOT IN ('queued','running','cancelled')), '-infinity'::timestamptz) AS last_at
     FROM accounts a
     JOIN account_groups ag ON ag.account_id = a.id AND ag.group_id = $1
     WHERE a.deleted_at IS NULL AND a.schedulable = TRUE
       AND NOT EXISTS (SELECT 1 FROM account_tests q
-                      WHERE q.account_id = a.id AND q.test_type = $2 AND q.status IN ('queued','running'))
+                      WHERE q.account_id = a.id AND q.test_type = $2 AND q.config_snapshot->>'degradation_group_id' = $1::bigint::text AND q.status IN ('queued','running'))
 )
 SELECT id FROM member WHERE last_at < NOW() - make_interval(mins => $3::int) ORDER BY last_at, id LIMIT $4`,
 		groupID, service.DegradationTestTypeProbe, intervalMinutes, limit)
@@ -186,7 +207,7 @@ SELECT id FROM member WHERE last_at < NOW() - make_interval(mins => $3::int) ORD
 // DuePreviewAccountIDs picks random schedulable members of the preview-enabled
 // groups. Accounts currently suspended by a degradation verdict are skipped, so
 // the artwork is never produced by an account the detector flagged.
-func (r *degradationRepository) DuePreviewAccountIDs(ctx context.Context, groupIDs []int64, _ int, limit int) ([]int64, error) {
+func (r *degradationRepository) DuePreviewAccountIDs(ctx context.Context, groupIDs []int64, interval int, limit int) ([]int64, error) {
 	rows, err := r.db.QueryContext(ctx, `
 SELECT a.id
 FROM accounts a
@@ -196,7 +217,8 @@ WHERE g.deleted_at IS NULL AND g.degradation_detection_enabled AND g.degradation
   AND g.id = ANY($2)
   AND a.deleted_at IS NULL AND a.schedulable = TRUE
   AND (a.degradation_suspended_until IS NULL OR a.degradation_suspended_until <= NOW())
-  AND NOT EXISTS (SELECT 1 FROM account_tests q WHERE q.test_type = $1 AND q.status IN ('queued','running'))
+  AND NOT EXISTS (SELECT 1 FROM account_tests q WHERE q.test_type = $1 AND q.config_snapshot->>'degradation_group_id' = g.id::text AND q.status IN ('queued','running'))
+  AND COALESCE((SELECT MAX(COALESCE(p.finished_at,p.created_at) + make_interval(mins => CASE WHEN p.status='completed' THEN $4::int ELSE 1 END)) FROM account_tests p WHERE p.test_type=$1 AND p.config_snapshot->>'degradation_group_id'=g.id::text AND p.status NOT IN ('queued','running','cancelled')), '-infinity'::timestamptz) <= NOW()
 ORDER BY (SELECT COUNT(*) FROM account_tests p
           WHERE p.account_id = a.id AND p.test_type = $1
             AND p.status NOT IN ('queued','running','cancelled')
@@ -204,7 +226,7 @@ ORDER BY (SELECT COUNT(*) FROM account_tests p
             AND p.created_at > NOW() - INTERVAL '30 minutes') ASC,
          random()
 LIMIT $3`,
-		service.DegradationTestTypePreview, pq.Array(groupIDs), limit)
+		service.DegradationTestTypePreview, pq.Array(groupIDs), limit, interval)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +262,46 @@ func (r *degradationRepository) PreviewGroups(ctx context.Context) ([]int64, err
 // EnqueueDegradationTest queues one probe. It is idempotent against an already
 // queued or running record of the same type and never uses the admin request
 // path, so the scheduler needs no actor.
-func (r *degradationRepository) EnqueueDegradationTest(ctx context.Context, accountID int64, testType, prompt, model, reasoningEffort, expectedAnswer string, timeoutSeconds int) (int64, bool, error) {
+func (r *degradationRepository) EnqueueDegradationTest(ctx context.Context, groupID, accountID int64, testType, prompt, model, reasoningEffort, expectedAnswer string, timeoutSeconds int) (int64, bool, error) {
+	return r.enqueueDegradationTest(ctx, groupID, accountID, testType, prompt, model, reasoningEffort, expectedAnswer, timeoutSeconds, 0)
+}
+
+func (r *degradationRepository) enqueueDegradationTest(ctx context.Context, groupID, accountID int64, testType, prompt, model, reasoningEffort, expectedAnswer string, timeoutSeconds int, roundID int64) (int64, bool, error) {
+	if !service.IsDegradationTestType(testType) {
+		return 0, false, errors.New("unknown degradation test type")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(247000)`); err != nil {
+		return 0, false, err
+	}
+	// Re-read under the enqueue/settings lock: a scheduler scan made before a
+	// settings edit must not enqueue stale answers or models after the save.
+	var raw []byte
+	var enabled, previewEnabled bool
+	err = tx.QueryRowContext(ctx, `SELECT degradation_detection_enabled,degradation_preview_enabled,degradation_detection_config FROM groups WHERE id=$1 AND deleted_at IS NULL`, groupID).Scan(&enabled, &previewEnabled, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if !enabled || (testType == service.DegradationTestTypePreview && !previewEnabled) {
+		return 0, false, nil
+	}
+	live := service.NormalizeDegradationConfig(decodeDegradationConfig(raw))
+	timeoutSeconds = live.TimeoutSeconds
+	if testType == service.DegradationTestTypePreview {
+		prompt, model, reasoningEffort, expectedAnswer = service.DegradationPelicanPrompt, live.PreviewModel, live.PreviewReasoningEffort, ""
+	} else {
+		prompt, model, reasoningEffort, expectedAnswer = live.Prompt, live.Model, live.ReasoningEffort, live.ExpectedAnswer
+		if prompt == "" {
+			prompt = service.DegradationCandyPrompt
+		}
+	}
 	// The runner resolves the verdict from this snapshot, so the group's
 	// configured answer has to travel with the row: reading the live group
 	// config at verdict time would grade the answer against a value that may
@@ -250,15 +311,17 @@ func (r *degradationRepository) EnqueueDegradationTest(ctx context.Context, acco
 		expected = service.DegradationExpectedAnswer
 	}
 	cfg := service.IntelligentTestConfig{
-		Prompt:          prompt,
-		Model:           model,
-		ReasoningEffort: reasoningEffort,
-		Evaluator:       degradationEvaluatorFor(testType),
-		ExpectedAnswer:  expected,
-		TimeoutSeconds:  timeoutSeconds,
-		AnswerType:      "number",
-		AnswerFormat:    "free_text",
-		AnswerUnitMode:  "none",
+		PublicSample: roundID > 0, SourceRoundID: roundID,
+		DegradationGroupID: groupID,
+		Prompt:             prompt,
+		Model:              model,
+		ReasoningEffort:    reasoningEffort,
+		Evaluator:          degradationEvaluatorFor(testType),
+		ExpectedAnswer:     expected,
+		TimeoutSeconds:     timeoutSeconds,
+		AnswerType:         "number",
+		AnswerFormat:       "free_text",
+		AnswerUnitMode:     "none",
 	}
 	if testType == service.DegradationTestTypePreview {
 		cfg.AnswerType = "text"
@@ -269,22 +332,35 @@ func (r *degradationRepository) EnqueueDegradationTest(ctx context.Context, acco
 		return 0, false, err
 	}
 	var id int64
-	err = r.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 INSERT INTO account_tests(account_id, test_type, input, model, anti_degradation, config_snapshot, requested_by)
 SELECT $1, $2, $3, $4,
        COALESCE((a.extra->'anti_degradation')='true'::jsonb, (a.extra#>'{anti_degrade,enabled}')='true'::jsonb, false),
        $5::jsonb, NULL
 FROM accounts a
-WHERE a.id = $1 AND a.deleted_at IS NULL
-  AND NOT EXISTS (SELECT 1 FROM account_tests q WHERE q.account_id = $1 AND q.test_type = $2 AND q.status IN ('queued','running'))
-RETURNING id`, accountID, testType, prompt, model, string(encoded)).Scan(&id)
+WHERE a.id = $1 AND a.deleted_at IS NULL AND a.schedulable = TRUE
+  AND EXISTS (SELECT 1 FROM account_groups ag JOIN groups g ON g.id=ag.group_id WHERE ag.account_id=a.id AND g.id=$6 AND g.deleted_at IS NULL AND g.degradation_detection_enabled AND ($2 <> 'degradation_preview' OR g.degradation_preview_enabled))
+  AND (SELECT COUNT(*) FROM account_tests WHERE status IN ('queued','running') AND test_type IN ('degradation_probe','degradation_preview')) < 200
+  AND (SELECT COUNT(*) FROM account_tests WHERE status IN ('queued','running')) < 2000
+  AND NOT EXISTS (SELECT 1 FROM account_tests q WHERE q.account_id = $1 AND q.test_type = $2 AND q.config_snapshot->>'degradation_group_id'=$6::bigint::text AND q.status IN ('queued','running'))
+  AND ($2 <> 'degradation_preview' OR NOT EXISTS (SELECT 1 FROM account_tests q WHERE q.test_type=$2 AND q.config_snapshot->>'degradation_group_id'=$6::bigint::text AND q.status IN ('queued','running')))
+  AND ($7::bigint = 0 OR (
+    NOT EXISTS (SELECT 1 FROM account_tests q WHERE q.config_snapshot->>'public_sample'='true' AND q.config_snapshot->>'degradation_group_id'=$6::bigint::text AND q.created_at > NOW()-make_interval(mins=>GREATEST(1,$8::int)))
+    AND NOT EXISTS (SELECT 1 FROM account_tests q JOIN account_tests source ON source.id=$7
+      WHERE q.test_type='degradation_probe' AND q.config_snapshot->>'degradation_group_id'=$6::bigint::text
+      AND COALESCE(q.config_snapshot->>'public_sample','false')<>'true' AND q.status IN ('queued','running')
+      AND floor(extract(epoch FROM q.created_at)/(GREATEST(1,$8::int)*60))=floor(extract(epoch FROM source.created_at)/(GREATEST(1,$8::int)*60)))
+    AND NOT EXISTS (SELECT 1 FROM account_tests q WHERE q.config_snapshot->>'public_sample'='true' AND q.config_snapshot->>'degradation_group_id'=$6::bigint::text AND q.status IN ('queued','running'))
+    AND NOT EXISTS (SELECT 1 FROM account_tests q WHERE q.config_snapshot->>'public_sample'='true' AND q.config_snapshot->>'degradation_group_id'=$6::bigint::text AND (q.config_snapshot->>'source_round_id')::bigint >= $7)
+  ))
+RETURNING id`, accountID, testType, prompt, model, string(encoded), groupID, roundID, live.IntervalMinute).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
 	if err != nil {
 		return 0, false, err
 	}
-	return id, true, nil
+	return id, true, tx.Commit()
 }
 
 func degradationEvaluatorFor(testType string) string {
@@ -296,49 +372,64 @@ func degradationEvaluatorFor(testType string) string {
 
 // ApplyProbeOutcome translates a persisted verdict into scheduling state.
 //
-//   - degraded: suspend through the official temporary-unschedulable window and
-//     remember that the window is ours. Only schedulable accounts are touched,
-//     so a manual disable is never rewritten.
+//   - degraded: either move exclusively to the configured group without a
+//     detector cooldown, or apply the original suspension policy. The current
+//     switch and memberships are rechecked transactionally.
 //   - recovered: drop our window only while its reason still carries our marker,
 //     and always clear our own columns. An unrelated pause survives verbatim.
-func (r *degradationRepository) ApplyProbeOutcome(ctx context.Context, accountID int64, degraded bool, suspendMinutes int, note string) (bool, error) {
+func (r *degradationRepository) ApplyProbeOutcome(ctx context.Context, accountID, groupID int64, degraded bool, suspendMinutes int, note string) (bool, error) {
+	if degraded {
+		return r.applyDegradedProbeOutcome(ctx, accountID, groupID, suspendMinutes, note)
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if degraded {
-		result, err := tx.ExecContext(ctx, `
-UPDATE accounts SET temp_unschedulable_until = NOW() + make_interval(mins => $2::int),
-                    temp_unschedulable_reason = $3,
-                    degradation_suspended_until = NOW() + make_interval(mins => $2::int),
-                    degradation_suspended_at = NOW(),
-                    degradation_suspend_note = $3,
-                    updated_at = NOW()
-WHERE id = $1 AND deleted_at IS NULL AND schedulable = TRUE`, accountID, suspendMinutes, note)
-		if err != nil {
+	// OR recovery: a correct candy answer must not clear the response-model
+	// condition. Serialize with policy writes before examining the same window.
+	var lockedID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM accounts WHERE id=$1 AND deleted_at IS NULL AND schedulable=TRUE FOR UPDATE`, accountID).Scan(&lockedID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	hits, err := degradationResponseHits(ctx, tx, accountID)
+	if err != nil {
+		return false, err
+	}
+	if hits >= 5 {
+		// Release this transaction before reusing the common move/pause path,
+		// which rechecks the window, membership and switch under its own lock.
+		if err := tx.Rollback(); err != nil {
 			return false, err
 		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return false, err
-		}
-		return affected == 1, tx.Commit()
+		_, err := r.applyDegradedOutcome(ctx, accountID, groupID, 0, "", true)
+		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE accounts SET temp_unschedulable_until = NULL, temp_unschedulable_reason = '', updated_at = NOW()
-WHERE id = $1 AND degradation_suspended_until IS NOT NULL AND temp_unschedulable_reason LIKE $2`, accountID, service.DegradationSuspendReasonPrefix+"%"); err != nil {
+WHERE id = $1 AND deleted_at IS NULL AND schedulable=TRUE AND degradation_suspended_until IS NOT NULL AND temp_unschedulable_reason LIKE $2
+ AND EXISTS (SELECT 1 FROM account_groups ag JOIN groups g ON g.id=ag.group_id WHERE ag.account_id=accounts.id AND g.id=$3 AND g.deleted_at IS NULL AND g.degradation_detection_enabled)`, accountID, fmt.Sprintf("%s[分组%d]%%", service.DegradationSuspendReasonPrefix, groupID), groupID); err != nil {
 		return false, err
 	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE accounts SET degradation_suspended_until = NULL, degradation_suspended_at = NULL, degradation_suspend_note = '', updated_at = NOW()
-WHERE id = $1 AND degradation_suspended_until IS NOT NULL`, accountID)
+WHERE id = $1 AND deleted_at IS NULL AND schedulable=TRUE AND degradation_suspended_until IS NOT NULL AND degradation_suspend_note LIKE $3
+ AND EXISTS (SELECT 1 FROM account_groups ag JOIN groups g ON g.id=ag.group_id WHERE ag.account_id=accounts.id AND g.id=$2 AND g.deleted_at IS NULL AND g.degradation_detection_enabled)`, accountID, groupID, fmt.Sprintf("%s[分组%d]%%", service.DegradationSuspendReasonPrefix, groupID))
 	if err != nil {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return false, err
+	}
+	if affected > 0 {
+		if err := enqueueSchedulerOutbox(ctx, tx, service.SchedulerOutboxEventAccountChanged, &accountID, nil, nil); err != nil {
+			return false, err
+		}
 	}
 	return affected == 1, tx.Commit()
 }
@@ -476,6 +567,12 @@ LIMIT $2`, service.DegradationTestTypeProbe, limit)
 	return out, rows.Err()
 }
 
+const degradationPublicScope = ` AND EXISTS (
+ SELECT 1 FROM account_groups ag JOIN groups g ON g.id=ag.group_id JOIN accounts a ON a.id=ag.account_id
+ WHERE ag.account_id=t.account_id AND a.deleted_at IS NULL AND g.deleted_at IS NULL
+ AND g.degradation_detection_enabled AND g.degradation_preview_enabled
+ AND (COALESCE(t.config_snapshot->>'degradation_group_id','')='' OR t.config_snapshot->>'degradation_group_id'=g.id::text))`
+
 const degradationPublicColumns = `t.id,t.account_id,t.status,t.model,COALESCE(t.config_snapshot->>'reasoning_effort',''),t.result_image,t.duration_ms,t.created_at,t.finished_at`
 
 func scanDegradationPublicWork(scan func(...any) error) (*service.DegradationPublicWork, error) {
@@ -500,17 +597,18 @@ func (r *degradationRepository) PublicPage(ctx context.Context, page, pageSize i
 	if err != nil {
 		return nil, err
 	}
+	out.Enabled = previewGroups > 0
 	out.Model = cfg.PreviewModel
 	out.ReasoningEffort = cfg.PreviewReasoningEffort
 	out.IntervalSeconds = cfg.PreviewIntervalMinute * 60
 	if previewGroups == 0 {
 		return out, nil
 	}
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_tests WHERE test_type=$1 AND status NOT IN ('queued','running','cancelled') AND result_image <> ''`, service.DegradationTestTypePreview).Scan(&out.Total); err != nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_tests t WHERE test_type=$1 AND status NOT IN ('queued','running','cancelled') AND result_image <> ''`+degradationPublicScope, service.DegradationTestTypePreview).Scan(&out.Total); err != nil {
 		return nil, err
 	}
 	var lastAt sql.NullTime
-	if err := r.db.QueryRowContext(ctx, `SELECT status, finished_at FROM account_tests WHERE test_type=$1 AND status NOT IN ('queued','running') ORDER BY id DESC LIMIT 1`, service.DegradationTestTypePreview).Scan(&out.LastStatus, &lastAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := r.db.QueryRowContext(ctx, `SELECT status, finished_at FROM account_tests t WHERE test_type=$1 AND status NOT IN ('queued','running')`+degradationPublicScope+` ORDER BY id DESC LIMIT 1`, service.DegradationTestTypePreview).Scan(&out.LastStatus, &lastAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 	if lastAt.Valid {
@@ -518,7 +616,7 @@ func (r *degradationRepository) PublicPage(ctx context.Context, page, pageSize i
 	}
 	// Artwork metadata only: the SVG body is fetched per tile from the image
 	// endpoint, so a page load never ships megabytes of markup.
-	rows, err := r.db.QueryContext(ctx, `SELECT `+degradationWorkColumns+` FROM account_tests t WHERE t.test_type=$1 AND t.status NOT IN ('queued','running','cancelled') AND t.result_image <> '' ORDER BY t.id DESC LIMIT $2 OFFSET $3`,
+	rows, err := r.db.QueryContext(ctx, `SELECT `+degradationWorkColumns+` FROM account_tests t WHERE t.test_type=$1 AND t.status NOT IN ('queued','running','cancelled') AND t.result_image <> ''`+degradationPublicScope+` ORDER BY t.id DESC LIMIT $2 OFFSET $3`,
 		service.DegradationTestTypePreview, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, err
@@ -550,13 +648,23 @@ func (r *degradationRepository) previewConfiguration(ctx context.Context) (servi
 }
 
 func (r *degradationRepository) PublicWork(ctx context.Context, id int64) (*service.DegradationPublicWork, error) {
-	return scanDegradationPublicWork(r.db.QueryRowContext(ctx, `SELECT `+degradationPublicColumns+` FROM account_tests t WHERE t.id=$1 AND t.test_type=$2 AND t.status NOT IN ('queued','running','cancelled') AND t.result_image <> ''`,
+	return scanDegradationPublicWork(r.db.QueryRowContext(ctx, `SELECT `+degradationPublicColumns+` FROM account_tests t WHERE t.id=$1 AND t.test_type=$2 AND t.status NOT IN ('queued','running','cancelled') AND t.result_image <> ''`+degradationPublicScope,
 		id, service.DegradationTestTypePreview).Scan)
 }
 
-// degradationTimelineBuckets is the resolution of the public health chart. Every
-// range renders the same number of points so the chart never changes shape.
-const degradationTimelineBuckets = 24
+func (r *degradationRepository) PublicAnimationSource(ctx context.Context, id int64) (string, error) {
+	var output string
+	err := r.db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(t.result,''),t.result_image) FROM account_tests t WHERE t.id=$1 AND t.test_type=$2 AND t.status NOT IN ('queued','running','cancelled') AND t.result_image <> ''`+degradationPublicScope,
+		id, service.DegradationTestTypePreview).Scan(&output)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", service.ErrDegradationWorkNotFound
+	}
+	return output, err
+}
+
+// degradationTimelineBuckets is the nominal resolution. Include one extra
+// partial edge bucket to cover the complete rolling time window.
+const degradationTimelineBuckets = 72
 
 // degradationWorkColumns lists artwork metadata only. The SVG body never travels
 // in a list: it stays behind /records/:id/image, which matters because the public
@@ -631,7 +739,45 @@ func (r *degradationRepository) PurgeWorks(ctx context.Context) (int64, error) {
 
 // Timeline aggregates probe verdicts into fixed buckets. It is the public view
 // of detector history, so it returns counts and never rows.
+const degradationPublicResetKey = "degradation_public_stats_reset_at"
+
+func (r *degradationRepository) ResetPublicStats(ctx context.Context, actor int64) (time.Time, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer tx.Rollback()
+	// Serialize concurrent resets with detector enqueue/configuration changes.
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(247000)`); err != nil {
+		return time.Time{}, err
+	}
+	var at time.Time
+	err = tx.QueryRowContext(ctx, `INSERT INTO settings(key,value,updated_at)
+VALUES ($1,clock_timestamp()::text,clock_timestamp())
+ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at
+RETURNING value::timestamptz`, degradationPublicResetKey).Scan(&at)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if err = insertIntelligentAudit(ctx, tx, actor, "admin.degradation_detection.stats_reset", map[string]any{"reset_at": at, "scope": "public_global"}); err != nil {
+		return time.Time{}, err
+	}
+	return at, tx.Commit()
+}
+
 func (r *degradationRepository) Timeline(ctx context.Context, hours int) (*service.DegradationTimeline, error) {
+	// A single database snapshot prevents a reset/result racing bucket totals
+	// and latest-state reads from producing contradictory output.
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var resetAt sql.NullTime
+	var now time.Time
+	if err = tx.QueryRowContext(ctx, `SELECT (SELECT value::timestamptz FROM settings WHERE key=$1),transaction_timestamp()`, degradationPublicResetKey).Scan(&resetAt, &now); err != nil {
+		return nil, err
+	}
 	if hours <= 0 {
 		hours = 24
 	}
@@ -642,9 +788,8 @@ func (r *degradationRepository) Timeline(ctx context.Context, hours int) (*servi
 	if bucketMinutes < 1 {
 		bucketMinutes = 1
 	}
-	now := time.Now()
 	bucketSpan := time.Duration(bucketMinutes) * time.Minute
-	newest := now.Truncate(bucketSpan)
+	newest := time.Unix(now.Unix()/int64(bucketSpan/time.Second)*int64(bucketSpan/time.Second), 0)
 	out := &service.DegradationTimeline{
 		RangeHours:   hours,
 		BucketMinute: bucketMinutes,
@@ -652,13 +797,16 @@ func (r *degradationRepository) Timeline(ctx context.Context, hours int) (*servi
 		CurrentState: "unknown",
 		Buckets:      make([]service.DegradationTimelineBucket, 0, degradationTimelineBuckets),
 	}
+	if resetAt.Valid {
+		out.ResetAt = &resetAt.Time
+	}
 	index := make(map[int64]int, degradationTimelineBuckets)
-	for i := degradationTimelineBuckets - 1; i >= 0; i-- {
+	for i := degradationTimelineBuckets; i >= 0; i-- {
 		start := newest.Add(-time.Duration(i) * bucketSpan)
 		index[start.Unix()] = len(out.Buckets)
 		out.Buckets = append(out.Buckets, service.DegradationTimelineBucket{Start: start})
 	}
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := tx.QueryContext(ctx, `
 SELECT (floor(extract(epoch FROM COALESCE(t.finished_at,t.created_at)) / ($1::int * 60)) * $1::int * 60)::bigint AS bucket_epoch,
        COUNT(*),
        COUNT(*) FILTER (WHERE t.evaluation->>'answer_verdict' = 'correct'),
@@ -666,10 +814,11 @@ SELECT (floor(extract(epoch FROM COALESCE(t.finished_at,t.created_at)) / ($1::in
        COUNT(*) FILTER (WHERE COALESCE(t.evaluation->>'answer_verdict','') NOT IN ('correct','incorrect'))
 FROM account_tests t
 WHERE t.test_type = $2 AND t.status NOT IN ('queued','running','cancelled')
-  AND COALESCE(t.finished_at,t.created_at) >= NOW() - make_interval(hours => $3::int)
+  AND ($5::timestamptz IS NULL OR (t.created_at >= $5 AND COALESCE(t.started_at,t.created_at) >= $5))
+  AND COALESCE(t.finished_at,t.created_at) >= $4::timestamptz - make_interval(hours => $3::int) AND COALESCE(t.finished_at,t.created_at) <= $4::timestamptz
 GROUP BY 1
 ORDER BY 1`,
-		bucketMinutes, service.DegradationTestTypeProbe, hours)
+		bucketMinutes, service.DegradationTestTypeProbe, hours, now, out.ResetAt)
 	if err != nil {
 		return nil, err
 	}
@@ -696,12 +845,13 @@ ORDER BY 1`,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	rows.Close()
 	// The headline state is the newest verdict, not the ratio: a single degraded
 	// probe in the most recent bucket is exactly what a visitor must see.
 	var lastAt sql.NullTime
 	var lastVerdict string
-	err = r.db.QueryRowContext(ctx, `SELECT COALESCE(finished_at,created_at), COALESCE(evaluation->>'answer_verdict','') FROM account_tests WHERE test_type=$1 AND status NOT IN ('queued','running','cancelled') ORDER BY id DESC LIMIT 1`,
-		service.DegradationTestTypeProbe).Scan(&lastAt, &lastVerdict)
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(finished_at,created_at), COALESCE(evaluation->>'answer_verdict','') FROM account_tests WHERE test_type=$1 AND status NOT IN ('queued','running','cancelled') AND ($2::timestamptz IS NULL OR (created_at >= $2 AND COALESCE(started_at,created_at) >= $2)) ORDER BY COALESCE(finished_at,created_at) DESC, id DESC LIMIT 1`,
+		service.DegradationTestTypeProbe, out.ResetAt).Scan(&lastAt, &lastVerdict)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
@@ -718,8 +868,8 @@ ORDER BY 1`,
 	if out.Total > 0 {
 		out.HealthyRatio = float64(out.Correct) / float64(out.Total)
 	}
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL AND degradation_suspended_until IS NOT NULL AND degradation_suspended_until > NOW()`).Scan(&out.Suspended); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts WHERE deleted_at IS NULL AND degradation_suspended_until IS NOT NULL AND degradation_suspended_until > NOW()`).Scan(&out.Suspended); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return out, tx.Commit()
 }

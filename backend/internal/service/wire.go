@@ -832,11 +832,32 @@ func ProvideTLSFingerprintProfileService(repo TLSFingerprintProfileRepository, c
 	return NewTLSFingerprintProfileService(repo, cache, cfg)
 }
 
+// ProvideCodexTurnStateService builds the turn-state pool and installs it on the
+// OpenAI gateway so the Codex request path can inject and harvest states. Start
+// is called by the assembly block that owns side effects.
+func ProvideCodexTurnStateService(
+	repo CodexTurnStateRepository,
+	accountRepo AccountRepository,
+	proxyRepo ProxyRepository,
+	httpUpstream HTTPUpstream,
+	openAIGatewayService *OpenAIGatewayService,
+	accountTestService *AccountTestService,
+) *CodexTurnStateService {
+	svc := NewCodexTurnStateService(repo, accountRepo, proxyRepo, httpUpstream)
+	svc.SetTransport(accountTestService)
+	if snapshot := openAIGatewayService.schedulerSnapshot; snapshot != nil {
+		svc.syncTransfer = snapshot.SyncAccountGroupChange
+	}
+	openAIGatewayService.SetCodexTurnState(svc)
+	return svc
+}
+
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
 	NewUserCleanupService,
 	ProvideIntelligentTestService,
 	NewDegradationService,
+	ProvideCodexTurnStateService,
 	// Core services
 	ProvideAuthService,
 	NewPasskeyService,
@@ -944,6 +965,8 @@ var ProviderSet = wire.NewSet(
 	NewPluginManager,
 	NewDigestSessionStore,
 	ProvideIdempotencyCoordinator,
+	ProvideAntiDegradeService,
+	ProvideGroupAntiDegradeReconciler,
 	ProvideSystemOperationLockService,
 	ProvideIdempotencyCleanupService,
 	ProvideScheduledTestService,
@@ -962,7 +985,6 @@ var ProviderSet = wire.NewSet(
 	ProvideSpendGuardService,
 	NewTicketService,
 	NewBillingExportService,
-	ProvideAntiDegradeService,
 	NewAffiliateService,
 	ProvidePaymentConfigService,
 	ProvidePaymentService,
@@ -980,6 +1002,16 @@ var ProviderSet = wire.NewSet(
 func ProvideAntiDegradeService(admin AdminService, cfg *config.Config, plugins *PluginManager) *AntiDegradeService {
 	svc := NewAntiDegradeService(admin)
 	svc.cfg, svc.pluginManager = cfg, plugins
+	return svc
+}
+
+// ProvideGroupAntiDegradeReconciler 创建并启动分组防降智预设收敛器。
+//
+// 默认惰性：只有当某个分组的 anti_degrade_preset 非空（或存在该分组写过、待回滚的账号）
+// 时才会真正写账号；没有分组配置预设时，每轮只是一次只读查询。
+func ProvideGroupAntiDegradeReconciler(groups GroupRepository, anti *AntiDegradeService) *GroupAntiDegradeReconciler {
+	svc := NewGroupAntiDegradeReconciler(groups, anti)
+	svc.Start(context.Background())
 	return svc
 }
 

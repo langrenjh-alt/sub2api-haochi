@@ -667,6 +667,16 @@ export default {
         codexFingerprintDevice: 'Device only',
         codexFingerprintSession: 'Device + Session',
         codexFingerprintFull: 'Full convergence',
+        antiDegrade: {
+          label: 'Anti-degradation strategy',
+          hint: 'Bundles fingerprint identity, TLS profile and concurrency cap into one preset. Off writes nothing and the account keeps its own settings; picking a preset overrides those fields and takes precedence over the fingerprint convergence dropdown above.',
+          off: 'Off (use the account own settings)',
+          offHint: 'No preset is active: concurrency, fingerprint identity and TLS profile all follow this account own fields.',
+          risk: 'Risk',
+          diagnosticOnly: 'Diagnostic preset, not intended for long-term use',
+          groupManaged: 'Group "{group}" of this account already sets a shared strategy preset ({preset}), so the account-level choice is disabled. Clear the group preset first to adjust this account individually.',
+          partialSave: 'Account saved, but the anti-degradation strategy could not be applied. Please retry.',
+        },
         codexImageTool: 'Codex image bridge policy',
         codexImageToolDesc:
           'Controls the hosted image_generation bridge and client-declared image tools on Codex /responses text requests. Hosted auto-injection applies only to non-Responses Lite requests. Account policy takes precedence over channel and global settings; standalone image-generation endpoints are unaffected.',

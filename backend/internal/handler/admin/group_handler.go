@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,16 @@ type GroupHandler struct {
 	dashboardService     *service.DashboardService
 	groupCapacityService *service.GroupCapacityService
 	cfg                  *config.Config
+	// antiDegradeReconciler 分组预设收敛器；可选。为 nil 时状态接口返回"未启用"，
+	// 分组保存本身不受影响。
+	antiDegradeReconciler *service.GroupAntiDegradeReconciler
+}
+
+// SetAntiDegradeReconciler 注入分组预设收敛器（可选依赖，测试与简单模式可为 nil）。
+func (h *GroupHandler) SetAntiDegradeReconciler(r *service.GroupAntiDegradeReconciler) {
+	if h != nil {
+		h.antiDegradeReconciler = r
+	}
 }
 
 // GetLiveCapability 返回当前服务端是否具备生成 Live attestation 的运行环境。
@@ -106,6 +117,21 @@ func NewGroupHandlerWithConfig(adminService service.AdminService, dashboardServi
 		groupCapacityService: groupCapacityService,
 		cfg:                  cfg,
 	}
+}
+
+// ProvideGroupHandler 在构造分组处理器时顺带注入分组预设收敛器。
+// 收敛器由容器构造即启动，因此这条依赖链同时保证了 worker 会被实例化；
+// 依赖为可选参数，nil 时状态接口会明确回报"未启用"。
+func ProvideGroupHandler(
+	adminService service.AdminService,
+	dashboardService *service.DashboardService,
+	groupCapacityService *service.GroupCapacityService,
+	cfg *config.Config,
+	reconciler *service.GroupAntiDegradeReconciler,
+) *GroupHandler {
+	h := NewGroupHandlerWithConfig(adminService, dashboardService, groupCapacityService, cfg)
+	h.SetAntiDegradeReconciler(reconciler)
+	return h
 }
 
 func (h *GroupHandler) isSimpleMode() bool {
@@ -335,6 +361,8 @@ type UpdateGroupRequest struct {
 	ModelAllowlist              *service.GroupModelAllowlist               `json:"model_allowlist"`
 	// 固定账号 manifest 配置；nil 表示不修改。
 	CodexModelsManifestConfig *service.GroupCodexModelsManifestConfig `json:"codex_models_manifest_config"`
+	// 分组统一防降智策略预设；nil = 不修改，"" = 关闭（组内账号回滚到自身设置）。
+	AntiDegradePreset *string `json:"anti_degrade_preset"`
 	// 分组 RPM 上限（0 = 不限制）；nil 表示未提供不改动
 	RPMLimit *int `json:"rpm_limit"`
 	// Anthropic/OpenAI 请求推理强度上限；空字符串清除，nil 不修改。
@@ -895,6 +923,7 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		MessagesDispatchModelConfig:     req.MessagesDispatchModelConfig,
 		ModelAllowlist:                  req.ModelAllowlist,
 		CodexModelsManifestConfig:       req.CodexModelsManifestConfig,
+		AntiDegradePreset:               req.AntiDegradePreset,
 		RPMLimit:                        req.RPMLimit,
 		MaxReasoningEffort:              req.MaxReasoningEffort,
 		MaxReasoningEffortOverLimit:     req.MaxReasoningEffortOverLimit,
@@ -911,6 +940,58 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		return
 	}
 	response.Success(c, dto.GroupFromServiceAdmin(group))
+}
+
+// AntiDegradeSync 返回分组预设的最近一轮收敛状态。
+// GET /api/v1/admin/groups/:id/anti-degrade-sync
+func (h *GroupHandler) AntiDegradeSync(c *gin.Context) {
+	groupID, ok := parseGroupIDParam(c)
+	if !ok {
+		return
+	}
+	if h.antiDegradeReconciler == nil {
+		response.Success(c, gin.H{
+			"enabled":  false,
+			"group_id": groupID,
+			"message":  "anti-degrade reconciler is not enabled on this instance",
+		})
+		return
+	}
+	response.Success(c, gin.H{
+		"enabled": true,
+		"status":  h.antiDegradeReconciler.GroupStatus(groupID),
+	})
+}
+
+// AntiDegradeSyncTrigger 立即触发该分组的一轮收敛，不等后台轮询。
+// POST /api/v1/admin/groups/:id/anti-degrade-sync
+func (h *GroupHandler) AntiDegradeSyncTrigger(c *gin.Context) {
+	groupID, ok := parseGroupIDParam(c)
+	if !ok {
+		return
+	}
+	if h.antiDegradeReconciler == nil {
+		response.Error(c, http.StatusServiceUnavailable, "anti-degrade reconciler is not enabled on this instance")
+		return
+	}
+	group, err := h.adminService.GetGroup(c.Request.Context(), groupID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	// 同步跑一轮再返回，便于前端点完就能看到结果。单轮有处理上限，
+	// 大分组是多轮收敛，这里只保证"至少推进一轮"。
+	status := h.antiDegradeReconciler.ReconcileGroup(c.Request.Context(), groupID, group.AntiDegradePreset)
+	response.Success(c, gin.H{"enabled": true, "status": status})
+}
+
+func parseGroupIDParam(c *gin.Context) (int64, bool) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "invalid group id")
+		return 0, false
+	}
+	return id, true
 }
 
 // Delete handles deleting a group

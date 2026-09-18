@@ -75,6 +75,46 @@ func TestHTTPUpstreamDoWithTLSRejectsPlainHTTPBeforeHTTPProxy(t *testing.T) {
 	require.Zero(t, upstreamCalls.Load())
 }
 
+func TestTLSFingerprintHandshakeEOFIsRetryableWithStandardTransport(t *testing.T) {
+	require.True(t, isTLSFingerprintHandshakeEOF(errors.New(`Post "https://chatgpt.com/backend-api/codex/responses": TLS handshake failed: unexpected EOF`)))
+	require.False(t, isTLSFingerprintHandshakeEOF(errors.New("unexpected EOF")))
+	require.False(t, isTLSFingerprintHandshakeEOF(errors.New("TLS handshake timeout")))
+	require.True(t, isRetryableStandardTLSFallbackError(errors.New("Post https://chatgpt.com: EOF")))
+	require.True(t, isRetryableStandardTLSFallbackError(errors.New("read tcp: unexpected EOF")))
+	require.False(t, isRetryableStandardTLSFallbackError(errors.New("context deadline exceeded")))
+}
+
+func TestCloneRequestForRetryReopensBody(t *testing.T) {
+	const payload = `{"input":"retry"}`
+	req, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", strings.NewReader(payload))
+	require.NoError(t, err)
+
+	retryReq, ok := cloneRequestForRetry(req)
+	require.True(t, ok)
+	body, err := io.ReadAll(retryReq.Body)
+	require.NoError(t, err)
+	require.Equal(t, payload, string(body))
+	require.Equal(t, req.ContentLength, retryReq.ContentLength)
+}
+
+func TestTLSFingerprintFallbackKeySeparatesAccountsAndProfiles(t *testing.T) {
+	svc := NewHTTPUpstream(nil).(*httpUpstreamService)
+	node := tlsfingerprint.BuiltinProfile("nodejs24")
+	chrome := tlsfingerprint.BuiltinProfile("chrome")
+	require.NotEqual(t,
+		svc.tlsFingerprintFallbackKey("", 1, node),
+		svc.tlsFingerprintFallbackKey("", 2, node),
+	)
+	require.NotEqual(t,
+		svc.tlsFingerprintFallbackKey("", 1, node),
+		svc.tlsFingerprintFallbackKey("", 1, chrome),
+	)
+	require.Equal(t,
+		svc.tlsFingerprintFallbackKey(" ", 1, node),
+		svc.tlsFingerprintFallbackKey("", 1, node),
+	)
+}
+
 func TestHTTPUpstreamDoWithTLSRejectsPlainHTTPBeforeSOCKSProxy(t *testing.T) {
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

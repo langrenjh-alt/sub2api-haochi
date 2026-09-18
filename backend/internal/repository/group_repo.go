@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
@@ -151,6 +152,7 @@ func createGroupRecord(ctx context.Context, client *dbent.Client, groupIn *servi
 		SetMessagesDispatchModelConfig(groupIn.MessagesDispatchModelConfig).
 		SetModelAllowlist(service.DomainGroupModelAllowlist(groupIn.ModelAllowlist)).
 		SetCodexModelsManifestConfig(groupIn.CodexModelsManifestConfig).
+		SetAntiDegradePreset(groupIn.AntiDegradePreset).
 		SetRpmLimit(groupIn.RPMLimit).
 		SetMaxReasoningEffort(groupIn.MaxReasoningEffort).
 		SetMaxReasoningEffortOverLimit(groupIn.MaxReasoningEffortOverLimit).
@@ -338,6 +340,7 @@ func (r *groupRepository) Update(ctx context.Context, groupIn *service.Group) er
 		SetMessagesDispatchModelConfig(groupIn.MessagesDispatchModelConfig).
 		SetModelAllowlist(service.DomainGroupModelAllowlist(groupIn.ModelAllowlist)).
 		SetCodexModelsManifestConfig(groupIn.CodexModelsManifestConfig).
+		SetAntiDegradePreset(groupIn.AntiDegradePreset).
 		SetRpmLimit(groupIn.RPMLimit).
 		SetMaxReasoningEffort(groupIn.MaxReasoningEffort).
 		SetMaxReasoningEffortOverLimit(groupIn.MaxReasoningEffortOverLimit).
@@ -864,6 +867,64 @@ func (r *groupRepository) DeleteAccountGroupsByGroupID(ctx context.Context, grou
 
 func (r *groupRepository) DeleteCascade(ctx context.Context, id int64) ([]int64, error) {
 	return r.deleteCascade(ctx, id, false)
+}
+
+// ListAntiDegradePresetCandidates 见 service.GroupRepository 的接口注释。
+// 用一条 JOIN 查出候选，避免按账号逐个回源（大分组有 7000+ 成员）。
+func (r *groupRepository) ListAntiDegradePresetCandidates(ctx context.Context, groupID int64, preset string) ([]int64, error) {
+	if groupID <= 0 {
+		return nil, nil
+	}
+
+	var (
+		query string
+		args  []any
+	)
+	if strings.TrimSpace(preset) != "" {
+		// 应用方向：相同 mode 的禁用标记也需要重启；排除不适用账号，避免耗尽每轮额度。
+		query = `
+SELECT a.id
+FROM accounts a
+JOIN account_groups ag ON ag.account_id = a.id
+WHERE ag.group_id = $1
+  AND a.deleted_at IS NULL
+  AND a.type IN ('oauth', 'setup-token')
+  AND (a.platform = 'openai' OR ($2 = 'legacy' AND a.platform = 'anthropic'))
+  AND a.parent_account_id IS NULL
+  AND LOWER(TRIM(COALESCE(a.extra ->> 'proxy_mode', ''))) <> 'random'
+  AND ((a.extra #>> '{anti_degrade,mode}') IS DISTINCT FROM $2
+    OR (a.extra #>> '{anti_degrade,enabled}') IS DISTINCT FROM 'true')
+ORDER BY a.id`
+		args = []any{groupID, preset}
+	} else {
+		// 回滚方向：只挑"由本分组写入"的成员，避免误伤管理员手工应用的策略。
+		query = `
+SELECT a.id
+FROM accounts a
+JOIN account_groups ag ON ag.account_id = a.id
+WHERE ag.group_id = $1
+  AND a.deleted_at IS NULL
+  AND (a.extra #>> '{anti_degrade,source}') = $2
+  AND (a.extra #>> '{anti_degrade,source_group_id}') = $3
+ORDER BY a.id`
+		args = []any{groupID, service.AntiDegradeSourceGroup, strconv.FormatInt(groupID, 10)}
+	}
+
+	rows, err := r.client.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := make([]int64, 0, 64)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (r *groupRepository) DeleteCascadeIfEmpty(ctx context.Context, id int64) ([]int64, error) {

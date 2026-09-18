@@ -18,6 +18,26 @@ func NewDegradationHandler(svc *service.DegradationService) *DegradationHandler 
 	return &DegradationHandler{svc: svc}
 }
 
+func (h *DegradationHandler) ResetPublicStats(c *gin.Context) {
+	actor, ok := intelligentAdminActor(c)
+	if !ok {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1024)
+	var req struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || !req.Confirm {
+		response.BadRequest(c, "请确认重置全站公开页统计")
+		return
+	}
+	resetAt, err := h.svc.ResetPublicStats(c.Request.Context(), actor)
+	if response.ErrorFrom(c, err) {
+		return
+	}
+	response.Success(c, gin.H{"reset_at": resetAt})
+}
+
 // Groups lists every group with its detector switch and parameters.
 func (h *DegradationHandler) Groups(c *gin.Context) {
 	if _, ok := intelligentAdminActor(c); !ok {

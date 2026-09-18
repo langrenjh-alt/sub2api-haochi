@@ -6,17 +6,21 @@ import (
 )
 
 type IntelligentTestConfig struct {
-	AnswerType      string                  `json:"answer_type,omitempty"`
-	AnswerUnit      string                  `json:"answer_unit,omitempty"`
-	AnswerUnitMode  string                  `json:"answer_unit_mode,omitempty"`
-	AnswerFormat    string                  `json:"answer_format,omitempty"`
-	Execution       *ProtectionRuntimeState `json:"execution,omitempty"`
-	Prompt          string                  `json:"prompt"`
-	Model           string                  `json:"model"`
-	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
-	Evaluator       string                  `json:"evaluator"`
-	ExpectedAnswer  string                  `json:"expected_answer"`
-	TimeoutSeconds  int                     `json:"timeout_seconds"`
+	PublicSample       bool                    `json:"public_sample,omitempty"`
+	SourceRoundID      int64                   `json:"source_round_id,omitempty"`
+	OutputTokens       *int64                  `json:"output_tokens,omitempty"`
+	DegradationGroupID int64                   `json:"degradation_group_id,omitempty"`
+	AnswerType         string                  `json:"answer_type,omitempty"`
+	AnswerUnit         string                  `json:"answer_unit,omitempty"`
+	AnswerUnitMode     string                  `json:"answer_unit_mode,omitempty"`
+	AnswerFormat       string                  `json:"answer_format,omitempty"`
+	Execution          *ProtectionRuntimeState `json:"execution,omitempty"`
+	Prompt             string                  `json:"prompt"`
+	Model              string                  `json:"model"`
+	ReasoningEffort    string                  `json:"reasoning_effort,omitempty"`
+	Evaluator          string                  `json:"evaluator"`
+	ExpectedAnswer     string                  `json:"expected_answer"`
+	TimeoutSeconds     int                     `json:"timeout_seconds"`
 }
 type IntelligentTestSetting struct {
 	TestType    string                `json:"test_type"`

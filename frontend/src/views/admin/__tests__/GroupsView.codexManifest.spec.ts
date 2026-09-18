@@ -6,12 +6,18 @@ import type { AdminGroup, CodexModelsManifestConfig } from "@/types";
 import GroupsView from "@/views/admin/GroupsView.vue";
 
 const {
+  listStrategies,
+  getSync,
+  triggerSync,
   listGroups,
   getModelsListCandidates,
   getUsageSummary,
   getCapacitySummary,
   getLiveCapability,
 } = vi.hoisted(() => ({
+  listStrategies: vi.fn().mockResolvedValue([]),
+  getSync: vi.fn().mockResolvedValue({ enabled: true, status: null }),
+  triggerSync: vi.fn().mockResolvedValue({ enabled: true, status: null }),
   listGroups: vi.fn(),
   getModelsListCandidates: vi.fn(),
   getUsageSummary: vi.fn(),
@@ -22,9 +28,12 @@ const {
 vi.mock("@/api/admin", () => ({
   adminAPI: {
     groups: {
+      getAntiDegradeSync: getSync,
+      triggerAntiDegradeSync: triggerSync,
       list: listGroups,
       getAll: vi.fn(),
       getModelsListCandidates,
+      getModelAllowlistCandidates: vi.fn().mockResolvedValue([]),
       getUsageSummary,
       getCapacitySummary,
       getLiveCapability,
@@ -35,11 +44,14 @@ vi.mock("@/api/admin", () => ({
       updateSortOrder: vi.fn(),
     },
     accounts: {
+      listAntiDegradeStrategies: listStrategies,
       list: vi.fn(),
       getById: vi.fn(),
     },
   },
 }));
+
+vi.mock("@/stores/auth", () => ({ useAuthStore: () => ({ isSimpleMode: false }) }));
 
 vi.mock("@/stores/app", () => ({
   useAppStore: () => ({
@@ -213,6 +225,7 @@ const mountView = () =>
         ConfirmDialog: true,
         EmptyState: true,
         Select: true,
+        DegradationDetectionCard: true,
         PlatformIcon: true,
         Icon: true,
         GroupCapacityBadge: true,
@@ -229,6 +242,13 @@ const mountView = () =>
 describe("GroupsView Codex manifest binding", () => {
   beforeEach(() => {
     localStorage.clear();
+    listStrategies.mockResolvedValue([
+      { id: "native_baseline", apply_supported: false },
+      { id: "legacy", name: "Legacy", apply_supported: true },
+      { id: "mode1", name: "Mode 1", apply_supported: true, requires_openai_oauth: true },
+    ]);
+    getSync.mockReset().mockResolvedValue({ enabled: true, status: null });
+    triggerSync.mockClear();
     listGroups.mockReset();
     getModelsListCandidates.mockReset();
     getUsageSummary.mockReset();
@@ -283,4 +303,36 @@ describe("GroupsView Codex manifest binding", () => {
 
     wrapper.unmount();
   });
+  it("filters unsupported presets and blocks sync of an unsaved selection", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.findAll("button").find(b => b.text().includes("common.edit"))!.trigger("click");
+    await flushPromises();
+    const select = wrapper.findComponent('[data-testid="group-anti-degrade-preset"]');
+    expect(select.props('options').map((o: any) => o.value)).toEqual(['', 'legacy', 'mode1']);
+    const sync = wrapper.findAll('button').find(b => b.text().includes('admin.groups.antiDegrade.syncNow'))!;
+    expect(sync.attributes('disabled')).toBeUndefined();
+    select.vm.$emit('update:modelValue', 'legacy');
+    await wrapper.vm.$nextTick();
+    expect(sync.attributes('disabled')).toBeDefined();
+    await sync.trigger('click');
+    expect(triggerSync).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("ignores a late sync response after switching groups", async () => {
+    let resolve!: (value: unknown) => void;
+    getSync.mockImplementationOnce(() => new Promise(r => { resolve = r }));
+    const wrapper = mountView();
+    await flushPromises();
+    const state = (wrapper.vm as any).$.setupState;
+    await state.handleEdit(sourceGroup);
+    await state.handleEdit({ ...sourceGroup, id: 99 });
+    await flushPromises();
+    resolve({ enabled: true, status: { group_id: 42, preset: 'old-response' } });
+    await flushPromises();
+    expect(state.antiDegradeSync.status).toBeNull();
+    wrapper.unmount();
+  });
+
 });

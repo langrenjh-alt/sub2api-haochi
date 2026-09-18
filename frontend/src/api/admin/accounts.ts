@@ -28,7 +28,9 @@ import type {
   OllamaCloudUsageSettings,
   OllamaCloudUsageState,
   GrokMediaEligibilityMode,
-  GrokMediaEligibilityState
+  GrokMediaEligibilityState,
+  AntiDegradeStrategy,
+  AntiDegradePreview
 } from '@/types'
 
 /**
@@ -255,6 +257,38 @@ export async function updateGrokMediaEligibility(
     `/admin/accounts/${id}/grok-media-eligibility`,
     { mode }
   )
+  return data
+}
+
+export async function listAntiDegradeStrategies(): Promise<AntiDegradeStrategy[]> {
+  const { data } = await apiClient.get<{ strategies: AntiDegradeStrategy[] }>(
+    '/admin/accounts/anti-degrade/strategies'
+  )
+  return data.strategies ?? []
+}
+
+export async function previewAntiDegrade(id: number, mode: string): Promise<AntiDegradePreview> {
+  const { data } = await apiClient.get<AntiDegradePreview>(`/admin/accounts/${id}/anti-degrade`, {
+    params: { mode }
+  })
+  return data
+}
+
+/** 应用策略预设；服务端会快照旧值以便还原。 */
+export async function applyAntiDegrade(id: number, mode: string): Promise<Account> {
+  const { data } = await apiClient.post<Account>(
+    `/admin/accounts/${id}/anti-degrade/apply`,
+    null,
+    { params: { mode } }
+  )
+  return data
+}
+
+/** 关闭防降智：还原到应用预设前的快照（需显式确认）。 */
+export async function revertAntiDegrade(id: number): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/anti-degrade/revert`, {
+    confirm_disable: true
+  })
   return data
 }
 
@@ -1081,6 +1115,10 @@ export const accountsAPI = {
   update,
   getGrokMediaEligibility,
   updateGrokMediaEligibility,
+  listAntiDegradeStrategies,
+  previewAntiDegrade,
+  applyAntiDegrade,
+  revertAntiDegrade,
   checkMixedChannelRisk,
   delete: deleteAccount,
   toggleStatus,

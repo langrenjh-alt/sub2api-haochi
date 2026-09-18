@@ -256,6 +256,14 @@ func (s *AntiDegradeService) applyMode1(ctx context.Context, a *Account) (*Accou
 	delete(extra, "tls_fingerprint_profile_id")
 	cap := mode1InitialLimit(a)
 	extra[AntiDegradeMarkerExtraKey] = map[string]any{"enabled": true, "mode": "mode1", "policy_version": mode1PolicyVersion, "max_concurrency": cap, "applied_at": time.Now().UTC().Format(time.RFC3339), "prev": prev}
+	if src := antiDegradeApplySourceFromContext(ctx); src.Kind != "" {
+		marker := extra[AntiDegradeMarkerExtraKey].(map[string]any)
+		marker[antiDegradeMarkerSourceKey] = src.Kind
+		marker[antiDegradeMarkerSourcePresetKey] = string(AntiDegradeMode1)
+		if src.GroupID > 0 {
+			marker[antiDegradeMarkerSourceGroupID] = src.GroupID
+		}
+	}
 	extra[AntiDegradationExtraKey] = true
 	extra[ProtectionScopeExtraKey] = "codex_v3"
 	return s.admin.UpdateAccount(context.WithValue(ctx, mode1ManagedWriteKey{}, true), a.ID, &UpdateAccountInput{Extra: extra, Concurrency: &cap})

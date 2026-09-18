@@ -301,6 +301,13 @@ func (Group) Fields() []ent.Field {
 			SchemaType(map[string]string{dialect.Postgres: "jsonb"}).
 			Comment("固定账号获取 Codex Model Manifest 配置；开启后 /models 请求只用选定账号拉取（仅 openai 平台）"),
 
+		// 分组级防降智策略预设：非空时由收敛器持续把该策略对齐到组内账号，
+		// 优先级高于账号自身的并发/指纹设置；空字符串表示不干预，各账号用自己的设置。
+		field.String("anti_degrade_preset").
+			Default("").
+			MaxLen(32).
+			Comment("分组统一防降智策略预设（策略注册表 ID）；空 = 不干预，由账号自管"),
+
 		// 分组级每分钟请求数上限（0 = 不限制）。设置后优先于用户级兜底生效。
 		field.Int("rpm_limit").
 			Default(0).

@@ -121,6 +121,11 @@ type Group struct {
 	// 固定账号列表拉取并合并，不经过调度器（仅 openai 平台）。
 	CodexModelsManifestConfig GroupCodexModelsManifestConfig
 
+	// AntiDegradePreset 分组统一防降智策略预设（策略注册表 ID）。
+	// 非空时由分组预设收敛器持续把该策略对齐到组内账号，优先级高于账号自身的
+	// 并发/指纹设置；空字符串表示不干预，各账号使用自己的设置。
+	AntiDegradePreset string
+
 	// RPMLimit 分组级每分钟请求数上限（0 = 不限制）。
 	// 一旦设置即接管该分组用户的限流（覆盖用户级 rpm_limit），可被 user-group rpm_override 进一步覆盖。
 	RPMLimit int

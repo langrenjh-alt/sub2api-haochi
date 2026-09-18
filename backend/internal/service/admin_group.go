@@ -391,6 +391,10 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	if normalizeCodexModelsManifestConfig(platform, input.CodexModelsManifestConfig).Enabled {
 		return nil, infraerrors.New(http.StatusBadRequest, "INVALID_CODEX_MODELS_MANIFEST_CONFIG", "codex models manifest config cannot be enabled at group creation; configure it after creation in the group editor")
 	}
+	// 同理：分组预设要靠成员账号收敛，创建时还没有成员可收敛。
+	if IsGroupAntiDegradePresetActive(input.AntiDegradePreset) {
+		return nil, infraerrors.New(http.StatusBadRequest, "INVALID_ANTI_DEGRADE_PRESET", "anti-degrade preset cannot be set at group creation; configure it after creation in the group editor")
+	}
 	modelPricing, err := normalizeGroupModelPricing(platform, input.ModelPricing)
 	if err != nil {
 		return nil, err
@@ -1073,6 +1077,15 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	}
 	if input.CodexModelsManifestConfig != nil {
 		group.CodexModelsManifestConfig = *input.CodexModelsManifestConfig
+	}
+	// 分组统一防降智预设。仅改写这一列，实际对齐由收敛器异步完成：
+	// 保存立即返回，不复用也不缓存成员 ID（账号复活会换 ID，见 WishTeam5X）。
+	if input.AntiDegradePreset != nil {
+		preset, err := NormalizeGroupAntiDegradePreset(*input.AntiDegradePreset)
+		if err != nil {
+			return nil, err
+		}
+		group.AntiDegradePreset = preset
 	}
 	if input.RPMLimit != nil {
 		group.RPMLimit = *input.RPMLimit

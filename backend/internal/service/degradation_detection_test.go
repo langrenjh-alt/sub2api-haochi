@@ -8,6 +8,27 @@ import (
 	"time"
 )
 
+func TestDegradationArtworkPromptMatchesRequestedText(t *testing.T) {
+	const wanted = "创建一个HTML，内容是SVG绘制一个 鹈鹕骑自行车的2D动画，不要看任何项目，不要联网，不要测试。  "
+	if DegradationPelicanPrompt != wanted {
+		t.Fatalf("artwork prompt = %q, want %q", DegradationPelicanPrompt, wanted)
+	}
+	if !strings.Contains(DegradationCandyPrompt, "糖果") || DegradationExpectedAnswer != "21" {
+		t.Fatal("artwork changes must not alter the separate numeric probe")
+	}
+}
+
+func TestDegradationArtworkExtractsSVGFromHTML(t *testing.T) {
+	output := `<!doctype html><html><body><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="25" fill="blue"/></svg><script>requestAnimationFrame(draw)</script></body></html>`
+	image, _, err := PrepareIntelligentSVGPreview(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(image, "<circle") || strings.Contains(image, "<html") || strings.Contains(image, "<script") {
+		t.Fatal("HTML artwork must retain its SVG preview without the surrounding document")
+	}
+}
+
 func TestIsDegradationTestType(t *testing.T) {
 	for _, testType := range []string{DegradationTestTypeProbe, DegradationTestTypePreview} {
 		if !IsDegradationTestType(testType) {
@@ -29,6 +50,9 @@ func TestNormalizeDegradationConfigDefaults(t *testing.T) {
 	}
 	if cfg.ReasoningEffort != "medium" {
 		t.Fatalf("probe effort default = %q, want medium", cfg.ReasoningEffort)
+	}
+	if cfg.PreviewModel != "gpt-6-astra" {
+		t.Fatalf("preview model changed: %q", cfg.PreviewModel)
 	}
 	if cfg.PreviewReasoningEffort != "low" {
 		t.Fatalf("preview effort default = %q, want low", cfg.PreviewReasoningEffort)
@@ -197,7 +221,7 @@ func TestAccountTestCooldownSkipsOnlyDetectorSuspension(t *testing.T) {
 	}
 }
 
-// The candy question is the whole verdict: 21 is healthy, any other readable
+// The candy question is the verdict: 21 is healthy, any other readable
 // integer is degraded, and an unreadable answer changes nothing.
 func TestDegradationProbeVerdicts(t *testing.T) {
 	cfg := NormalizeDegradationConfig(DegradationDetectionConfig{})
@@ -233,6 +257,9 @@ func TestDegradationProbeVerdicts(t *testing.T) {
 // --------------------------------------------------------------- fake repo
 
 type fakeDegradationRepo struct {
+	depth           int
+	previewLookups  [][]int64
+	probeLookups    []int64
 	works           *DegradationWorkPage
 	timeline        *DegradationTimeline
 	deletedWorks    []int64
@@ -251,6 +278,7 @@ type fakeDegradationRepo struct {
 }
 
 type enqueuedTest struct {
+	groupID   int64
 	accountID int64
 	testType  string
 	model     string
@@ -274,18 +302,20 @@ func (f *fakeDegradationRepo) UpdateGroupConfig(context.Context, int64, int64, D
 func (f *fakeDegradationRepo) SetTestSettingEnabled(context.Context, string, bool, bool) error {
 	return nil
 }
-func (f *fakeDegradationRepo) PendingQueueDepth(context.Context) (int, error) { return 0, nil }
-func (f *fakeDegradationRepo) DueProbeAccountIDs(context.Context, int64, int, int) ([]int64, error) {
-	return f.dueProbeIDs, nil
+func (f *fakeDegradationRepo) PendingQueueDepth(context.Context) (int, error) { return f.depth, nil }
+func (f *fakeDegradationRepo) DueProbeAccountIDs(_ context.Context, groupID int64, _ int, limit int) ([]int64, error) {
+	f.probeLookups = append(f.probeLookups, groupID)
+	return f.dueProbeIDs[:min(len(f.dueProbeIDs), limit)], nil
 }
-func (f *fakeDegradationRepo) DuePreviewAccountIDs(context.Context, []int64, int, int) ([]int64, error) {
+func (f *fakeDegradationRepo) DuePreviewAccountIDs(_ context.Context, ids []int64, _ int, _ int) ([]int64, error) {
+	f.previewLookups = append(f.previewLookups, ids)
 	return f.duePreviewIDs, nil
 }
-func (f *fakeDegradationRepo) EnqueueDegradationTest(_ context.Context, accountID int64, testType, _ string, model, effort, expected string, _ int) (int64, bool, error) {
-	f.enqueued = append(f.enqueued, enqueuedTest{accountID: accountID, testType: testType, model: model, effort: effort, expected: expected})
+func (f *fakeDegradationRepo) EnqueueDegradationTest(_ context.Context, groupID, accountID int64, testType, _ string, model, effort, expected string, _ int) (int64, bool, error) {
+	f.enqueued = append(f.enqueued, enqueuedTest{groupID: groupID, accountID: accountID, testType: testType, model: model, effort: effort, expected: expected})
 	return int64(len(f.enqueued)), true, nil
 }
-func (f *fakeDegradationRepo) ApplyProbeOutcome(_ context.Context, accountID int64, degraded bool, minutes int, note string) (bool, error) {
+func (f *fakeDegradationRepo) ApplyProbeOutcome(_ context.Context, accountID, groupID int64, degraded bool, minutes int, note string) (bool, error) {
 	f.applied = append(f.applied, appliedOutcome{accountID, degraded, minutes, note})
 	return true, nil
 }
@@ -308,40 +338,19 @@ func (f *fakeDegradationRepo) PublicPage(context.Context, int, int) (*Degradatio
 	return &DegradationPublicPage{}, nil
 }
 
-// The public page must not stay empty behind one failed artwork.
-func TestPreviewRetriesQuicklyAfterAFailedArtwork(t *testing.T) {
-	ninetySecondsAgo := time.Now().Add(-90 * time.Second)
-	repo := &fakeDegradationRepo{
-		cfg:  NormalizeDegradationConfig(DegradationDetectionConfig{PreviewIntervalMinute: 10}),
-		page: &DegradationPublicPage{LastStatus: "failed", LastFinishedAt: &ninetySecondsAgo},
-	}
-	svc := NewDegradationService(repo)
-
-	due, err := svc.previewDue(context.Background(), 10)
-	if err != nil || !due {
-		t.Fatalf("a failed artwork must be retried quickly: due=%v err=%v", due, err)
-	}
-
-	// A successful artwork keeps the configured cadence.
-	repo.page = &DegradationPublicPage{LastStatus: "completed", LastFinishedAt: &ninetySecondsAgo}
-	due, err = svc.previewDue(context.Background(), 10)
-	if err != nil || due {
-		t.Fatalf("a fresh artwork must hold the interval: due=%v err=%v", due, err)
-	}
-
-	old := time.Now().Add(-11 * time.Minute)
-	repo.page = &DegradationPublicPage{LastStatus: "completed", LastFinishedAt: &old}
-	due, err = svc.previewDue(context.Background(), 10)
-	if err != nil || !due {
-		t.Fatalf("an artwork older than the interval is due: due=%v err=%v", due, err)
-	}
-}
-
 func (f *fakeDegradationRepo) Timeline(context.Context, int) (*DegradationTimeline, error) {
 	if f.timeline != nil {
 		return f.timeline, nil
 	}
 	return &DegradationTimeline{}, nil
+}
+
+func (f *fakeDegradationRepo) PublicAnimationSource(context.Context, int64) (string, error) {
+	return `<svg xmlns="http://www.w3.org/2000/svg"><circle r="10"/></svg>`, nil
+}
+
+func (f *fakeDegradationRepo) ResetPublicStats(context.Context, int64) (time.Time, error) {
+	return time.Now(), nil
 }
 
 func (f *fakeDegradationRepo) Works(context.Context, int, int) (*DegradationWorkPage, error) {
@@ -369,11 +378,11 @@ func probeRecord(accountID int64, verdict string, detail map[string]any) *Intell
 	for key, value := range detail {
 		evaluation[key] = value
 	}
-	return &IntelligentTestRecord{ID: 1, AccountID: accountID, TestType: DegradationTestTypeProbe, Evaluation: evaluation}
+	return &IntelligentTestRecord{ID: 1, AccountID: accountID, TestType: DegradationTestTypeProbe, ConfigSnapshot: &IntelligentTestConfig{DegradationGroupID: 42}, Evaluation: evaluation}
 }
 
 func TestHandleIntelligentTestOutcomeSuspendsAndRecovers(t *testing.T) {
-	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{})}
+	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{Enabled: true})}
 	svc := NewDegradationService(repo)
 
 	// A wrong answer suspends through the official window and tags the note.
@@ -410,7 +419,7 @@ func TestHandleIntelligentTestOutcomeSuspendsAndRecovers(t *testing.T) {
 }
 
 func TestHandleIntelligentTestOutcomeIgnoresAmbiguousResults(t *testing.T) {
-	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{})}
+	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{Enabled: true})}
 	svc := NewDegradationService(repo)
 
 	svc.HandleIntelligentTestOutcome(context.Background(), probeRecord(5, "undetermined", nil))
@@ -424,7 +433,7 @@ func TestHandleIntelligentTestOutcomeIgnoresAmbiguousResults(t *testing.T) {
 }
 
 func TestRunNowSkipsDisabledGroups(t *testing.T) {
-	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{})}
+	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{Enabled: true})}
 	svc := NewDegradationService(repo)
 	queued, err := svc.RunNow(context.Background(), 0)
 	if err != nil {
@@ -489,7 +498,7 @@ func TestEnqueuedTestsCarryTheGroupConfiguration(t *testing.T) {
 // keep quoting the number the answer was graded against, otherwise the page
 // shows "答案 29（应为 29）" and reads as a contradiction.
 func TestSuspendNoteQuotesTheGradedExpectation(t *testing.T) {
-	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{ExpectedAnswer: "21"})}
+	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{Enabled: true, ExpectedAnswer: "21"})}
 	svc := NewDegradationService(repo)
 	svc.HandleIntelligentTestOutcome(context.Background(), probeRecord(5, "incorrect", map[string]any{
 		"normalized_answer": "29", "expected_answer": "29", "actual_answer": "29",
@@ -555,5 +564,78 @@ func TestPublicWorkCurationPagingAndDeletion(t *testing.T) {
 	timeline, err := svc.Timeline(context.Background(), 6)
 	if err != nil || timeline == nil {
 		t.Fatalf("Timeline must always answer: %v %+v", err, timeline)
+	}
+}
+
+func TestDegradationCustomAnswerActuallyChangesVerdict(t *testing.T) {
+	cfg := IntelligentTestConfig{ExpectedAnswer: "29", AnswerType: "number", AnswerFormat: "free_text", AnswerUnitMode: "none"}
+	for answer, want := range map[string]string{"29": "correct", "21": "incorrect"} {
+		got := exactAnswerEvaluator{}.Evaluate(answer, cfg)
+		if got.Detail["answer_verdict"] != want {
+			t.Fatalf("answer=%s got=%v", answer, got.Detail)
+		}
+	}
+	if err := ValidateDegradationConfig(DegradationDetectionConfig{ExpectedAnswer: "not-a-number"}); err == nil {
+		t.Fatal("invalid numerical expectation accepted")
+	}
+}
+func TestDegradationDisabledGroupAndLegacyOutcomeIgnored(t *testing.T) {
+	repo := &fakeDegradationRepo{cfg: NormalizeDegradationConfig(DegradationDetectionConfig{Enabled: false})}
+	svc := NewDegradationService(repo)
+	svc.HandleIntelligentTestOutcome(context.Background(), probeRecord(5, "incorrect", nil))
+	if len(repo.applied) != 0 {
+		t.Fatal("disabled group must not suspend")
+	}
+	repo.cfg.Enabled = true
+	record := probeRecord(5, "incorrect", nil)
+	record.ConfigSnapshot = nil
+	svc.HandleIntelligentTestOutcome(context.Background(), record)
+	if len(repo.applied) != 0 {
+		t.Fatal("unattributed legacy results must not suspend")
+	}
+}
+func TestDegradationGroupScopeAndPreviewConfiguration(t *testing.T) {
+	one := NormalizeDegradationConfig(DegradationDetectionConfig{Enabled: true, PreviewEnabled: true, ExpectedAnswer: "29", PreviewModel: "model-one"})
+	two := NormalizeDegradationConfig(DegradationDetectionConfig{Enabled: true, PreviewEnabled: true, ExpectedAnswer: "31", PreviewModel: "model-two"})
+	off := one
+	off.Enabled = false
+	noPreview := one
+	noPreview.PreviewEnabled = false
+	repo := &fakeDegradationRepo{groups: []DegradationGroup{{GroupID: 1, Config: one}, {GroupID: 2, Config: two}, {GroupID: 3, Config: off}, {GroupID: 4, Config: noPreview}}, dueProbeIDs: []int64{7}, duePreviewIDs: []int64{8}}
+	svc := NewDegradationService(repo)
+	svc.Tick(context.Background())
+	for _, id := range repo.probeLookups {
+		if id == 3 {
+			t.Fatal("disabled group probed")
+		}
+	}
+	if len(repo.previewLookups) != 2 {
+		t.Fatalf("preview lookups=%v", repo.previewLookups)
+	}
+	for _, row := range repo.enqueued {
+		if row.testType == DegradationTestTypePreview {
+			want := "model-one"
+			if row.groupID == 2 {
+				want = "model-two"
+			}
+			if row.model != want || row.expected != "" {
+				t.Fatalf("mixed preview config: %+v", row)
+			}
+		} else if row.groupID == 2 && row.expected != "31" {
+			t.Fatalf("mixed answer: %+v", row)
+		}
+	}
+	repo.enqueued = nil
+	_, err := svc.RunNow(context.Background(), 2)
+	if err != nil || len(repo.enqueued) != 1 || repo.enqueued[0].groupID != 2 {
+		t.Fatalf("group-specific run: %v %+v", err, repo.enqueued)
+	}
+}
+func TestDegradationRespectsRemainingQueueBudget(t *testing.T) {
+	cfg := NormalizeDegradationConfig(DegradationDetectionConfig{Enabled: true})
+	repo := &fakeDegradationRepo{depth: 199, groups: []DegradationGroup{{GroupID: 1, Config: cfg}, {GroupID: 2, Config: cfg}}, dueProbeIDs: []int64{1, 2, 3}}
+	NewDegradationService(repo).Tick(context.Background())
+	if len(repo.enqueued) != 1 {
+		t.Fatalf("queued %d with one slot left", len(repo.enqueued))
 	}
 }

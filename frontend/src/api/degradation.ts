@@ -7,6 +7,7 @@
  */
 
 import { apiClient } from './client'
+import { buildApiUrl } from './url'
 
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -19,6 +20,8 @@ export interface DegradationDetectionConfig {
   prompt?: string
   timeout_seconds: number
   suspend_minutes: number
+  move_on_degraded: boolean
+  move_target_group_id: number
   preview_enabled: boolean
   preview_interval_minutes: number
   preview_model: string
@@ -81,6 +84,7 @@ export interface DegradationPublicWork {
 }
 
 export interface DegradationPublicPage {
+  enabled: boolean
   headline: string
   model: string
   reasoning_effort: string
@@ -93,7 +97,19 @@ export interface DegradationPublicPage {
 	items: DegradationPublicWork[]
 }
 
+export interface DegradationSample {
+ id: number
+ status: string
+ state: string
+ duration_ms: number
+ output_tokens: number | null
+ model: string
+ created_at: string
+ finished_at: string | null
+}
 export interface DegradationTimelineBucket {
+ sample?: DegradationSample
+ state?: string
 	start: string
 	total: number
 	correct: number
@@ -102,6 +118,12 @@ export interface DegradationTimelineBucket {
 }
 
 export interface DegradationTimeline {
+ mode?: string
+ interval_minutes?: number
+ next_probe_at?: string | null
+ latest_sample?: DegradationSample | null
+ running?: boolean
+  reset_at?: string | null
 	range_hours: number
 	bucket_minutes: number
 	generated_at: string
@@ -114,6 +136,11 @@ export interface DegradationTimeline {
 	suspended_accounts: number
 	last_probe_at: string | null
 	buckets: DegradationTimelineBucket[]
+}
+
+export async function resetPublicStats(): Promise<{ reset_at: string }> {
+  const { data } = await apiClient.post<{ reset_at: string }>('/admin/degradation-detection/stats/reset', { confirm: true })
+  return data
 }
 
 /** Admin view of the artworks the public page renders. */
@@ -132,6 +159,8 @@ export const DEFAULT_DEGRADATION_CONFIG: DegradationDetectionConfig = {
   expected_answer: '21',
   timeout_seconds: 300,
   suspend_minutes: 30,
+  move_on_degraded: false,
+  move_target_group_id: 0,
   preview_enabled: false,
   preview_interval_minutes: 10,
   preview_model: 'gpt-6-astra',
@@ -202,9 +231,20 @@ export async function publicTimeline(hours = 24, signal?: AbortSignal): Promise<
 	return data
 }
 
+/** Admin thumbnails stay available for archived/unpublished works via authenticated fetch. */
+export async function adminWorkImage(id: number, signal?: AbortSignal): Promise<Blob> {
+  const { data } = await apiClient.get<Blob>(`/admin/intelligent-tests/records/${id}/image`, { responseType: 'blob', signal })
+  return data
+}
+
 /** Public SVG endpoint. Kept as a URL so the browser can cache the artwork. */
 export function publicImageURL(id: number): string {
-  return `/api/v1/jiangzhijiance/records/${id}/image`
+  return buildApiUrl(`/jiangzhijiance/records/${id}/image`)
+}
+
+export async function publicAnimation(id: number, signal?: AbortSignal): Promise<{ document: string; animated: boolean }> {
+  const { data } = await apiClient.get<{ document: string; animated: boolean }>(`/jiangzhijiance/records/${id}/animation`, { signal })
+  return data
 }
 
 export default {

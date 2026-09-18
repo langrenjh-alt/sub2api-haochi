@@ -745,6 +745,16 @@ export default {
         codexFingerprintDevice: '仅设备',
         codexFingerprintSession: '设备+会话',
         codexFingerprintFull: '完全收敛',
+        antiDegrade: {
+          label: '防降智策略',
+          hint: '把指纹身份、TLS 模板和并发上限打包成一档预设。关闭时不写入任何预设，账号使用自己的设置；选了预设则由预设覆盖这几项，优先级高于上方的指纹收敛下拉。',
+          off: '关闭（使用账号自身设置）',
+          offHint: '当前不使用策略预设：并发、指纹身份和 TLS 模板都按本账号自己的字段生效。',
+          risk: '风险',
+          diagnosticOnly: '诊断用档位，不建议长期启用',
+          groupManaged: '该账号所属分组「{group}」已统一设置策略预设（{preset}），账号级选择已停用；如需单独调整请先清除分组预设。',
+          partialSave: '账号信息已保存，但防降智策略未能应用，请重试。',
+        },
         codexImageTool: 'Codex 图片桥接策略',
         codexImageToolDesc:
           '统一控制 Codex /responses 文本请求的 hosted image_generation 桥接和客户端图片工具声明。hosted 工具自动注入仅适用于非 Responses Lite 请求；账号级策略优先于渠道和全局配置，不影响独立图片生成接口。',

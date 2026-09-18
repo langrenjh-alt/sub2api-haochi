@@ -19,6 +19,11 @@ import (
 )
 
 func (r *intelligentTestRepository) Enqueue(ctx context.Context, actor int64, req service.IntelligentTestEnqueue) (*service.IntelligentTestEnqueued, error) {
+	for _, kind := range req.TestTypes {
+		if service.IsDegradationTestType(kind) {
+			return nil, errors.New("降智探测和公开作品请通过分组降智检测入口触发")
+		}
+	}
 	accountIDs := append([]int64{}, req.AccountIDs...)
 	types := append([]string{}, req.TestTypes...)
 	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
@@ -160,7 +165,12 @@ func (r *intelligentTestRepository) Claim(ctx context.Context) (*service.Intelli
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE account_tests t SET status='cancelled',error_message='执行前测试已停用或账号已删除',finished_at=NOW() WHERE t.status='queued' AND (NOT EXISTS(SELECT 1 FROM accounts a WHERE a.id=t.account_id AND a.deleted_at IS NULL) OR NOT EXISTS(SELECT 1 FROM test_settings s WHERE s.test_type=t.test_type AND s.enabled))`)
+	_, err = tx.ExecContext(ctx, `UPDATE account_tests t SET status='cancelled',error_message='执行前测试已停用或账号已删除',finished_at=NOW() WHERE t.status='queued' AND (NOT EXISTS(SELECT 1 FROM accounts a WHERE a.id=t.account_id AND a.deleted_at IS NULL) OR NOT EXISTS(SELECT 1 FROM test_settings s WHERE s.test_type=t.test_type AND s.enabled)
+ OR (t.test_type IN ('degradation_probe','degradation_preview') AND NOT EXISTS (
+ SELECT 1 FROM accounts a JOIN account_groups ag ON ag.account_id=a.id JOIN groups g ON g.id=ag.group_id
+ WHERE a.id=t.account_id AND a.deleted_at IS NULL AND a.schedulable=TRUE
+ AND g.id::text=t.config_snapshot->>'degradation_group_id' AND g.deleted_at IS NULL AND g.degradation_detection_enabled
+ AND (t.test_type<>'degradation_preview' OR g.degradation_preview_enabled))))`)
 	if err != nil {
 		return nil, err
 	}

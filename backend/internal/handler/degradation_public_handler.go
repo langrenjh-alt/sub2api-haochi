@@ -84,3 +84,18 @@ func (h *DegradationPublicHandler) Image(c *gin.Context) {
 	c.Header("Content-Disposition", "inline; filename=degradation-preview.svg")
 	c.Data(http.StatusOK, "image/svg+xml; charset=utf-8", []byte(work.Image))
 }
+
+func (h *DegradationPublicHandler) Animation(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id < 1 {
+		response.BadRequest(c, "invalid identifier")
+		return
+	}
+	animation, err := h.svc.PublicAnimation(c.Request.Context(), id)
+	if response.ErrorFrom(c, err) {
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	response.Success(c, animation)
+}

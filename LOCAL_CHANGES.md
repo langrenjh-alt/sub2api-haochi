@@ -628,3 +628,93 @@ UPDATE accounts ... WHERE reason LIKE 'health:%'   -> UPDATE 22（历史残留�
 
 回退：`bash ROLLBACK.sh repo`（回到 `cad12be73`）、`bash ROLLBACK.sh server`
 （装回 `sub2api.bak-20260916-192630-v0.2.5-fork-artwork` = `8f986156…`）。
+
+## 2026-09-18 — 292 状态注入 / Codex 状态池（新增功能，非上游）
+
+新增一套 fork 专有功能：把上游下发的 Codex 本轮状态令牌（文章所称 `current_turn_state`）
+按账号池化并注入到 `chatgpt.com` 的 Codex 请求上。管理页 `/admin/codex-turn-state`，
+详细设计、实测证据与运维步骤见 [docs/CODEX_TURN_STATE.md](docs/CODEX_TURN_STATE.md)。
+
+需要跨升级保留的点：
+
+- **上游形态与文章不同，实现按实测**：真实 upstream 在 **HTTP 200 的响应头
+  `x-codex-turn-state`** 上返回状态（文章描述的是 292 + 响应体字段）。实现同时支持
+  响应头与 292 响应体的 `current_turn_state`/`turn_state` 字段；312 撤销状态码是配置项
+  （默认 `312`），线上尚未观测到该信号。
+- **状态是账号级的**，因此注入只作用于令牌所属账号，绝不跨账号复用。
+  实测（同父账号下两个子账号互相换用状态）：上游**拒绝并补发新状态**，与发送损坏状态表现一致；
+  文章本身也写明 state is account-bound。故「所有账号共用一个状态头」不可行。
+- `issuance_statuses` 是严格模式开关：留空接受任意携带状态的成功响应（本环境实测就是 200 头），
+  填 `292` 则只信任 292 下发的状态、200 的状态会被完全忽略（不落库不注入）。
+- **注入点收口在 `doOpenAIUpstream`**（`openai_plugin_transport.go`），它是所有 OpenAI
+  路径的唯一漏斗；`injectCodexTurnState`/`observeCodexTurnState` 只对 `chatgpt.com` 生效，
+  `api.openai.com` 不受影响。池未安装时两个钩子都是空操作。
+- **网关新增字段** `OpenAIGatewayService.codexTurnState`（`CodexTurnStateGateway` 接口），
+  经 `SetCodexTurnState` 安装；不引入结构体构造依赖，故 wire 图不变。
+- **`cmd/server/wire_gen.go` 手工装配段**：`ProvideCodexTurnStateService` /
+  `Start()` / `adminHandlers.CodexTurnState` 三处与降智检测的手工段同理，
+  **重跑 `go generate ./cmd/server` 会整块删除，必须补回**（否则管理页 handler 为 nil）。
+- **采集复用账号测试传输链路**（`AccountTestService.DoOpenAIProbe`）并补齐 Codex
+  引擎指纹头与 `client_metadata`；缺指纹会被上游按非 Codex 客户端拒绝或不下发状态。
+- **原始令牌不进管理端响应**：列表/历史只有 SHA-256 指纹、长度、倒计时，符合本 fork
+  的凭据脱敏约定；令牌原文只存库并用于注入。
+- 迁移 `248_codex_turn_state.sql` 只新建 `codex_turn_states`，不改任何业务表。
+
+## 2026-09-18 追加 — 实测：state 长度就是降智标记（332 = 未降智，356 = 降智）
+
+动态住宅 IP 反复撞测 + 糖果题判据，完整数据见 `docs/CODEX_STATE_LENGTH_RESULT.md`。
+
+- **两种 state 长度**：`332`（答 21，未降智）与 `356`（答 28/29/36，降智）。
+  60 个样本 Fernet 结构自洽（0x80 / 时间戳 / IV / 密文 / HMAC），**密文正好相差一个 AES 块**（192 vs 208 字节）。
+- **完全对应**：n=26 有效判定，332 → 3/3 答 21，356 → 0/23 答 21（单侧 Fisher p≈3.8e-4）。
+- **类别跟账号、不跟 IP**：`codex特惠` 15 个可用账号逐账号稳定（`123904` 两次不同 IP 都是 332）；
+  用户新给账号（business、配额 0%）用 14 个不同美国住宅 IP 撞测**全是 356**。
+  本轮**没有出现长度 292/312**（方向一致，绝对值为 332/356）。
+- **回带两类 state 都被上游接受**（不再补发），但回带 356 不能让降智账号变好 ——
+  **state 是标记不是解药**；好账号不注入也是 21，跨账号共享仍被拒。
+- 建议后续：给 `codex_turn_state` 加「长度类别」闸门（只持久化/注入 332 类），
+  账号筛选改成「一次冷请求读 state 长度」（本轮命中率 2/15 ≈ 13%）。
+- 本轮只发外部请求：**未改线上配置、未重启服务、未写业务表**；临时令牌文件用完即删。
+
+## 2026-09-18 追加 — 形态闸门 + 注入模式（照实测与 gpt-load 补齐）
+
+参考公开 fork `DesuwaDev/gpt-load` 的 `X-Codex-Turn-State` 相关提交（`2b219e0d7` 观测与强制注入、
+`56031a2c3` 按模型限定注入、`a4f9f360` 332 字符 team 形态属正常、`1f8f54e11` 按密文块数标疑似降智）。
+
+- **修正理解**：292 / 312 是**状态长度**（个人号正常/降智），team 号是 332 / 356；
+  与响应码无关。`revocation_statuses` 默认值因此**改为空**（312 不再当撤销码），
+  `issuance_statuses` 保留但正常应留空。
+- `internal/service/codex_turn_state.go`：新增形态表与 `ClassifyCodexTurnState`
+  （Fernet 封装 → 密文块数 → individual/team × 正常/降智），
+  新增配置 `inject_mode`(fill_empty|force) 与 `allow_degraded_shapes`(默认 false)，
+  新增状态 `degraded`。
+- `codex_turn_state_service.go`：降智形态只落库不写缓存（不会顶掉好状态）、
+  注入前再校验形态；`ForceInject()` 暴露给网关。
+- `openai_plugin_transport.go`：网关 hook 支持 `force` 覆盖客户端回带的降智状态
+  （只补空白头等于永不注入，因为真实客户端每轮都自带状态）。
+- 前端：配置表单加「注入模式」下拉与「降智形态」开关，`toDraft` 对旧配置缺字段做兜底；
+  撤销/下发状态码的说明改成正确表述。
+- 测试：后端新增 `codex_turn_state_shape_test.go`（形态表、降智不入池、不顶替好状态、
+  allow_degraded_shapes 逃生门、force 覆盖），并更新受默认值影响的旧用例；前端新增 1 条表单用例。
+  后端 `internal/service` 全绿，前端 typecheck + 该页 7 条用例全绿。
+- 文档：`docs/CODEX_STATE_LENGTH_RESULT.md` 补第 7/8 节（模型对应关系、12/12 保路实测、
+  292/312 归属），`docs/CODEX_TURN_STATE.md` 补形态闸门与注入模式一节。
+- **未部署**：以上均未上美东独服，线上仍是旧行为。
+
+## 2026-09-18 追加 — 注入模型白名单（`inject_models`）+ 换模型注入实测
+
+- **实测结论**：状态**绑模型**。同一份 332（在 `gpt-6-astra` 下采集）回带到 `gpt-5.5` / `gpt-5.6-sol`
+  请求上，上游 **6/6 次拒绝并补发新状态**；同一状态在 `gpt-6-astra` 上 **15/15 次被接受**。
+  `gpt-5.3-codex` 直接 400（ChatGPT 账号不支持该模型）。详见 `docs/CODEX_TURN_STATE.md` 第 5 节。
+- **后端**：`CodexTurnStateConfig.InjectModels`
+  - 留空 = **只对采集模型注入**（安全默认，依据上面的实测）；`*` = 所有模型；结尾 `*` 前缀匹配；
+    模型名读不出来时照样注入；单条最长 96 字符、最多 20 条，字符集受限（字母数字与 `- . _ /`）。
+  - `InjectionHeader(accountID, requestedModel)` 增加模型参数；新增 `ModelScoped()` 供网关判断是否需要
+    读模型。网关钩子用 `requestedModelOf`（`request.GetBody()` 读副本 + 256 KiB 上限，不消耗原 body）
+    只在配了白名单时回放请求体。
+- **前端**：配置页新增「注入模型白名单」输入框（逗号/空格分隔，大小写归一、去重、排序），
+  `toDraft` / `pickConfig` / `mergeConfig` / `parsedConfig` 同步；说明文案标注"状态绑模型"的实测依据。
+- **测试**：后端新增 `TestInjectionMatchesModel`、`TestValidateCodexTurnStateConfigRejectsBadModelEntries`、
+  `TestInjectCodexTurnStateReadsTheRequestedModel`（含 body 未被消耗的断言），并同步 `InjectionHeader`
+  新签名的既有用例；前端表单用例补 `inject_models` 断言。后端 `internal/service` 全绿，前端 typecheck + 7 条用例全绿。
+- **仍未部署**。

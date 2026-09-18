@@ -94,6 +94,9 @@ func (groupRepoNoop) BindAccountsToGroup(context.Context, int64, []int64) error 
 func (groupRepoNoop) UpdateSortOrders(context.Context, []GroupSortOrderUpdate) error {
 	panic("unexpected UpdateSortOrders call")
 }
+func (groupRepoNoop) ListAntiDegradePresetCandidates(context.Context, int64, string) ([]int64, error) {
+	panic("unexpected ListAntiDegradePresetCandidates call")
+}
 
 type subscriptionGroupRepoStub struct {
 	groupRepoNoop

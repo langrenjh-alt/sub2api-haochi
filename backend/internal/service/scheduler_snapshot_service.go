@@ -675,6 +675,12 @@ func (s *SchedulerSnapshotService) UpdateAccountInCache(ctx context.Context, acc
 	return s.cache.SetAccount(ctx, account)
 }
 
+// SyncAccountGroupChange uses the same invalidation/rebuild path as the durable
+// outbox. The outbox remains the retry path if this eager refresh fails.
+func (s *SchedulerSnapshotService) SyncAccountGroupChange(ctx context.Context, id int64, groups []int64) error {
+	return s.handleAccountEvent(ctx, &id, map[string]any{"group_ids": groups}, nil)
+}
+
 func (s *SchedulerSnapshotService) runInitialRebuild() {
 	if s.cache == nil {
 		return

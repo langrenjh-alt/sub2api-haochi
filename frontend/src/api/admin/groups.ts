@@ -220,6 +220,48 @@ export async function update(id: number, updates: UpdateGroupRequest): Promise<A
   return data
 }
 
+/** 分组防降智预设的收敛状态（进程内快照，重启即重置）。 */
+export interface GroupAntiDegradeSyncFailure {
+  account_id: number
+  reason: string
+}
+
+export interface GroupAntiDegradeSyncStatus {
+  group_id: number
+  preset: string
+  total: number
+  candidates: number
+  applied: number
+  reverted: number
+  skipped: number
+  failed: number
+  failures?: GroupAntiDegradeSyncFailure[]
+  last_run_at?: string
+  last_duration_ms: number
+  running: boolean
+}
+
+export interface GroupAntiDegradeSyncResponse {
+  enabled: boolean
+  status?: GroupAntiDegradeSyncStatus | null
+  message?: string
+}
+
+export async function getAntiDegradeSync(id: number): Promise<GroupAntiDegradeSyncResponse> {
+  const { data } = await apiClient.get<GroupAntiDegradeSyncResponse>(
+    `/admin/groups/${id}/anti-degrade-sync`
+  )
+  return data
+}
+
+/** 立即触发一轮收敛（不等后台轮询），返回本轮结果。 */
+export async function triggerAntiDegradeSync(id: number): Promise<GroupAntiDegradeSyncResponse> {
+  const { data } = await apiClient.post<GroupAntiDegradeSyncResponse>(
+    `/admin/groups/${id}/anti-degrade-sync`
+  )
+  return data
+}
+
 /**
  * Delete group
  * @param id - Group ID
@@ -481,6 +523,8 @@ export const groupsAPI = {
   create,
   duplicate,
   update,
+  getAntiDegradeSync,
+  triggerAntiDegradeSync,
   delete: deleteGroup,
   toggleStatus,
   getStats,

@@ -18,6 +18,24 @@ import { resolveRouteDocumentTitle } from './title'
  * Route definitions with lazy loading
  */
 const routes: RouteRecordRaw[] = [
+  {
+    path: '/admin/codex-turn-state',
+    name: 'CodexTurnState',
+    component: () => import('@/views/admin/CodexTurnStateView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true, title: 'Codex 状态池' }
+  },
+  {
+    path: '/admin/pool-runway',
+    name: 'PoolRunway',
+    component: () => import('@/views/admin/PoolRunwayView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true, title: '号池续航' }
+  },
+  {
+    path: '/WishTeam5X/',
+    name: 'WishTeam5X',
+    component: () => import('@/views/admin/WishTeamView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true, title: 'WishTeam5X · 子号巡查' }
+  },
   // ==================== Setup Routes ====================
   {
     path: '/setup',

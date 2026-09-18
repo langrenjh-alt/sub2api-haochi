@@ -350,6 +350,11 @@ func DefaultMappedModel(v string) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldDefaultMappedModel, v))
 }
 
+// AntiDegradePreset applies equality check predicate on the "anti_degrade_preset" field. It's identical to AntiDegradePresetEQ.
+func AntiDegradePreset(v string) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldAntiDegradePreset, v))
+}
+
 // RpmLimit applies equality check predicate on the "rpm_limit" field. It's identical to RpmLimitEQ.
 func RpmLimit(v int) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldRpmLimit, v))
@@ -2608,6 +2613,71 @@ func DefaultMappedModelEqualFold(v string) predicate.Group {
 // DefaultMappedModelContainsFold applies the ContainsFold predicate on the "default_mapped_model" field.
 func DefaultMappedModelContainsFold(v string) predicate.Group {
 	return predicate.Group(sql.FieldContainsFold(FieldDefaultMappedModel, v))
+}
+
+// AntiDegradePresetEQ applies the EQ predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetEQ(v string) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetNEQ applies the NEQ predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetNEQ(v string) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetIn applies the In predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetIn(vs ...string) predicate.Group {
+	return predicate.Group(sql.FieldIn(FieldAntiDegradePreset, vs...))
+}
+
+// AntiDegradePresetNotIn applies the NotIn predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetNotIn(vs ...string) predicate.Group {
+	return predicate.Group(sql.FieldNotIn(FieldAntiDegradePreset, vs...))
+}
+
+// AntiDegradePresetGT applies the GT predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetGT(v string) predicate.Group {
+	return predicate.Group(sql.FieldGT(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetGTE applies the GTE predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetGTE(v string) predicate.Group {
+	return predicate.Group(sql.FieldGTE(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetLT applies the LT predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetLT(v string) predicate.Group {
+	return predicate.Group(sql.FieldLT(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetLTE applies the LTE predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetLTE(v string) predicate.Group {
+	return predicate.Group(sql.FieldLTE(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetContains applies the Contains predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetContains(v string) predicate.Group {
+	return predicate.Group(sql.FieldContains(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetHasPrefix applies the HasPrefix predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetHasPrefix(v string) predicate.Group {
+	return predicate.Group(sql.FieldHasPrefix(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetHasSuffix applies the HasSuffix predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetHasSuffix(v string) predicate.Group {
+	return predicate.Group(sql.FieldHasSuffix(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetEqualFold applies the EqualFold predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetEqualFold(v string) predicate.Group {
+	return predicate.Group(sql.FieldEqualFold(FieldAntiDegradePreset, v))
+}
+
+// AntiDegradePresetContainsFold applies the ContainsFold predicate on the "anti_degrade_preset" field.
+func AntiDegradePresetContainsFold(v string) predicate.Group {
+	return predicate.Group(sql.FieldContainsFold(FieldAntiDegradePreset, v))
 }
 
 // RpmLimitEQ applies the EQ predicate on the "rpm_limit" field.

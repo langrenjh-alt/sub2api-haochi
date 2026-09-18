@@ -205,20 +205,34 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	pluginHostInfo := providePluginHostInfo(buildInfo)
 	pluginManager := service.NewPluginManager(pluginRepository, secretEncryptor, configConfig, pluginHostInfo)
 	accountTestService := service.ProvideAccountTestService(concurrencyService, accountRepository, geminiTokenProvider, claudeTokenProvider, grokTokenProvider, antigravityGatewayService, httpUpstream, configConfig, tlsFingerprintProfileService, openAIGatewayService, settingService, pluginManager)
-	// The detector is constructed before the test service so its outcome hook is
-	// installed before ProvideIntelligentTestService starts the worker: no
-	// verdict can land in a window where nothing would act on it.
+	// ⚠️ 手工装配块 —— 重新执行 wire 生成会整块删除本段，导致
+	// h.Admin.Degradation 保持 nil，降智检测路由一进方法就空指针 panic。
+	// wire 无法表达 SetOutcomeHook / Start 这类副作用，故必须手工维护；
+	// 任何时候重跑 wire 之后，都要把本段连同下方两处赋值一起补回来。
+	//
+	// 检测器先于测试服务构造：确保 ProvideIntelligentTestService 启动 worker
+	// 之前结果钩子已装好，不存在"判定落库却无人处理"的窗口。
 	degradationRepository := repository.NewDegradationRepository(db)
 	degradationService := service.NewDegradationService(degradationRepository)
 	intelligentTestService := service.ProvideIntelligentTestService(intelligentTestRepository, accountTestService)
-	// Only the detector may translate a persisted verdict into scheduling state;
-	// the generic runner never mutates accounts.
+	// 只有检测器可以把落库的判定翻译成调度状态；通用 runner 不改账号。
 	intelligentTestService.SetOutcomeHook(degradationService.HandleIntelligentTestOutcome)
 	degradationService.Start()
 	intelligentTestHandler := admin.NewIntelligentTestHandler(intelligentTestService)
 	degradationHandler := admin.NewDegradationHandler(degradationService)
 	degradationPublicHandler := handler.NewDegradationPublicHandler(degradationService)
-	groupHandler := admin.NewGroupHandlerWithConfig(adminService, dashboardService, groupCapacityService, configConfig)
+	wishTeamHandler := admin.NewWishTeamHandler(db)
+	poolRunwayHandler := admin.NewPoolRunwayHandler(db)
+	// ⚠️ 手工装配块 —— 与降智检测同理：ProvideCodexTurnStateService 需要把自身装到
+	// OpenAI 网关上（SetCodexTurnState），并提供 Start 这类 wire 无法表达的副作用。
+	// 重跑 wire 后本段会被删除，必须连同下方 adminHandlers.CodexTurnState 赋值一起补回。
+	codexTurnStateRepository := repository.NewCodexTurnStateRepository(db)
+	codexTurnStateService := service.ProvideCodexTurnStateService(codexTurnStateRepository, accountRepository, proxyRepository, httpUpstream, openAIGatewayService, accountTestService)
+	codexTurnStateService.Start()
+	codexTurnStateHandler := admin.NewCodexTurnStateHandler(codexTurnStateService)
+	antiDegradeService := service.ProvideAntiDegradeService(adminService, configConfig, pluginManager)
+	groupAntiDegradeReconciler := service.ProvideGroupAntiDegradeReconciler(groupRepository, antiDegradeService)
+	groupHandler := admin.ProvideGroupHandler(adminService, dashboardService, groupCapacityService, configConfig, groupAntiDegradeReconciler)
 	claudeUsageFetcher := repository.NewClaudeUsageFetcher(httpUpstream)
 	antigravityQuotaFetcher := service.NewAntigravityQuotaFetcher(proxyRepository, configConfig)
 	grokQuotaFetcher := service.NewGrokQuotaFetcher()
@@ -307,7 +321,6 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	ticketHandler := admin.NewTicketHandler(ticketService)
 	billingExportService := service.NewBillingExportService(db)
 	billingExportHandler := admin.NewBillingExportHandler(billingExportService)
-	antiDegradeService := service.ProvideAntiDegradeService(adminService, configConfig, pluginManager)
 	antiDegradeHandler := admin.NewAntiDegradeHandler(antiDegradeService)
 	configManager := securityaudit.NewConfigManager(db, settingRepository, redisClient, secretEncryptor, configConfig)
 	postgreSQLRepository := securityaudit.NewPostgreSQLRepository(db)
@@ -323,8 +336,11 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	auditLogService := service.ProvideAuditLogService(auditLogRepository, settingService)
 	auditLogHandler := admin.NewAuditLogHandler(auditLogService, totpService)
 	upstreamBillingProbeService := service.ProvideUpstreamBillingProbeService(accountRepository, accountTestService, settingService, leaderLockCache, db)
-	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, userCleanupHandler, intelligentTestHandler, groupHandler, accountHandler, accountTrafficHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, securityPolicyHandler, globalPricingHandler, marginHandler, tieredRoutingHandler, spendGuardHandler, ticketHandler, billingExportHandler, antiDegradeHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, upstreamBillingProbeService, ollamaCloudUsageService)
+	adminHandlers := handler.ProvideAdminHandlers(dashboardHandler, adminUserHandler, userCleanupHandler, intelligentTestHandler, wishTeamHandler, poolRunwayHandler, groupHandler, accountHandler, accountTrafficHandler, adminAnnouncementHandler, dataManagementHandler, backupHandler, oAuthHandler, openAIOAuthHandler, geminiOAuthHandler, antigravityOAuthHandler, grokOAuthHandler, cnProviderHandler, proxyHandler, adminRedeemHandler, promoHandler, settingHandler, opsHandler, systemHandler, adminSubscriptionHandler, adminUsageHandler, userAttributeHandler, errorPassthroughHandler, tlsFingerprintProfileHandler, pluginHandler, adminAPIKeyHandler, scheduledTestHandler, channelHandler, channelMonitorHandler, channelMonitorRequestTemplateHandler, contentModerationHandler, securityPolicyHandler, globalPricingHandler, marginHandler, tieredRoutingHandler, spendGuardHandler, ticketHandler, billingExportHandler, antiDegradeHandler, promptAdminHandler, paymentHandler, affiliateHandler, complianceHandler, auditLogHandler, upstreamBillingProbeService, ollamaCloudUsageService)
+	// ⚠️ 手工装配：wire 生成不会产出本行（ProvideAdminHandlers 签名里没有降智 handler）。
 	adminHandlers.Degradation = degradationHandler
+	// ⚠️ 手工装配：同上，ProvideAdminHandlers 签名里没有 292 状态 handler。
+	adminHandlers.CodexTurnState = codexTurnStateHandler
 	usageRecordWorkerPool := service.NewUsageRecordWorkerPool(configConfig)
 	userMsgQueueCache := repository.NewUserMsgQueueCache(redisClient)
 	userMessageQueueService := service.ProvideUserMessageQueueService(userMsgQueueCache, rpmCache, configConfig)
@@ -362,6 +378,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	idempotencyCleanupService := service.ProvideIdempotencyCleanupService(idempotencyRepository, configConfig)
 	openAIQuotaAutoResetService := service.ProvideOpenAIQuotaAutoResetService(accountRepository, openAIQuotaService, rateLimitService, idempotencyCoordinator, auditLogService, settingService, leaderLockCache)
 	handlers := handler.ProvideHandlers(authHandler, userHandler, apiKeyHandler, usageHandler, redeemHandler, subscriptionHandler, announcementHandler, channelMonitorUserHandler, channelMonitorV2Handler, adminHandlers, gatewayHandler, openAIGatewayHandler, handlerSettingHandler, totpHandler, passkeyHandler, handlerPaymentHandler, paymentWebhookHandler, availableChannelHandler, modelPlazaHandler, asyncImageHandler, batchImageHandler, accountCapabilityHandler, idempotencyCoordinator, idempotencyCleanupService, openAIQuotaAutoResetService)
+	// ⚠️ 手工装配：公开页 handler 同样不在 ProvideHandlers 签名里。
 	handlers.SetDegradationHandlers(degradationPublicHandler)
 	jwtAuthMiddleware := middleware.NewJWTAuthMiddleware(authService, userService, settingService, auditLogService)
 	optionalJWTAuthMiddleware := middleware.NewOptionalJWTAuthMiddleware(authService, userService, settingService, auditLogService)
@@ -389,14 +406,14 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	channelMonitorRunner := service.ProvideChannelMonitorRunner(channelMonitorService, settingService, channelMonitorQuotaFetcher)
 	channelMonitorV2Aggregator := service.ProvideChannelMonitorV2Aggregator(channelMonitorV2Repository, db, settingService)
 	userPlatformQuotaUsageFlusher := service.ProvideUserPlatformQuotaUsageFlusher(configConfig, billingCache, serviceUserPlatformQuotaRepository, timingWheelService)
-	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, proxyExpiryService, marginService, spendGuardService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, intelligentTestService, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, promptService, pluginManager)
-	degradationStop := degradationService.Stop
+	v := provideCleanup(client, redisClient, opsMetricsCollector, opsAggregationService, opsAlertEvaluatorService, opsCleanupService, opsScheduledReportService, opsSystemLogSink, opsService, opsIngressRejectAggregator, apiKeyService, authCacheInvalidationWorker, schedulerSnapshotService, tokenRefreshService, accountExpiryService, cnProviderBalanceCheckService, openAICodexVersionSyncService, proxyExpiryService, marginService, spendGuardService, subscriptionExpiryService, usageCleanupService, idempotencyCleanupService, batchImageCleanupService, batchImageWorkerRuntime, pricingService, emailQueueService, billingCacheService, usageRecordWorkerPool, subscriptionService, oAuthService, openAIOAuthService, geminiOAuthService, antigravityOAuthService, grokOAuthService, openAIGatewayService, scheduledTestRunnerService, intelligentTestService, wishTeamHandler, poolRunwayHandler, backupService, paymentOrderExpiryService, channelMonitorRunner, channelMonitorV2Aggregator, userPlatformQuotaUsageFlusher, upstreamBillingProbeService, ollamaCloudUsageService, auditLogService, openAIQuotaAutoResetService, promptService, pluginManager)
 	application := &Application{
 		Server:        httpServer,
 		PromptAudit:   promptService,
 		PluginManager: pluginManager,
+		// ⚠️ 手工装配：检测器持有自己的 worker，需先于通用清理停掉。
 		Cleanup: func() {
-			degradationStop()
+			degradationService.Stop()
 			v()
 		},
 	}
@@ -469,6 +486,8 @@ func provideCleanup(
 	openAIGateway *service.OpenAIGatewayService,
 	scheduledTestRunner *service.ScheduledTestRunnerService,
 	intelligentTests *service.IntelligentTestService,
+	wishTeam *admin.WishTeamHandler,
+	poolRunway *admin.PoolRunwayHandler,
 	backupSvc *service.BackupService,
 	paymentOrderExpiry *service.PaymentOrderExpiryService,
 	channelMonitorRunner *service.ChannelMonitorRunner,
@@ -491,6 +510,8 @@ func provideCleanup(
 		}
 
 		parallelSteps := []cleanupStep{
+			{"WishTeam5X", func() error { wishTeam.Stop(); return nil }},
+			{"PoolRunway", func() error { poolRunway.Stop(); return nil }},
 			{"IntelligentTests", func() error {
 				if intelligentTests != nil {
 					intelligentTests.Stop()

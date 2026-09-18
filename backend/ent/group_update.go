@@ -1213,6 +1213,20 @@ func (_u *GroupUpdate) SetNillableCodexModelsManifestConfig(v *domain.GroupCodex
 	return _u
 }
 
+// SetAntiDegradePreset sets the "anti_degrade_preset" field.
+func (_u *GroupUpdate) SetAntiDegradePreset(v string) *GroupUpdate {
+	_u.mutation.SetAntiDegradePreset(v)
+	return _u
+}
+
+// SetNillableAntiDegradePreset sets the "anti_degrade_preset" field if the given value is not nil.
+func (_u *GroupUpdate) SetNillableAntiDegradePreset(v *string) *GroupUpdate {
+	if v != nil {
+		_u.SetAntiDegradePreset(*v)
+	}
+	return _u
+}
+
 // SetRpmLimit sets the "rpm_limit" field.
 func (_u *GroupUpdate) SetRpmLimit(v int) *GroupUpdate {
 	_u.mutation.ResetRpmLimit()
@@ -1665,6 +1679,11 @@ func (_u *GroupUpdate) check() error {
 			return &ValidationError{Name: "default_mapped_model", err: fmt.Errorf(`ent: validator failed for field "Group.default_mapped_model": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.AntiDegradePreset(); ok {
+		if err := group.AntiDegradePresetValidator(v); err != nil {
+			return &ValidationError{Name: "anti_degrade_preset", err: fmt.Errorf(`ent: validator failed for field "Group.anti_degrade_preset": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.MaxReasoningEffort(); ok {
 		if err := group.MaxReasoningEffortValidator(v); err != nil {
 			return &ValidationError{Name: "max_reasoning_effort", err: fmt.Errorf(`ent: validator failed for field "Group.max_reasoning_effort": %w`, err)}
@@ -2035,6 +2054,9 @@ func (_u *GroupUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.CodexModelsManifestConfig(); ok {
 		_spec.SetField(group.FieldCodexModelsManifestConfig, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AntiDegradePreset(); ok {
+		_spec.SetField(group.FieldAntiDegradePreset, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.RpmLimit(); ok {
 		_spec.SetField(group.FieldRpmLimit, field.TypeInt, value)
@@ -3561,6 +3583,20 @@ func (_u *GroupUpdateOne) SetNillableCodexModelsManifestConfig(v *domain.GroupCo
 	return _u
 }
 
+// SetAntiDegradePreset sets the "anti_degrade_preset" field.
+func (_u *GroupUpdateOne) SetAntiDegradePreset(v string) *GroupUpdateOne {
+	_u.mutation.SetAntiDegradePreset(v)
+	return _u
+}
+
+// SetNillableAntiDegradePreset sets the "anti_degrade_preset" field if the given value is not nil.
+func (_u *GroupUpdateOne) SetNillableAntiDegradePreset(v *string) *GroupUpdateOne {
+	if v != nil {
+		_u.SetAntiDegradePreset(*v)
+	}
+	return _u
+}
+
 // SetRpmLimit sets the "rpm_limit" field.
 func (_u *GroupUpdateOne) SetRpmLimit(v int) *GroupUpdateOne {
 	_u.mutation.ResetRpmLimit()
@@ -4026,6 +4062,11 @@ func (_u *GroupUpdateOne) check() error {
 			return &ValidationError{Name: "default_mapped_model", err: fmt.Errorf(`ent: validator failed for field "Group.default_mapped_model": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.AntiDegradePreset(); ok {
+		if err := group.AntiDegradePresetValidator(v); err != nil {
+			return &ValidationError{Name: "anti_degrade_preset", err: fmt.Errorf(`ent: validator failed for field "Group.anti_degrade_preset": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.MaxReasoningEffort(); ok {
 		if err := group.MaxReasoningEffortValidator(v); err != nil {
 			return &ValidationError{Name: "max_reasoning_effort", err: fmt.Errorf(`ent: validator failed for field "Group.max_reasoning_effort": %w`, err)}
@@ -4413,6 +4454,9 @@ func (_u *GroupUpdateOne) sqlSave(ctx context.Context) (_node *Group, err error)
 	}
 	if value, ok := _u.mutation.CodexModelsManifestConfig(); ok {
 		_spec.SetField(group.FieldCodexModelsManifestConfig, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AntiDegradePreset(); ok {
+		_spec.SetField(group.FieldAntiDegradePreset, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.RpmLimit(); ok {
 		_spec.SetField(group.FieldRpmLimit, field.TypeInt, value)

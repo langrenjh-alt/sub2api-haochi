@@ -1000,6 +1000,22 @@ export default {
         "Are you sure you want to delete '{name}'? All associated API keys will no longer belong to any group.",
       deleteConfirmSubscription:
         "Are you sure you want to delete subscription group '{name}'? This will invalidate all API keys bound to this subscription and delete all related subscription records. This action cannot be undone.",
+      antiDegrade: {
+        label: 'Shared anti-degradation strategy',
+        hint: 'Applies one anti-degradation preset to every account in this group, taking precedence over each account own concurrency and fingerprint settings. Choose Off to let each account use its own settings; turning it off first rolls back the accounts this group had configured.',
+        off: 'Off (each account uses its own settings)',
+        offHint: 'No intervention: concurrency, fingerprint identity and TLS profile all follow each account own fields.',
+        risk: 'Risk',
+        syncTitle: 'Convergence status',
+        syncUnavailable: 'The reconciler is not enabled on this instance, so the group preset will not take effect.',
+        syncCounts: 'members {total} · applied {applied} · reverted {reverted} · skipped {skipped} · failed {failed}',
+        syncNow: 'Run one pass now',
+        syncTriggered: 'One convergence pass completed',
+        syncFailed: 'Failed to trigger convergence',
+        syncLastRun: 'Last pass: {at}',
+        syncRunning: 'running',
+        syncFailures: 'e.g. account {first} failed — {reason}',
+      },
       subscription: {
         title: 'Subscription Settings',
         type: 'Billing Type',

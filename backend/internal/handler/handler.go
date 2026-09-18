@@ -7,6 +7,11 @@ import (
 
 // AdminHandlers contains all admin-related HTTP handlers
 type AdminHandlers struct {
+	PoolRunway *admin.PoolRunwayHandler
+	WishTeam *admin.WishTeamHandler
+	// CodexTurnState is assigned after ProvideAdminHandlers, the same way the
+	// degradation handler is: Wire cannot express the service's Start side effect.
+	CodexTurnState *admin.CodexTurnStateHandler
 	Dashboard              *admin.DashboardHandler
 	User                   *admin.UserHandler
 	UserCleanup            *admin.UserCleanupHandler

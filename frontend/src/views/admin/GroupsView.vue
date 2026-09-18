@@ -3229,7 +3229,67 @@
         />
 
         <!-- 降智检测：分组级开关与探测参数（自带保存，独立于本表单） -->
-        <DegradationDetectionCard v-if="editingGroup" :group-id="editingGroup.id" />
+        <DegradationDetectionCard v-if="editingGroup" ref="degradationCard" :key="editingGroup.id" :group-id="editingGroup.id" />
+
+        <!-- 分组统一防降智策略预设：随本表单一起保存，收敛由后端后台任务完成 -->
+        <div class="border-t border-gray-200 pt-4 dark:border-dark-400">
+          <div class="flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <label class="input-label mb-0">{{ t("admin.groups.antiDegrade.label") }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t("admin.groups.antiDegrade.hint") }}
+              </p>
+            </div>
+            <div class="w-60 flex-shrink-0">
+              <Select v-model="editForm.anti_degrade_preset" data-testid="group-anti-degrade-preset" :options="antiDegradeOptions" :disabled="submitting || antiDegradeSyncBusy || !antiDegradeStrategies.length" />
+            </div>
+          </div>
+
+          <p v-if="antiDegradeSelected" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            {{ antiDegradeSelected.description }}
+            <span v-if="antiDegradeSelected.risk">· {{ t("admin.groups.antiDegrade.risk") }}：{{ antiDegradeSelected.risk }}</span>
+          </p>
+          <p v-else class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+            {{ t("admin.groups.antiDegrade.offHint") }}
+          </p>
+
+          <!-- 收敛状态：只在保存后/手动触发后才有数据，取不到就不显示 -->
+          <div v-if="editingGroup" class="mt-3 rounded-lg bg-gray-50 p-3 text-xs dark:bg-dark-900">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <span class="text-gray-500 dark:text-gray-400">
+                <template v-if="antiDegradeSync && antiDegradeSync.enabled">
+                  {{ t("admin.groups.antiDegrade.syncTitle") }}：{{ antiDegradeSync.status?.preset || "—" }}
+                </template>
+                <template v-else>{{ t("admin.groups.antiDegrade.syncUnavailable") }}</template>
+              </span>
+              <span v-if="antiDegradeSync?.status" class="tabular-nums text-gray-600 dark:text-gray-300">
+                {{ t("admin.groups.antiDegrade.syncCounts", {
+                  total: antiDegradeSync.status.total,
+                  applied: antiDegradeSync.status.applied,
+                  reverted: antiDegradeSync.status.reverted,
+                  skipped: antiDegradeSync.status.skipped,
+                  failed: antiDegradeSync.status.failed,
+                }) }}
+              </span>
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                :disabled="submitting || antiDegradeSyncBusy || !antiDegradeSync?.enabled || editForm.anti_degrade_preset !== (editingGroup?.anti_degrade_preset ?? '')"
+                @click="runAntiDegradeSyncNow"
+              >
+                <Icon v-if="antiDegradeSyncBusy" name="refresh" size="sm" class="mr-1 animate-spin" />
+                {{ t("admin.groups.antiDegrade.syncNow") }}
+              </button>
+            </div>
+            <p v-if="antiDegradeSync?.status?.last_run_at" class="mt-1 text-gray-400">
+              {{ t("admin.groups.antiDegrade.syncLastRun", { at: formatAntiDegradeSyncTime(antiDegradeSync.status.last_run_at) }) }}
+              <span v-if="antiDegradeSync.status.running">· {{ t("admin.groups.antiDegrade.syncRunning") }}</span>
+            </p>
+            <p v-if="antiDegradeSync?.status?.failures?.length" class="mt-1 text-red-600 dark:text-red-400">
+              {{ t("admin.groups.antiDegrade.syncFailures", { first: antiDegradeSync.status.failures[0].account_id, reason: antiDegradeSync.status.failures[0].reason }) }}
+            </p>
+          </div>
+        </div>
 
 
         <div class="border-t border-gray-200 pt-4 mt-4 dark:border-dark-400">
@@ -4379,6 +4439,7 @@ import { useOnboardingStore } from "@/stores/onboarding";
 import { adminAPI } from "@/api/admin";
 import type {
   AdminGroup,
+  AntiDegradeStrategy,
   CodexModelsManifestConfig,
   CompositeModelRoute,
   CompositeModelRouteInput,
@@ -4388,6 +4449,7 @@ import type {
   GroupPlatform,
   SubscriptionType,
 } from "@/types";
+import type { GroupAntiDegradeSyncResponse } from "@/api/admin/groups";
 import {
   CONCRETE_PLATFORM_OPTIONS,
   GROUP_PLATFORM_OPTIONS,
@@ -4934,6 +4996,7 @@ const showSortModal = ref(false);
 const submitting = ref(false);
 const sortSubmitting = ref(false);
 const editingGroup = ref<AdminGroup | null>(null);
+const degradationCard = ref<InstanceType<typeof DegradationDetectionCard> | null>(null);
 const deletingGroup = ref<AdminGroup | null>(null);
 const duplicatingGroupIds = reactive(new Set<number>());
 const showRateMultipliersModal = ref(false);
@@ -4992,6 +5055,68 @@ type CodexManifestAccountsFieldExpose = {
   resetValidation: () => void;
 };
 const editCodexManifestRef = ref<CodexManifestAccountsFieldExpose | null>(null);
+
+// ---- 分组统一防降智策略预设 ----
+// 预设清单来自服务端注册表（与账号弹窗共用同一接口），此处不硬编码策略。
+const antiDegradeStrategies = ref<AntiDegradeStrategy[]>([]);
+const antiDegradeSync = ref<GroupAntiDegradeSyncResponse | null>(null);
+const antiDegradeSyncBusy = ref(false);
+const antiDegradeOptions = computed(() => [
+  { value: "", label: t("admin.groups.antiDegrade.off") },
+  ...antiDegradeStrategies.value.filter((s) => s.apply_supported && (!s.requires_openai_oauth || editForm.platform === "openai")).map((s) => ({
+    value: s.id,
+    label: s.name,
+  })),
+]);
+const antiDegradeSelected = computed(
+  () => antiDegradeStrategies.value.find((s) => s.id === editForm.anti_degrade_preset) || null
+);
+
+if (typeof adminAPI.accounts?.listAntiDegradeStrategies === "function") {
+  adminAPI.accounts
+    .listAntiDegradeStrategies()
+    .then((list) => {
+      antiDegradeStrategies.value = list;
+    })
+    .catch(() => {
+      antiDegradeStrategies.value = [];
+    });
+}
+
+const formatAntiDegradeSyncTime = (iso: string): string => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+};
+
+let antiDegradeSyncRequest = 0;
+const loadAntiDegradeSync = async (groupId: number) => {
+  const request = ++antiDegradeSyncRequest;
+  antiDegradeSync.value = null;
+  try {
+    const result = await adminAPI.groups.getAntiDegradeSync(groupId);
+    if (request === antiDegradeSyncRequest && editingGroup.value?.id === groupId) antiDegradeSync.value = result;
+  } catch {
+    if (request === antiDegradeSyncRequest && editingGroup.value?.id === groupId) antiDegradeSync.value = null;
+  }
+};
+
+const runAntiDegradeSyncNow = async () => {
+  const id = editingGroup.value?.id;
+  if (!id || submitting.value || antiDegradeSyncBusy.value || editForm.anti_degrade_preset !== (editingGroup.value?.anti_degrade_preset ?? "")) return;
+  const request = ++antiDegradeSyncRequest;
+  antiDegradeSyncBusy.value = true;
+  try {
+    const result = await adminAPI.groups.triggerAntiDegradeSync(id);
+    if (request !== antiDegradeSyncRequest || editingGroup.value?.id !== id) return;
+    antiDegradeSync.value = result;
+    appStore.showSuccess(t("admin.groups.antiDegrade.syncTriggered"));
+  } catch (error: any) {
+    if (request === antiDegradeSyncRequest && editingGroup.value?.id === id) appStore.showError(extractApiErrorMessage(error, t("admin.groups.antiDegrade.syncFailed")));
+  } finally {
+    if (request === antiDegradeSyncRequest) antiDegradeSyncBusy.value = false;
+  }
+};
+
 const createCodexManifestDefaults = (): CodexModelsManifestConfig => ({
   enabled: false,
   account_ids: [],
@@ -5479,6 +5604,8 @@ const editForm = reactive({
   copy_accounts_from_group_ids: [] as number[],
   // 分组级 RPM 限制（每用户每分钟最大请求数；0 = 不限制）
   rpm_limit: 0 as number,
+  // 分组统一防降智策略预设（策略注册表 ID）；'' = 不干预，各账号用自己的设置。
+  anti_degrade_preset: "",
   max_reasoning_effort: "",
   max_reasoning_effort_over_limit: reasoningEffortOverLimitDowngrade,
   reasoning_effort_mappings: [] as ReasoningEffortMappingRow[],
@@ -6291,10 +6418,15 @@ const handleEdit = async (group: AdminGroup) => {
     group.model_routing,
   );
   loadModelAllowlistCandidates("edit", group.id, group.platform);
+  // 防降智预设：回填当前值并拉一次收敛状态（拿不到就显示"不可用"）。
+  editForm.anti_degrade_preset = group.anti_degrade_preset ?? "";
+  void loadAntiDegradeSync(group.id);
   showEditModal.value = true;
 };
 
 const closeEditModal = () => {
+  ++antiDegradeSyncRequest;
+  antiDegradeSyncBusy.value = false;
   editModelRoutingRules.value.forEach((rule) => {
     accountSearchRunner.clearKey(getEditRuleSearchKey(rule));
   });
@@ -6339,6 +6471,8 @@ const closeEditModal = () => {
   editCodexManifestConfig.value = createCodexManifestDefaults();
   editCodexManifestAccountNames.value = {};
   editCodexManifestRef.value?.resetValidation?.();
+  editForm.anti_degrade_preset = "";
+  antiDegradeSync.value = null;
 };
 
 const handleUpdateGroup = async () => {
@@ -6514,6 +6648,12 @@ const handleUpdateGroup = async () => {
         }
       : payload;
     await adminAPI.groups.update(editingGroup.value.id, requestData);
+    if (degradationCard.value && !(await degradationCard.value.save())) {
+      appStore.showError(
+        "分组基本信息已保存；降智检测设置未同步，原因见弹窗内「降智检测」卡片提示",
+      );
+      return;
+    }
     appStore.showSuccess(t("admin.groups.groupUpdated"));
     closeEditModal();
     loadGroups();

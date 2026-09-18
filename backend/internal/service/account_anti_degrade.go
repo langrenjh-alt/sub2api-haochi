@@ -380,7 +380,7 @@ func (s *AntiDegradeService) applyAntiDegradeMode(ctx context.Context, id int64,
 	if account.Concurrency > 0 {
 		targetConcurrency = account.Concurrency
 	}
-	extra[AntiDegradeMarkerExtraKey] = map[string]any{
+	marker := map[string]any{
 		"enabled": true,
 		"mode":    string(mode),
 		// Keep an explicit runtime cap in the marker for the legacy policy too;
@@ -389,6 +389,16 @@ func (s *AntiDegradeService) applyAntiDegradeMode(ctx context.Context, id int64,
 		"applied_at":      time.Now().UTC().Format(time.RFC3339),
 		"prev":            prev,
 	}
+	// 溯源：记录这次写入是不是分组收敛器发起的。分组预设关闭时只回滚带
+	// group 溯源的账号，管理员手工应用过同一策略的账号不会被误回滚。
+	if src := antiDegradeApplySourceFromContext(ctx); src.Kind != "" {
+		marker[antiDegradeMarkerSourceKey] = src.Kind
+		marker[antiDegradeMarkerSourcePresetKey] = string(mode)
+		if src.GroupID > 0 {
+			marker[antiDegradeMarkerSourceGroupID] = src.GroupID
+		}
+	}
+	extra[AntiDegradeMarkerExtraKey] = marker
 	extra[AntiDegradationExtraKey] = true
 	extra[ProtectionScopeExtraKey] = "legacy"
 	return s.admin.UpdateAccount(context.WithValue(ctx, mode1ManagedWriteKey{}, true), id, input)

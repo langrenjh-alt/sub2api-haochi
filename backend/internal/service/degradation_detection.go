@@ -13,20 +13,21 @@ import (
 // test types live in test_settings / account_tests, results are produced by the
 // AccountTestService runner, and only the scheduling translation is new.
 const (
-	// DegradationTestTypeProbe answers the candy question. The expected answer
+	// DegradationTestTypeProbe answers the configured numeric question. The expected answer
 	// is a fixed integer, so any other value means the account is degraded.
 	DegradationTestTypeProbe = "degradation_probe"
 	// DegradationTestTypePreview draws the pelican SVG shown on the public page.
 	DegradationTestTypePreview = "degradation_preview"
 )
 
-// DegradationExpectedAnswer is the candy problem's correct total. It is only a
+// DegradationExpectedAnswer is the candy probe's result. It is only a
 // default: a group may override it in its own degradation_detection_config,
 // and that override is the number both the runner and the suspend note use.
 const DegradationExpectedAnswer = "21"
 
 const (
 	DegradationDefaultModel          = "gpt-6-astra"
+	DegradationPreviewDefaultModel   = "gpt-6-astra"
 	DegradationProbeDefaultEffort    = "medium"
 	DegradationPreviewDefaultEffort  = "low"
 	DegradationDefaultIntervalMinute = 10
@@ -46,19 +47,14 @@ const (
 // lifted by the detector.
 const DegradationSuspendReasonPrefix = "降智检测"
 
-// DegradationCandyPrompt is the canonical probe question. It is duplicated as a
-// test_settings default by migration 241; that row only seeds the value, group
-// overrides and this constant are the fallbacks.
+// DegradationCandyPrompt retains its legacy name for compatibility. It is the
+// candy probe fallback; a group-specific prompt takes precedence.
+// Historical migration 241 is unchanged and does not define this default.
 const DegradationCandyPrompt = `在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）  形状 | 苹果味 | 桃子味 | 西瓜味 圆形 | 7 | 9 | 8 五角星形 | 7 | 6 | 4  不许联网，自己计算。只回答最少取出的糖果总数，使用一个整数，不要解释。`
 
-// DegradationPelicanPrompt asks for the public page artwork, including the same
-// candy question spoken by the pelican.
-const DegradationPelicanPrompt = `做一张精细的SVG图片，内容是鹈鹕骑着自行车在孙悟空开的大型飞机机翼上骑行，
-鹈鹕展开翅膀，上面托着秦始皇的北极熊，秦始皇骑在熊上打螺丝。鹈鹕喊出
-“在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求）
-苹果味 桃子味 西瓜味
-圆形 7 9 8
-五角星形 7 6 4”的结果数值  `
+// DegradationPelicanPrompt is the operator-requested artwork prompt, separate
+// from the numeric probe. The public renderer extracts a static SVG preview.
+const DegradationPelicanPrompt = "创建一个HTML，内容是SVG绘制一个 鹈鹕骑自行车的2D动画，不要看任何项目，不要联网，不要测试。  "
 
 // IsDegradationTestType reports whether a test type belongs to the detector.
 func IsDegradationTestType(testType string) bool {
@@ -110,6 +106,8 @@ type DegradationDetectionConfig struct {
 	Prompt                 string `json:"prompt,omitempty"`
 	TimeoutSeconds         int    `json:"timeout_seconds"`
 	SuspendMinute          int    `json:"suspend_minutes"`
+	MoveOnDegraded         bool   `json:"move_on_degraded"`
+	MoveTargetGroupID      int64  `json:"move_target_group_id"`
 	PreviewEnabled         bool   `json:"preview_enabled"`
 	PreviewIntervalMinute  int    `json:"preview_interval_minutes"`
 	PreviewModel           string `json:"preview_model"`
@@ -139,9 +137,21 @@ func NormalizeDegradationConfig(cfg DegradationDetectionConfig) DegradationDetec
 		cfg.ExpectedAnswer = DegradationExpectedAnswer
 	}
 	cfg.Prompt = strings.TrimSpace(cfg.Prompt)
+	// Upgrade the previous arithmetic preset, including its implicit prompt.
+	// Preserve other explicit questions and already queued snapshots.
+	if (cfg.Prompt == "" || cfg.Prompt == "计算 960 ÷ 2 × 10 ÷ 5，只回答数字。") && cfg.ExpectedAnswer == "960" {
+		cfg.Prompt = DegradationCandyPrompt
+		cfg.ExpectedAnswer = DegradationExpectedAnswer
+	}
+	// Restore the old model/effort pair only for the previous built-in preset.
+	// Explicit custom questions or other model/effort choices remain intact.
+	if (cfg.Prompt == "" || cfg.Prompt == DegradationCandyPrompt) && cfg.ExpectedAnswer == DegradationExpectedAnswer && cfg.Model == "gpt-5.6-sol" && cfg.ReasoningEffort == "max" {
+		cfg.Model = DegradationDefaultModel
+		cfg.ReasoningEffort = DegradationProbeDefaultEffort
+	}
 	cfg.PreviewModel = strings.TrimSpace(cfg.PreviewModel)
 	if cfg.PreviewModel == "" {
-		cfg.PreviewModel = DegradationDefaultModel
+		cfg.PreviewModel = DegradationPreviewDefaultModel
 	}
 	if cfg.PreviewIntervalMinute == 0 {
 		cfg.PreviewIntervalMinute = DegradationDefaultIntervalMinute
@@ -159,6 +169,9 @@ func NormalizeDegradationConfig(cfg DegradationDetectionConfig) DegradationDetec
 // than something NormalizeDegradationConfig would silently rewrite. Callers
 // therefore validate the raw payload first and the normalized result second.
 func ValidateDegradationConfig(cfg DegradationDetectionConfig) error {
+	if cfg.MoveTargetGroupID < 0 || (cfg.Enabled && cfg.MoveOnDegraded && cfg.MoveTargetGroupID == 0) {
+		return ErrDegradationMoveTargetInvalid
+	}
 	if cfg.IntervalMinute != 0 && (cfg.IntervalMinute < degradationMinIntervalMinute || cfg.IntervalMinute > degradationMaxIntervalMinute) {
 		return errors.New("检测间隔必须在 1-1440 分钟之间")
 	}
@@ -186,6 +199,11 @@ func ValidateDegradationConfig(cfg DegradationDetectionConfig) error {
 	if len([]rune(strings.TrimSpace(cfg.ExpectedAnswer))) > 200 {
 		return errors.New("标准答案不超过 200 字符")
 	}
+	if strings.TrimSpace(cfg.ExpectedAnswer) != "" {
+		if _, ok := normalizeIntelligentNumber(cfg.ExpectedAnswer, ""); !ok {
+			return errors.New("标准答案必须是有效数值")
+		}
+	}
 	if len([]rune(cfg.Prompt)) > degradationMaxPromptRunes {
 		return errors.New("提示词超过 16000 字符上限")
 	}
@@ -200,8 +218,9 @@ func ValidateDegradationConfig(cfg DegradationDetectionConfig) error {
 
 // Detector errors surfaced to the API layer.
 var (
-	ErrDegradationGroupNotFound = infraerrors.NotFound("DEGRADATION_GROUP_NOT_FOUND", "分组不存在")
-	ErrDegradationWorkNotFound  = infraerrors.NotFound("DEGRADATION_WORK_NOT_FOUND", "作品不存在")
+	ErrDegradationGroupNotFound     = infraerrors.NotFound("DEGRADATION_GROUP_NOT_FOUND", "分组不存在")
+	ErrDegradationWorkNotFound      = infraerrors.NotFound("DEGRADATION_WORK_NOT_FOUND", "作品不存在")
+	ErrDegradationMoveTargetInvalid = infraerrors.BadRequest("INVALID_DEGRADATION_MOVE_TARGET", "请选择其他有效分组作为降智后移入分组")
 )
 
 // DegradationGroup is one group's detector configuration plus its account count.
@@ -266,6 +285,7 @@ type DegradationPublicWork struct {
 
 // DegradationPublicPage is the public payload for /jiangzhijiance/.
 type DegradationPublicPage struct {
+	Enabled         bool                    `json:"enabled"`
 	Headline        string                  `json:"headline"`
 	Model           string                  `json:"model"`
 	ReasoningEffort string                  `json:"reasoning_effort"`
@@ -280,30 +300,48 @@ type DegradationPublicPage struct {
 
 // DegradationTimelineBucket is one time slice of probe verdicts. It is public,
 // so it carries counts only: no account id, no answer, no prompt.
+type DegradationSample struct {
+	ID           int64      `json:"id"`
+	Status       string     `json:"status"`
+	State        string     `json:"state"`
+	DurationMS   int64      `json:"duration_ms"`
+	OutputTokens *int64     `json:"output_tokens"`
+	Model        string     `json:"model"`
+	CreatedAt    time.Time  `json:"created_at"`
+	FinishedAt   *time.Time `json:"finished_at"`
+}
 type DegradationTimelineBucket struct {
-	Start        time.Time `json:"start"`
-	Total        int64     `json:"total"`
-	Correct      int64     `json:"correct"`
-	Degraded     int64     `json:"degraded"`
-	Undetermined int64     `json:"undetermined"`
+	Sample       *DegradationSample `json:"sample,omitempty"`
+	State        string             `json:"state,omitempty"`
+	Start        time.Time          `json:"start"`
+	Total        int64              `json:"total"`
+	Correct      int64              `json:"correct"`
+	Degraded     int64              `json:"degraded"`
+	Undetermined int64              `json:"undetermined"`
 }
 
 // DegradationTimeline is the health chart behind the public page: it answers
 // asks whether the model was degraded during the window, and it does so with
 // bucket counts only, never with account rows.
 type DegradationTimeline struct {
-	RangeHours   int                         `json:"range_hours"`
-	BucketMinute int                         `json:"bucket_minutes"`
-	GeneratedAt  time.Time                   `json:"generated_at"`
-	Total        int64                       `json:"total"`
-	Correct      int64                       `json:"correct"`
-	Degraded     int64                       `json:"degraded"`
-	Undetermined int64                       `json:"undetermined"`
-	HealthyRatio float64                     `json:"healthy_ratio"`
-	CurrentState string                      `json:"current_state"`
-	Suspended    int64                       `json:"suspended_accounts"`
-	LastProbeAt  *time.Time                  `json:"last_probe_at"`
-	Buckets      []DegradationTimelineBucket `json:"buckets"`
+	Mode            string                      `json:"mode,omitempty"`
+	IntervalMinutes int                         `json:"interval_minutes"`
+	NextProbeAt     *time.Time                  `json:"next_probe_at"`
+	LatestSample    *DegradationSample          `json:"latest_sample"`
+	Running         bool                        `json:"running"`
+	ResetAt         *time.Time                  `json:"reset_at"`
+	RangeHours      int                         `json:"range_hours"`
+	BucketMinute    int                         `json:"bucket_minutes"`
+	GeneratedAt     time.Time                   `json:"generated_at"`
+	Total           int64                       `json:"total"`
+	Correct         int64                       `json:"correct"`
+	Degraded        int64                       `json:"degraded"`
+	Undetermined    int64                       `json:"undetermined"`
+	HealthyRatio    float64                     `json:"healthy_ratio"`
+	CurrentState    string                      `json:"current_state"`
+	Suspended       int64                       `json:"suspended_accounts"`
+	LastProbeAt     *time.Time                  `json:"last_probe_at"`
+	Buckets         []DegradationTimelineBucket `json:"buckets"`
 }
 
 // DegradationWorkPage is the admin-facing artwork list. The public page is a
@@ -328,8 +366,8 @@ type DegradationRepository interface {
 	// configured number, so a verdict is always resolved against the same value
 	// the operator sees in the admin panel; an empty value falls back to the
 	// built-in default and the artwork kind ignores it entirely.
-	EnqueueDegradationTest(context.Context, int64, string, string, string, string, string, int) (int64, bool, error)
-	ApplyProbeOutcome(context.Context, int64, bool, int, string) (bool, error)
+	EnqueueDegradationTest(context.Context, int64, int64, string, string, string, string, string, int) (int64, bool, error)
+	ApplyProbeOutcome(context.Context, int64, int64, bool, int, string) (bool, error)
 
 	Overview(context.Context, int) (*DegradationOverview, error)
 	GroupConfig(context.Context, int64) (DegradationDetectionConfig, error)
@@ -338,10 +376,12 @@ type DegradationRepository interface {
 
 	PublicPage(context.Context, int, int) (*DegradationPublicPage, error)
 	Timeline(context.Context, int) (*DegradationTimeline, error)
+	ResetPublicStats(context.Context, int64) (time.Time, error)
 	Works(context.Context, int, int) (*DegradationWorkPage, error)
 	// DeleteWork removes one artwork from the public feed. Only artwork rows are
 	// ever matched, so a mistaken call cannot delete probe history.
 	DeleteWork(context.Context, int64) (bool, error)
 	PurgeWorks(context.Context) (int64, error)
 	PublicWork(context.Context, int64) (*DegradationPublicWork, error)
+	PublicAnimationSource(context.Context, int64) (string, error)
 }

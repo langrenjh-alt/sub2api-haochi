@@ -22342,6 +22342,7 @@ type GroupMutation struct {
 	messages_dispatch_model_config          *domain.OpenAIMessagesDispatchModelConfig
 	model_allowlist                         *domain.GroupModelAllowlist
 	codex_models_manifest_config            *domain.GroupCodexModelsManifestConfig
+	anti_degrade_preset                     *string
 	rpm_limit                               *int
 	addrpm_limit                            *int
 	max_reasoning_effort                    *string
@@ -25704,6 +25705,42 @@ func (m *GroupMutation) ResetCodexModelsManifestConfig() {
 	m.codex_models_manifest_config = nil
 }
 
+// SetAntiDegradePreset sets the "anti_degrade_preset" field.
+func (m *GroupMutation) SetAntiDegradePreset(s string) {
+	m.anti_degrade_preset = &s
+}
+
+// AntiDegradePreset returns the value of the "anti_degrade_preset" field in the mutation.
+func (m *GroupMutation) AntiDegradePreset() (r string, exists bool) {
+	v := m.anti_degrade_preset
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAntiDegradePreset returns the old "anti_degrade_preset" field's value of the Group entity.
+// If the Group object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMutation) OldAntiDegradePreset(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAntiDegradePreset is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAntiDegradePreset requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAntiDegradePreset: %w", err)
+	}
+	return oldValue.AntiDegradePreset, nil
+}
+
+// ResetAntiDegradePreset resets all changes to the "anti_degrade_preset" field.
+func (m *GroupMutation) ResetAntiDegradePreset() {
+	m.anti_degrade_preset = nil
+}
+
 // SetRpmLimit sets the "rpm_limit" field.
 func (m *GroupMutation) SetRpmLimit(i int) {
 	m.rpm_limit = &i
@@ -26389,7 +26426,7 @@ func (m *GroupMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMutation) Fields() []string {
-	fields := make([]string, 0, 73)
+	fields := make([]string, 0, 74)
 	if m.created_at != nil {
 		fields = append(fields, group.FieldCreatedAt)
 	}
@@ -26588,6 +26625,9 @@ func (m *GroupMutation) Fields() []string {
 	if m.codex_models_manifest_config != nil {
 		fields = append(fields, group.FieldCodexModelsManifestConfig)
 	}
+	if m.anti_degrade_preset != nil {
+		fields = append(fields, group.FieldAntiDegradePreset)
+	}
 	if m.rpm_limit != nil {
 		fields = append(fields, group.FieldRpmLimit)
 	}
@@ -26749,6 +26789,8 @@ func (m *GroupMutation) Field(name string) (ent.Value, bool) {
 		return m.ModelAllowlist()
 	case group.FieldCodexModelsManifestConfig:
 		return m.CodexModelsManifestConfig()
+	case group.FieldAntiDegradePreset:
+		return m.AntiDegradePreset()
 	case group.FieldRpmLimit:
 		return m.RpmLimit()
 	case group.FieldMaxReasoningEffort:
@@ -26904,6 +26946,8 @@ func (m *GroupMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldModelAllowlist(ctx)
 	case group.FieldCodexModelsManifestConfig:
 		return m.OldCodexModelsManifestConfig(ctx)
+	case group.FieldAntiDegradePreset:
+		return m.OldAntiDegradePreset(ctx)
 	case group.FieldRpmLimit:
 		return m.OldRpmLimit(ctx)
 	case group.FieldMaxReasoningEffort:
@@ -27388,6 +27432,13 @@ func (m *GroupMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetCodexModelsManifestConfig(v)
+		return nil
+	case group.FieldAntiDegradePreset:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAntiDegradePreset(v)
 		return nil
 	case group.FieldRpmLimit:
 		v, ok := value.(int)
@@ -28170,6 +28221,9 @@ func (m *GroupMutation) ResetField(name string) error {
 		return nil
 	case group.FieldCodexModelsManifestConfig:
 		m.ResetCodexModelsManifestConfig()
+		return nil
+	case group.FieldAntiDegradePreset:
+		m.ResetAntiDegradePreset()
 		return nil
 	case group.FieldRpmLimit:
 		m.ResetRpmLimit()

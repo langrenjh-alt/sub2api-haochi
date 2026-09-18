@@ -656,6 +656,8 @@ export interface AdminGroup extends Group {
   messages_dispatch_model_config?: OpenAIMessagesDispatchModelConfig
   model_allowlist?: ModelAllowlist
   codex_models_manifest_config?: CodexModelsManifestConfig
+  /** 分组统一防降智策略预设（策略注册表 ID）；空/未设置 = 不干预，各账号自管。 */
+  anti_degrade_preset?: string
 
   // 分组排序
   sort_order: number
@@ -843,6 +845,8 @@ export interface CreateGroupRequest {
   supported_model_scopes?: string[]
   model_allowlist?: ModelAllowlist
   codex_models_manifest_config?: CodexModelsManifestConfig
+  /** 分组统一防降智策略预设（策略注册表 ID）；空/未设置 = 不干预，各账号自管。 */
+  anti_degrade_preset?: string
   allow_messages_dispatch?: boolean
   allow_live?: boolean
   default_mapped_model?: string
@@ -913,6 +917,8 @@ export interface UpdateGroupRequest {
   supported_model_scopes?: string[]
   model_allowlist?: ModelAllowlist
   codex_models_manifest_config?: CodexModelsManifestConfig
+  /** 分组统一防降智策略预设（策略注册表 ID）；空/未设置 = 不干预，各账号自管。 */
+  anti_degrade_preset?: string
   allow_messages_dispatch?: boolean
   allow_live?: boolean
   default_mapped_model?: string
@@ -1529,6 +1535,56 @@ export interface GrokMediaEligibilityState {
   mode: GrokMediaEligibilityMode
   eligible: boolean
   reason: string
+}
+
+/**
+ * 防降智策略预设。服务端注册表是唯一来源（GET /admin/accounts/anti-degrade/strategies），
+ * 前端不再硬编码任何策略清单。
+ */
+export interface AntiDegradeStrategy {
+  id: string
+  name: string
+  description: string
+  category: string
+  identity_mode: string
+  tls_profile: string
+  max_concurrency: number
+  risk: string
+  apply_supported: boolean
+  requires_openai_oauth: boolean
+  diagnostic_only: boolean
+}
+
+/** 应用策略预设时将被改写的单项字段（预演用）。 */
+export interface AntiDegradeChange {
+  key: string
+  from?: unknown
+  to: unknown
+  note?: string
+}
+
+export interface AntiDegradePreview {
+  active_mode: string
+  policy_version: number
+  identity_ready: boolean
+  tls_profile: string
+  issues: string[]
+  account_id: number
+  enabled: boolean
+  eligible: boolean
+  reason?: string
+  changes: AntiDegradeChange[]
+}
+
+/** 账号上的防降智标记（accounts.extra.anti_degrade）的只读投影。 */
+export interface AntiDegradeMarker {
+  enabled?: boolean
+  mode?: string
+  max_concurrency?: number
+  applied_at?: string
+  source?: string
+  source_group_id?: number
+  source_preset?: string
 }
 
 export interface CheckMixedChannelRequest {

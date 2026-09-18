@@ -22,9 +22,6 @@ const (
 	// large group is still probed evenly, just slower than the nominal rate.
 	degradationMaxQueued    = 200
 	degradationOverviewRows = 200
-	// A failed artwork is retried after this long instead of waiting out the
-	// configured interval, so one bad account cannot leave the public page empty.
-	degradationPreviewRetryMinute = 1
 )
 
 // DegradationService owns the periodic probe, the public artwork schedule and
@@ -102,26 +99,45 @@ func (s *DegradationService) Tick(ctx context.Context) {
 		slog.Error("degradation detection group scan failed", "error", err)
 		return
 	}
+	// This OR signal is independent of probe results and queue capacity.
+	if monitor, ok := s.repo.(interface {
+		ApplyResponseModelDegradation(context.Context, int) (int, error)
+	}); ok {
+		if _, err := monitor.ApplyResponseModelDegradation(scanCtx, degradationTotalPerTick); err != nil {
+			slog.Error("degradation response-model scan failed", "error", err)
+		}
+	}
+	// A completed group sweep gets one independent random public observation.
+	// Queue it before the next sweep, without changing bulk detection policy.
+	if sampler, ok := s.repo.(interface{ SchedulePublicSamples(context.Context) error }); ok {
+		if err := sampler.SchedulePublicSamples(scanCtx); err != nil {
+			slog.Error("degradation public sample enqueue failed", "error", err)
+		}
+	}
+	// Reserve artwork slots before a large probe sweep can consume the budget.
+	if err := s.schedulePreview(scanCtx, groups); err != nil {
+		slog.Error("degradation preview enqueue failed", "error", err)
+	}
 	depth, err := s.repo.PendingQueueDepth(scanCtx)
 	if err != nil {
 		slog.Error("degradation detection queue depth probe failed", "error", err)
 	}
-	// A full backlog pauses probing only. The single artwork job keeps its own
-	// cadence so the public page never goes stale behind a busy probe queue.
-	backlogFull := err == nil && depth >= degradationMaxQueued
+	// Both job kinds share a bounded backlog; artwork was considered first.
+	backlogFull := err != nil || depth >= degradationMaxQueued
 	if backlogFull {
 		slog.Warn("degradation detection backlog is full; skipping probes this pass", "pending", depth)
 	}
 	queued := 0
+	budget := min(degradationTotalPerTick, degradationMaxQueued-depth)
 	for _, group := range groups {
 		if backlogFull {
 			break
 		}
-		if !group.Config.Enabled || ctx.Err() != nil || queued >= degradationTotalPerTick {
+		if !group.Config.Enabled || ctx.Err() != nil || queued >= budget {
 			continue
 		}
 		limit := degradationProbePerTick
-		if remaining := degradationTotalPerTick - queued; remaining < limit {
+		if remaining := budget - queued; remaining < limit {
 			limit = remaining
 		}
 		ids, err := s.repo.DueProbeAccountIDs(scanCtx, group.GroupID, group.Config.IntervalMinute, limit)
@@ -130,7 +146,7 @@ func (s *DegradationService) Tick(ctx context.Context) {
 			continue
 		}
 		for _, accountID := range ids {
-			created, err := s.enqueueProbe(scanCtx, accountID, group.Config)
+			created, err := s.enqueueProbe(scanCtx, group.GroupID, accountID, group.Config)
 			if err != nil {
 				slog.Error("degradation probe enqueue failed", "account_id", accountID, "error", err)
 				continue
@@ -140,88 +156,50 @@ func (s *DegradationService) Tick(ctx context.Context) {
 			}
 		}
 	}
-	if err := s.schedulePreview(scanCtx, groups); err != nil {
-		slog.Error("degradation preview enqueue failed", "error", err)
-	}
 }
 
-func (s *DegradationService) enqueueProbe(ctx context.Context, accountID int64, cfg DegradationDetectionConfig) (bool, error) {
+func (s *DegradationService) enqueueProbe(ctx context.Context, groupID, accountID int64, cfg DegradationDetectionConfig) (bool, error) {
 	prompt := strings.TrimSpace(cfg.Prompt)
 	if prompt == "" {
 		prompt = DegradationCandyPrompt
 	}
-	_, created, err := s.repo.EnqueueDegradationTest(ctx, accountID, DegradationTestTypeProbe, prompt, cfg.Model, cfg.ReasoningEffort, cfg.ExpectedAnswer, cfg.TimeoutSeconds)
+	_, created, err := s.repo.EnqueueDegradationTest(ctx, groupID, accountID, DegradationTestTypeProbe, prompt, cfg.Model, cfg.ReasoningEffort, cfg.ExpectedAnswer, cfg.TimeoutSeconds)
 	return created, err
 }
 
 // schedulePreview keeps the public page fed at its own interval, independent of
 // the probe interval and of any single account's verdict.
 func (s *DegradationService) schedulePreview(ctx context.Context, groups []DegradationGroup) error {
-	var cfg DegradationDetectionConfig
-	found := false
 	for _, group := range groups {
-		if group.Config.Enabled && group.Config.PreviewEnabled {
-			cfg = group.Config
-			found = true
-			break
+		cfg := group.Config
+		if !cfg.Enabled || !cfg.PreviewEnabled {
+			continue
+		}
+		depth, err := s.repo.PendingQueueDepth(ctx)
+		if err != nil {
+			return err
+		}
+		if depth >= degradationMaxQueued {
+			return nil
+		}
+		ids, err := s.repo.DuePreviewAccountIDs(ctx, []int64{group.GroupID}, cfg.PreviewIntervalMinute, 1)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if _, _, err := s.repo.EnqueueDegradationTest(ctx, group.GroupID, id, DegradationTestTypePreview, DegradationPelicanPrompt, cfg.PreviewModel, cfg.PreviewReasoningEffort, "", cfg.TimeoutSeconds); err != nil {
+				return err
+			}
 		}
 	}
-	if !found {
-		return nil
-	}
-	previewGroups, err := s.repo.PreviewGroups(ctx)
-	if err != nil {
-		return err
-	}
-	if len(previewGroups) == 0 {
-		return nil
-	}
-	due, err := s.previewDue(ctx, cfg.PreviewIntervalMinute)
-	if err != nil || !due {
-		return err
-	}
-	ids, err := s.repo.DuePreviewAccountIDs(ctx, previewGroups, cfg.PreviewIntervalMinute, 1)
-	if err != nil {
-		return err
-	}
-	// The artwork prompt is fixed by the feature: the group config customizes
-	// model, effort, interval and timeout, not the picture.
-	prompt := DegradationPelicanPrompt
-	for _, accountID := range ids {
-		// The artwork is graded by shape, not by a number, so no answer is passed.
-		_, _, err := s.repo.EnqueueDegradationTest(ctx, accountID, DegradationTestTypePreview, prompt, cfg.PreviewModel, cfg.PreviewReasoningEffort, "", cfg.TimeoutSeconds)
-		return err
-	}
 	return nil
-}
-
-// previewDue reports whether the newest artwork is older than the interval. A
-// queued or running job already counts as "not due" so the page never lags
-// behind a long request.
-func (s *DegradationService) previewDue(ctx context.Context, intervalMinutes int) (bool, error) {
-	page, err := s.repo.PublicPage(ctx, 1, 1)
-	if err != nil {
-		return false, err
-	}
-	// PreviewPage returns LastFinishedAt for terminal records only; the running
-	// guard is enforced by DuePreviewAccountIDs.
-	if page.LastFinishedAt == nil {
-		return true, nil
-	}
-	age := time.Since(*page.LastFinishedAt)
-	// A failed artwork must not hold the page empty for a whole interval: retry
-	// after a minute, on an account without a recent failure.
-	if page.LastStatus != "completed" {
-		return age >= time.Duration(degradationPreviewRetryMinute)*time.Minute, nil
-	}
-	return age >= time.Duration(intervalMinutes)*time.Minute, nil
 }
 
 // HandleIntelligentTestOutcome is the outcome hook installed on the intelligent
 // test service. Only a probe verdict that evaluators resolved to correct or
 // incorrect changes scheduling; undetermined results never touch an account.
 func (s *DegradationService) HandleIntelligentTestOutcome(ctx context.Context, record *IntelligentTestRecord) {
-	if s == nil || record == nil || record.TestType != DegradationTestTypeProbe || record.Evaluation == nil {
+	if s == nil || record == nil || record.TestType != DegradationTestTypeProbe || record.Evaluation == nil || record.ErrorMessage != "" {
 		return
 	}
 	verdict, _ := record.Evaluation["answer_verdict"].(string)
@@ -230,13 +208,23 @@ func (s *DegradationService) HandleIntelligentTestOutcome(ctx context.Context, r
 	}
 	handleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer cancel()
-	_, cfg, err := s.repo.AccountConfig(handleCtx, record.AccountID)
+	if record.ConfigSnapshot == nil || record.ConfigSnapshot.DegradationGroupID <= 0 {
+		return
+	}
+	if record.ConfigSnapshot.PublicSample {
+		return
+	}
+	groupID := record.ConfigSnapshot.DegradationGroupID
+	cfg, err := s.repo.GroupConfig(handleCtx, groupID)
 	if err != nil {
 		slog.Error("degradation outcome config lookup failed", "account_id", record.AccountID, "error", err)
 		return
 	}
+	if !cfg.Enabled {
+		return
+	}
 	if verdict == "correct" {
-		released, err := s.repo.ApplyProbeOutcome(handleCtx, record.AccountID, false, 0, "")
+		released, err := s.repo.ApplyProbeOutcome(handleCtx, record.AccountID, groupID, false, 0, "")
 		if err != nil {
 			slog.Error("degradation recovery failed", "account_id", record.AccountID, "error", err)
 			return
@@ -264,14 +252,14 @@ func (s *DegradationService) HandleIntelligentTestOutcome(ctx context.Context, r
 	if expected == "" {
 		expected = cfg.ExpectedAnswer
 	}
-	note := fmt.Sprintf("%s：答案 %s（应为 %s），暂停调度 %d 分钟", DegradationSuspendReasonPrefix, fallback(answer, "非整数"), fallback(expected, DegradationExpectedAnswer), minutes)
-	suspended, err := s.repo.ApplyProbeOutcome(handleCtx, record.AccountID, true, minutes, note)
+	note := fmt.Sprintf("%s[分组%d]：答案 %s（应为 %s），暂停调度 %d 分钟", DegradationSuspendReasonPrefix, groupID, fallback(answer, "非整数"), fallback(expected, DegradationExpectedAnswer), minutes)
+	applied, err := s.repo.ApplyProbeOutcome(handleCtx, record.AccountID, groupID, true, minutes, note)
 	if err != nil {
-		slog.Error("degradation suspension failed", "account_id", record.AccountID, "error", err)
+		slog.Error("degradation outcome policy failed", "account_id", record.AccountID, "error", err)
 		return
 	}
-	if suspended {
-		slog.Warn("degradation detection suspended account", "account_id", record.AccountID, "record_id", record.ID, "minutes", minutes)
+	if applied {
+		slog.Warn("degradation detection applied account policy", "account_id", record.AccountID, "record_id", record.ID)
 	}
 }
 
@@ -303,6 +291,9 @@ func (s *DegradationService) UpdateGroupConfig(ctx context.Context, actor, group
 	if err := ValidateDegradationConfig(normalized); err != nil {
 		return DegradationDetectionConfig{}, err
 	}
+	if normalized.Enabled && normalized.MoveOnDegraded && normalized.MoveTargetGroupID == groupID {
+		return DegradationDetectionConfig{}, ErrDegradationMoveTargetInvalid
+	}
 	if err := s.repo.UpdateGroupConfig(ctx, actor, groupID, normalized); err != nil {
 		return DegradationDetectionConfig{}, err
 	}
@@ -320,17 +311,22 @@ func (s *DegradationService) RunNow(ctx context.Context, groupID int64) (int, er
 	if err != nil {
 		return 0, err
 	}
+	depth, err := s.repo.PendingQueueDepth(ctx)
+	if err != nil {
+		return 0, err
+	}
+	budget := max(0, degradationMaxQueued-depth)
 	queued := 0
 	for _, group := range groups {
-		if !group.Config.Enabled || (groupID > 0 && group.GroupID != groupID) {
+		if queued >= budget || !group.Config.Enabled || (groupID > 0 && group.GroupID != groupID) {
 			continue
 		}
-		ids, err := s.repo.DueProbeAccountIDs(ctx, group.GroupID, 0, degradationProbePerTick)
+		ids, err := s.repo.DueProbeAccountIDs(ctx, group.GroupID, 0, min(degradationProbePerTick, budget-queued))
 		if err != nil {
 			return queued, err
 		}
 		for _, accountID := range ids {
-			created, err := s.enqueueProbe(ctx, accountID, group.Config)
+			created, err := s.enqueueProbe(ctx, group.GroupID, accountID, group.Config)
 			if err != nil {
 				return queued, err
 			}
@@ -378,6 +374,23 @@ func (s *DegradationService) PublicWork(ctx context.Context, id int64) (*Degrada
 	return work, nil
 }
 
+func (s *DegradationService) PublicAnimation(ctx context.Context, id int64) (*DegradationAnimation, error) {
+	source, err := s.repo.PublicAnimationSource(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	animation, err := PrepareDegradationAnimation(source)
+	if err == nil {
+		return animation, nil
+	}
+	// Legacy, truncated, or script-only documents still have their static image.
+	work, err := s.PublicWork(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return PrepareDegradationAnimation(work.Image)
+}
+
 func safePublicSVG(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""
@@ -392,7 +405,18 @@ func safePublicSVG(raw string) string {
 // Timeline returns the public health chart. Probe verdicts are the only public
 // statement about degradation, and they are reduced to per-bucket counts.
 func (s *DegradationService) Timeline(ctx context.Context, hours int) (*DegradationTimeline, error) {
+	if samples, ok := s.repo.(interface {
+		SampleTimeline(context.Context, int) (*DegradationTimeline, error)
+	}); ok {
+		return samples.SampleTimeline(ctx, hours)
+	}
 	return s.repo.Timeline(ctx, hours)
+}
+
+// ResetPublicStats starts a new public reporting period without touching
+// probe history, artwork, configuration, or account scheduling state.
+func (s *DegradationService) ResetPublicStats(ctx context.Context, actor int64) (time.Time, error) {
+	return s.repo.ResetPublicStats(ctx, actor)
 }
 
 // Works lists the artworks the public page renders. The portal is a curated

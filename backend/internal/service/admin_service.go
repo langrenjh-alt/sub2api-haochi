@@ -303,6 +303,9 @@ type CreateGroupInput struct {
 	ModelAllowlist              GroupModelAllowlist
 	// CodexModelsManifestConfig 固定账号 manifest 配置；创建路径禁止开启，仅编辑可配置。
 	CodexModelsManifestConfig GroupCodexModelsManifestConfig
+	// AntiDegradePreset 分组统一防降智策略预设；创建路径同样禁止设置，
+	// 账号绑定发生在创建之后，创建时无可收敛的成员。
+	AntiDegradePreset string
 	// RPMLimit 分组 RPM 上限（0 = 不限制）
 	RPMLimit int
 	// MaxReasoningEffort Anthropic/OpenAI 请求的推理强度上限，空字符串表示不限制。
@@ -391,6 +394,8 @@ type UpdateGroupInput struct {
 	ModelAllowlist              *GroupModelAllowlist
 	// CodexModelsManifestConfig nil 表示不修改；非 openai 平台会被归一化为关闭。
 	CodexModelsManifestConfig *GroupCodexModelsManifestConfig
+	// AntiDegradePreset nil 表示不修改；空字符串表示关闭分组预设（组内账号回滚到自身设置）。
+	AntiDegradePreset *string
 	// RPMLimit 分组 RPM 上限（0 = 不限制），nil 表示未提供不改动。
 	RPMLimit *int
 	// MaxReasoningEffort 空字符串表示清除上限；nil 表示未提供不改动。
